@@ -1,0 +1,102 @@
+# Hanzo CI/CD — reusable build + test + deploy, driven by the caller repo's root
+# hanzo.yml. Runs on our self-hosted arc runners; pulls registry + kubeconfig
+# creds from KMS via Universal Auth at run time. Public so any org can import it
+# with `uses: hanzoai/ci/.github/workflows/build.yml@v1` + `secrets: inherit`.
+#
+# The caller is ~7 lines (triggers + this `uses:`); all real config is hanzo.yml.
+name: Hanzo CI/CD
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: >-
+          Runner labels as a JSON array. Default = Hanzo cloud arc pool (we run
+          the build, metered as build minutes). Bring-your-own: pass the labels
+          of your own self-hosted arc runners instead.
+        type: string
+        default: '["self-hosted","linux","amd64"]'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  cicd:
+    runs-on: ${{ fromJson(inputs.runner) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch deploy credentials from KMS
+        id: kms
+        env:
+          KMS_CLIENT_ID: ${{ secrets.KMS_CLIENT_ID }}
+          KMS_CLIENT_SECRET: ${{ secrets.KMS_CLIENT_SECRET }}
+          KMS_ENDPOINT: ${{ vars.KMS_ENDPOINT || 'https://kms.hanzo.ai' }}
+          KMS_WORKSPACE: ${{ vars.KMS_WORKSPACE }}
+        run: |
+          set -euo pipefail
+          TOKEN=$(curl -sf "$KMS_ENDPOINT/api/v1/auth/universal-auth/login" \
+            -H 'Content-Type: application/json' \
+            -d "{\"clientId\":\"$KMS_CLIENT_ID\",\"clientSecret\":\"$KMS_CLIENT_SECRET\"}" | jq -r '.accessToken')
+          ENV="$(python3 -c "import yaml;print((yaml.safe_load(open('hanzo.yml')).get('kms') or {}).get('environment','prod'))")"
+          PATHQ="$(python3 -c "import yaml;print((yaml.safe_load(open('hanzo.yml')).get('kms') or {}).get('path','/deploy'))")"
+          SECRETS=$(curl -sf "$KMS_ENDPOINT/api/v3/secrets/raw?workspaceId=$KMS_WORKSPACE&secretPath=$PATHQ&environment=$ENV" \
+            -H "Authorization: Bearer $TOKEN")
+          get() { echo "$SECRETS" | jq -r ".secrets[]|select(.secretKey==\"$1\")|.secretValue // empty"; }
+          GHCR_USER=$(get GHCR_USER); GHCR_TOKEN=$(get GHCR_TOKEN); KUBECONFIG_B64=$(get KUBECONFIG)
+          : "${GHCR_USER:=${{ github.actor }}}"
+          if [ -z "$GHCR_TOKEN" ]; then echo "::error::GHCR_TOKEN not found in KMS"; exit 1; fi
+          echo "::add-mask::$GHCR_TOKEN"
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+          if [ -n "$KUBECONFIG_B64" ]; then echo "$KUBECONFIG_B64" | base64 -d > "$RUNNER_TEMP/kubeconfig"; echo "kubeconfig=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Build & push images (per hanzo.yml)
+        run: |
+          set -euo pipefail
+          SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
+          IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo 1 || echo 0)
+          VER="${{ github.ref_name }}"; VER="${VER#v}"
+          python3 -c "import yaml,json;print(json.dumps(yaml.safe_load(open('hanzo.yml'))['images']))" | jq -c '.[]' | while read -r img; do
+            name=$(echo "$img"|jq -r .name); ctx=$(echo "$img"|jq -r .context)
+            df=$(echo "$img"|jq -r '.dockerfile // (.context+"/Dockerfile")'); repo=$(echo "$img"|jq -r .repo)
+            sfx=$(echo "$img"|jq -r '."tag-suffix"')
+            TAGS="-t $repo:sha-${SHORT}-amd64-${sfx} -t $repo:${sfx}-latest"
+            [ "$IS_TAG" = 1 ] && TAGS="$TAGS -t $repo:${VER}-amd64-${sfx}"
+            echo "::group::build $name → $repo (${sfx})"
+            docker buildx build --platform linux/amd64 --push $TAGS -f "$df" "$ctx"
+            echo "::endgroup::"
+          done
+
+      - name: Test (per hanzo.yml)
+        run: |
+          set -euo pipefail
+          python3 -c "import yaml,json;print(json.dumps(yaml.safe_load(open('hanzo.yml')).get('test') or []))" | jq -c '.[]' | while read -r t; do
+            name=$(echo "$t"|jq -r .name); cmd=$(echo "$t"|jq -r .run)
+            echo "::group::test $name"; bash -c "$cmd"; echo "::endgroup::"
+          done
+
+      - name: Deploy (per hanzo.yml)
+        if: github.event_name != 'pull_request' && steps.kms.outputs.kubeconfig != ''
+        env:
+          KUBECONFIG: ${{ steps.kms.outputs.kubeconfig }}
+        run: |
+          set -euo pipefail
+          REF="${{ github.ref_name }}"
+          ON=$(python3 -c "import yaml,json;print(json.dumps((yaml.safe_load(open('hanzo.yml')).get('deploy') or {}).get('on') or []))")
+          IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo 1 || echo 0)
+          if [ "$IS_TAG" != 1 ] && ! echo "$ON" | jq -e --arg b "$REF" 'index($b)' >/dev/null; then
+            echo "branch $REF not in deploy.on — skipping deploy"; exit 0
+          fi
+          SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
+          NS=$(python3 -c "import yaml;print(yaml.safe_load(open('hanzo.yml'))['deploy']['namespace'])")
+          python3 -c "import yaml,json;print(json.dumps(yaml.safe_load(open('hanzo.yml'))['images']))" > /tmp/imgs.json
+          python3 -c "import yaml,json;print(json.dumps(yaml.safe_load(open('hanzo.yml'))['deploy']['services']))" | jq -c '.[]' | while read -r s; do
+            svc=$(echo "$s"|jq -r .name); imgname=$(echo "$s"|jq -r .image)
+            repo=$(jq -r --arg n "$imgname" '.[]|select(.name==$n)|.repo' /tmp/imgs.json)
+            sfx=$(jq -r --arg n "$imgname" '.[]|select(.name==$n)|."tag-suffix"' /tmp/imgs.json)
+            ref="$repo:sha-${SHORT}-amd64-${sfx}"
+            echo "rolling $svc → $ref"
+            kubectl -n "$NS" set image "deployment/$svc" "*=$ref"
+            kubectl -n "$NS" rollout status "deployment/$svc" --timeout=180s
+          done
