@@ -27,6 +27,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Private Go module access (luxfi/hanzoai/zooai)
+        # Any go-based `test:` step (or buildx --secret consumer) needs to fetch
+        # private github.com/{luxfi,hanzoai,zooai}/* modules; without auth `go`
+        # hits `git ls-remote … exit 128`. Wire GH_PAT via git insteadOf and set
+        # GOPRIVATE job-wide. No-op when GH_PAT is absent (non-Go repos).
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          if [ -n "${GH_PAT:-}" ]; then
+            git config --global url."https://x-access-token:${GH_PAT}@github.com/".insteadOf "https://github.com/"
+            echo "GOPRIVATE=github.com/luxfi,github.com/hanzoai,github.com/zooai" >> "$GITHUB_ENV"
+            echo "private-module git auth configured"
+          else
+            echo "GH_PAT not set — skipping (no private Go modules expected)"
+          fi
+
       - name: Fetch deploy credentials from KMS
         id: kms
         env:
