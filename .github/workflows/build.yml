@@ -27,6 +27,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Private Go module access (luxfi/hanzoai/zooai)
+        # Any go-based `test:` step needs to fetch private
+        # github.com/{luxfi,hanzoai,zooai}/* modules; without auth `go` hits
+        # `git ls-remote … exit 128`. No-op when GH_PAT is absent (non-Go repos).
+        #
+        # Robustness (learned the hard way in hanzoai/iam): a plain
+        # `git config --global` is defeated on shared self-hosted arc runners by
+        # (a) a stale insteadOf/credential left in ~/.gitconfig by a prior run and
+        # (b) actions/checkout's persisted http.<github>.extraheader (the repo-
+        # scoped GITHUB_TOKEN) in the checked-out repo's local config. So use a
+        # FRESH per-job GIT_CONFIG_GLOBAL + GIT_CONFIG_NOSYSTEM=1 and verify from
+        # a NEUTRAL dir (matches where go clones modules — GOMODCACHE).
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          if [ -z "${GH_PAT:-}" ]; then
+            echo "GH_PAT not set — skipping (no private Go modules expected)"; exit 0
+          fi
+          CFG="$RUNNER_TEMP/gitconfig-private"; : > "$CFG"
+          GIT_CONFIG_GLOBAL="$CFG" git config --global \
+            url."https://x-access-token:${GH_PAT}@github.com/".insteadOf "https://github.com/"
+          {
+            echo "GIT_CONFIG_GLOBAL=$CFG"
+            echo "GIT_CONFIG_NOSYSTEM=1"
+            echo "GOPRIVATE=github.com/luxfi,github.com/hanzoai,github.com/zooai"
+          } >> "$GITHUB_ENV"
+          ( cd "$RUNNER_TEMP" && GIT_CONFIG_GLOBAL="$CFG" GIT_CONFIG_NOSYSTEM=1 \
+              git ls-remote https://github.com/hanzoai/authz >/dev/null 2>&1 ) \
+            && echo "private-module git auth OK" \
+            || echo "::warning::GH_PAT set but private-repo probe failed — go-based tests may not fetch private modules"
+
       - name: Fetch deploy credentials from KMS
         id: kms
         env:
