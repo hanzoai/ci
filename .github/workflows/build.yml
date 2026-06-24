@@ -81,15 +81,18 @@ jobs:
             -d "{\"clientId\":\"$KMS_CLIENT_ID\",\"clientSecret\":\"$KMS_CLIENT_SECRET\"}" | jq -r '.accessToken // empty')
           if [ -z "$TOKEN" ]; then echo "::error::KMS login failed (org=$ORG client=$KMS_CLIENT_ID)"; exit 1; fi
           get() { curl -sf "$KMS_ENDPOINT/v1/kms/orgs/$ORG/secrets/$PATHQ/$1?env=$ENV" -H "Authorization: Bearer $TOKEN" | jq -r '.secret.value // empty'; }
-          GHCR_USER=$(get GHCR_USER); GHCR_TOKEN=$(get GHCR_TOKEN); KUBECONFIG_B64=$(get KUBECONFIG); GIT_TOKEN=$(get GIT_TOKEN)
+          # ONE GitHub token does both jobs — push to GHCR (write:packages) AND
+          # clone private Go modules (repo read). No split GHCR_TOKEN/GIT_TOKEN.
+          # (Shell var avoids the reserved GITHUB_ prefix; the KMS key is GITHUB_TOKEN.)
+          GHTOKEN=$(get GITHUB_TOKEN); GHCR_USER=$(get GHCR_USER); KUBECONFIG_B64=$(get KUBECONFIG)
           : "${GHCR_USER:=${{ github.actor }}}"
-          if [ -z "$GHCR_TOKEN" ]; then echo "::error::GHCR_TOKEN not found in KMS (org=$ORG path=/$PATHQ env=$ENV)"; exit 1; fi
-          echo "::add-mask::$GHCR_TOKEN"
-          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
-          # GIT_TOKEN (private Go module clone, e.g. luxfi/dex+luxfi/precompile) is
-          # handed to buildx as the `gh_token` secret in the build step. Masked +
-          # exported via GITHUB_ENV; empty → public-only modules.
-          if [ -n "$GIT_TOKEN" ]; then echo "::add-mask::$GIT_TOKEN"; echo "GIT_TOKEN=$GIT_TOKEN" >> "$GITHUB_ENV"; fi
+          if [ -z "$GHTOKEN" ]; then echo "::error::GITHUB_TOKEN not found in KMS (org=$ORG path=/$PATHQ env=$ENV)"; exit 1; fi
+          echo "::add-mask::$GHTOKEN"
+          echo "$GHTOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+          # Same token handed to buildx as the `gh_token` BuildKit secret so
+          # Dockerfiles clone private Go modules (luxfi/dex, luxfi/precompile).
+          # GIT_TOKEN is not a reserved name, so it's safe in GITHUB_ENV.
+          echo "GIT_TOKEN=$GHTOKEN" >> "$GITHUB_ENV"
           if [ -n "$KUBECONFIG_B64" ]; then echo "$KUBECONFIG_B64" | base64 -d > "$RUNNER_TEMP/kubeconfig"; echo "kubeconfig=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_OUTPUT"; fi
 
       - name: Build & push images (per hanzo.yml)
