@@ -58,6 +58,14 @@ jobs:
             && echo "private-module git auth OK" \
             || echo "::warning::GH_PAT set but private-repo probe failed — go-based tests may not fetch private modules"
 
+      - name: Log in to GHCR (automatic workflow token)
+        # GHCR push needs no stored credential: GitHub injects a per-job
+        # GITHUB_TOKEN scoped to THIS repo, and `permissions: packages: write`
+        # (above) lets it push the repo's own package (e.g. zooai/node →
+        # ghcr.io/zooai/node, same org). First push creates the package
+        # repo-linked. No KMS, no PAT for the push path.
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
       - name: Fetch deploy credentials from KMS
         id: kms
         env:
@@ -66,33 +74,37 @@ jobs:
           KMS_ENDPOINT: ${{ vars.KMS_ENDPOINT || 'https://kms.hanzo.ai' }}
           KMS_ORG: ${{ vars.KMS_ORG }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           # Canonical luxfi/kms surface — /v1/kms (the Infisical /api/* surface was
           # removed when KMS migrated to luxfi/kms, MPC-rooted). Auth = an IAM
           # client_credentials JWT minted by the per-org `<org>-kms` application;
           # secrets are org-scoped and fetched one at a time (no bulk /secrets/raw).
-          ORG="$(python3 -c "import yaml;print((yaml.safe_load(open('hanzo.yml')).get('kms') or {}).get('org','') )")"
-          : "${ORG:=${KMS_ORG}}"
-          ENV="$(python3 -c "import yaml;print((yaml.safe_load(open('hanzo.yml')).get('kms') or {}).get('environment','prod'))")"
-          PATHQ="$(python3 -c "import yaml;print((yaml.safe_load(open('hanzo.yml')).get('kms') or {}).get('path','/deploy').strip('/'))")"
-          if [ -z "$ORG" ]; then echo "::error::KMS org not set (hanzo.yml kms.org or KMS_ORG var)"; exit 1; fi
+          #
+          # This step is BEST-EFFORT: the automatic workflow token already
+          # authorizes GHCR push, so a repo with no cross-org private deps and no
+          # deploy can build without KMS. KMS provides only:
+          #   GITHUB_TOKEN — a cross-org PAT for cloning OTHER orgs' private Go
+          #     modules (luxfi/dex, luxfi/precompile from a zooai build), which the
+          #     repo-scoped automatic token cannot read. Handed to buildx as the
+          #     `gh_token` BuildKit secret.
+          #   KUBECONFIG  — cluster access for the deploy step.
+          ORG="$(python3 -c "import yaml;print((yaml.safe_load(open('hanzo.yml')).get('kms') or {}).get('org','') )" 2>/dev/null || true)"
+          : "${ORG:=${KMS_ORG:-}}"
+          ENV="$(python3 -c "import yaml;print((yaml.safe_load(open('hanzo.yml')).get('kms') or {}).get('environment','prod'))" 2>/dev/null || echo prod)"
+          PATHQ="$(python3 -c "import yaml;print((yaml.safe_load(open('hanzo.yml')).get('kms') or {}).get('path','/deploy').strip('/'))" 2>/dev/null || echo deploy)"
+          if [ -z "${KMS_CLIENT_ID:-}" ] || [ -z "$ORG" ]; then
+            echo "::notice::KMS not configured (no KMS_CLIENT_ID or org) — skipping; GHCR push uses the workflow token"; exit 0
+          fi
           TOKEN=$(curl -sf "$KMS_ENDPOINT/v1/kms/auth/login" \
             -H 'Content-Type: application/json' \
             -d "{\"clientId\":\"$KMS_CLIENT_ID\",\"clientSecret\":\"$KMS_CLIENT_SECRET\"}" | jq -r '.accessToken // empty')
-          if [ -z "$TOKEN" ]; then echo "::error::KMS login failed (org=$ORG client=$KMS_CLIENT_ID)"; exit 1; fi
+          if [ -z "$TOKEN" ]; then echo "::warning::KMS login failed (org=$ORG client=$KMS_CLIENT_ID) — cross-org private deps & deploy unavailable"; exit 0; fi
           get() { curl -sf "$KMS_ENDPOINT/v1/kms/orgs/$ORG/secrets/$PATHQ/$1?env=$ENV" -H "Authorization: Bearer $TOKEN" | jq -r '.secret.value // empty'; }
-          # ONE GitHub token does both jobs — push to GHCR (write:packages) AND
-          # clone private Go modules (repo read). No split GHCR_TOKEN/GIT_TOKEN.
-          # (Shell var avoids the reserved GITHUB_ prefix; the KMS key is GITHUB_TOKEN.)
-          GHTOKEN=$(get GITHUB_TOKEN); GHCR_USER=$(get GHCR_USER); KUBECONFIG_B64=$(get KUBECONFIG)
-          : "${GHCR_USER:=${{ github.actor }}}"
-          if [ -z "$GHTOKEN" ]; then echo "::error::GITHUB_TOKEN not found in KMS (org=$ORG path=/$PATHQ env=$ENV)"; exit 1; fi
-          echo "::add-mask::$GHTOKEN"
-          echo "$GHTOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
-          # Same token handed to buildx as the `gh_token` BuildKit secret so
-          # Dockerfiles clone private Go modules (luxfi/dex, luxfi/precompile).
+          # Cross-org private Go module read token → buildx `gh_token` secret.
           # GIT_TOKEN is not a reserved name, so it's safe in GITHUB_ENV.
-          echo "GIT_TOKEN=$GHTOKEN" >> "$GITHUB_ENV"
+          GIT_TOKEN=$(get GITHUB_TOKEN)
+          if [ -n "$GIT_TOKEN" ]; then echo "::add-mask::$GIT_TOKEN"; echo "GIT_TOKEN=$GIT_TOKEN" >> "$GITHUB_ENV"; fi
+          KUBECONFIG_B64=$(get KUBECONFIG)
           if [ -n "$KUBECONFIG_B64" ]; then echo "$KUBECONFIG_B64" | base64 -d > "$RUNNER_TEMP/kubeconfig"; echo "kubeconfig=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_OUTPUT"; fi
 
       - name: Build & push images (per hanzo.yml)
