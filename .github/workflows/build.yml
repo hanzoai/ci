@@ -64,22 +64,32 @@ jobs:
           KMS_CLIENT_ID: ${{ secrets.KMS_CLIENT_ID }}
           KMS_CLIENT_SECRET: ${{ secrets.KMS_CLIENT_SECRET }}
           KMS_ENDPOINT: ${{ vars.KMS_ENDPOINT || 'https://kms.hanzo.ai' }}
-          KMS_WORKSPACE: ${{ vars.KMS_WORKSPACE }}
+          KMS_ORG: ${{ vars.KMS_ORG }}
         run: |
           set -euo pipefail
-          TOKEN=$(curl -sf "$KMS_ENDPOINT/api/v1/auth/universal-auth/login" \
-            -H 'Content-Type: application/json' \
-            -d "{\"clientId\":\"$KMS_CLIENT_ID\",\"clientSecret\":\"$KMS_CLIENT_SECRET\"}" | jq -r '.accessToken')
+          # Canonical luxfi/kms surface — /v1/kms (the Infisical /api/* surface was
+          # removed when KMS migrated to luxfi/kms, MPC-rooted). Auth = an IAM
+          # client_credentials JWT minted by the per-org `<org>-kms` application;
+          # secrets are org-scoped and fetched one at a time (no bulk /secrets/raw).
+          ORG="$(python3 -c "import yaml;print((yaml.safe_load(open('hanzo.yml')).get('kms') or {}).get('org','') )")"
+          : "${ORG:=${KMS_ORG}}"
           ENV="$(python3 -c "import yaml;print((yaml.safe_load(open('hanzo.yml')).get('kms') or {}).get('environment','prod'))")"
-          PATHQ="$(python3 -c "import yaml;print((yaml.safe_load(open('hanzo.yml')).get('kms') or {}).get('path','/deploy'))")"
-          SECRETS=$(curl -sf "$KMS_ENDPOINT/api/v3/secrets/raw?workspaceId=$KMS_WORKSPACE&secretPath=$PATHQ&environment=$ENV" \
-            -H "Authorization: Bearer $TOKEN")
-          get() { echo "$SECRETS" | jq -r ".secrets[]|select(.secretKey==\"$1\")|.secretValue // empty"; }
-          GHCR_USER=$(get GHCR_USER); GHCR_TOKEN=$(get GHCR_TOKEN); KUBECONFIG_B64=$(get KUBECONFIG)
+          PATHQ="$(python3 -c "import yaml;print((yaml.safe_load(open('hanzo.yml')).get('kms') or {}).get('path','/deploy').strip('/'))")"
+          if [ -z "$ORG" ]; then echo "::error::KMS org not set (hanzo.yml kms.org or KMS_ORG var)"; exit 1; fi
+          TOKEN=$(curl -sf "$KMS_ENDPOINT/v1/kms/auth/login" \
+            -H 'Content-Type: application/json' \
+            -d "{\"clientId\":\"$KMS_CLIENT_ID\",\"clientSecret\":\"$KMS_CLIENT_SECRET\"}" | jq -r '.accessToken // empty')
+          if [ -z "$TOKEN" ]; then echo "::error::KMS login failed (org=$ORG client=$KMS_CLIENT_ID)"; exit 1; fi
+          get() { curl -sf "$KMS_ENDPOINT/v1/kms/orgs/$ORG/secrets/$PATHQ/$1?env=$ENV" -H "Authorization: Bearer $TOKEN" | jq -r '.secret.value // empty'; }
+          GHCR_USER=$(get GHCR_USER); GHCR_TOKEN=$(get GHCR_TOKEN); KUBECONFIG_B64=$(get KUBECONFIG); GIT_TOKEN=$(get GIT_TOKEN)
           : "${GHCR_USER:=${{ github.actor }}}"
-          if [ -z "$GHCR_TOKEN" ]; then echo "::error::GHCR_TOKEN not found in KMS"; exit 1; fi
+          if [ -z "$GHCR_TOKEN" ]; then echo "::error::GHCR_TOKEN not found in KMS (org=$ORG path=/$PATHQ env=$ENV)"; exit 1; fi
           echo "::add-mask::$GHCR_TOKEN"
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+          # GIT_TOKEN (private Go module clone, e.g. luxfi/dex+luxfi/precompile) is
+          # handed to buildx as the `gh_token` secret in the build step. Masked +
+          # exported via GITHUB_ENV; empty → public-only modules.
+          if [ -n "$GIT_TOKEN" ]; then echo "::add-mask::$GIT_TOKEN"; echo "GIT_TOKEN=$GIT_TOKEN" >> "$GITHUB_ENV"; fi
           if [ -n "$KUBECONFIG_B64" ]; then echo "$KUBECONFIG_B64" | base64 -d > "$RUNNER_TEMP/kubeconfig"; echo "kubeconfig=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_OUTPUT"; fi
 
       - name: Build & push images (per hanzo.yml)
@@ -95,7 +105,10 @@ jobs:
             TAGS="-t $repo:sha-${SHORT}-amd64-${sfx} -t $repo:${sfx}-latest"
             [ "$IS_TAG" = 1 ] && TAGS="$TAGS -t $repo:${VER}-amd64-${sfx}"
             echo "::group::build $name → $repo (${sfx})"
-            docker buildx build --platform linux/amd64 --push $TAGS -f "$df" "$ctx"
+            # GIT_TOKEN (from KMS, via GITHUB_ENV) is passed as the `gh_token`
+            # BuildKit secret so Dockerfiles can clone private Go modules; omitted
+            # cleanly when absent (public-only builds unaffected).
+            docker buildx build --platform linux/amd64 ${GIT_TOKEN:+--secret id=gh_token,env=GIT_TOKEN} --push $TAGS -f "$df" "$ctx"
             echo "::endgroup::"
           done
 
