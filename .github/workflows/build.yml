@@ -27,10 +27,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Private Go module access (luxfi/hanzoai/zooai)
-        # Any go-based `test:` step needs to fetch private
-        # github.com/{luxfi,hanzoai,zooai}/* modules; without auth `go` hits
-        # `git ls-remote … exit 128`. No-op when GH_PAT is absent (non-Go repos).
+      - name: Authenticated git for go modules (rate-limit + any private repo)
+        # luxfi/hanzoai/zooai Go modules are PUBLIC, so `go` resolves them through
+        # the default public proxy (proxy.golang.org) + checksum db (sum.golang.org)
+        # — canonical, IMMUTABLE hashes that a force-moved tag can no longer break.
+        # We deliberately do NOT set GOPRIVATE: that would route these public
+        # modules `direct` and bypass the sumdb, re-introducing the re-publish
+        # poisoning we just removed. This step only adds a GH_PAT git credential so
+        # the proxy's `direct` fallback (and any genuinely-private repo added later,
+        # via a narrow GOPRIVATE) authenticates instead of hitting the anon rate
+        # limit. No-op when GH_PAT is absent.
         #
         # Robustness (learned the hard way in hanzoai/iam): a plain
         # `git config --global` is defeated on shared self-hosted arc runners by
@@ -43,7 +49,7 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           if [ -z "${GH_PAT:-}" ]; then
-            echo "GH_PAT not set — skipping (no private Go modules expected)"; exit 0
+            echo "GH_PAT not set — public proxy+sumdb handles everything"; exit 0
           fi
           CFG="$RUNNER_TEMP/gitconfig-private"; : > "$CFG"
           GIT_CONFIG_GLOBAL="$CFG" git config --global \
@@ -51,12 +57,11 @@ jobs:
           {
             echo "GIT_CONFIG_GLOBAL=$CFG"
             echo "GIT_CONFIG_NOSYSTEM=1"
-            echo "GOPRIVATE=github.com/luxfi,github.com/hanzoai,github.com/zooai"
           } >> "$GITHUB_ENV"
           ( cd "$RUNNER_TEMP" && GIT_CONFIG_GLOBAL="$CFG" GIT_CONFIG_NOSYSTEM=1 \
               git ls-remote https://github.com/hanzoai/authz >/dev/null 2>&1 ) \
-            && echo "private-module git auth OK" \
-            || echo "::warning::GH_PAT set but private-repo probe failed — go-based tests may not fetch private modules"
+            && echo "git auth OK" \
+            || echo "::warning::GH_PAT set but repo probe failed"
 
       - name: Log in to GHCR (automatic workflow token)
         # GHCR push needs no stored credential: GitHub injects a per-job
