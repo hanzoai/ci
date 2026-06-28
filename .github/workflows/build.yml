@@ -116,9 +116,12 @@ jobs:
           python3 -c "import yaml,json;print(json.dumps(yaml.safe_load(open('hanzo.yml'))['images']))" | jq -c '.[]' | while read -r img; do
             name=$(echo "$img"|jq -r .name); ctx=$(echo "$img"|jq -r .context)
             df=$(echo "$img"|jq -r '.dockerfile // (.context+"/Dockerfile")'); repo=$(echo "$img"|jq -r .repo)
-            sfx=$(echo "$img"|jq -r '."tag-suffix"')
-            TAGS="-t $repo:sha-${SHORT}-amd64-${sfx} -t $repo:${sfx}-latest"
-            [ "$IS_TAG" = 1 ] && TAGS="$TAGS -t $repo:${VER}-amd64-${sfx}"
+            # tag-suffix is OPTIONAL (most repos ship a single variant). When set
+            # (e.g. "ce"/"ee") it qualifies every tag; when absent the tags are
+            # clean (no trailing dash). Build + deploy must agree on this shape.
+            sfx=$(echo "$img"|jq -r '."tag-suffix" // ""')
+            TAGS="-t $repo:sha-${SHORT}-amd64${sfx:+-$sfx} -t $repo:${sfx:+$sfx-}latest"
+            [ "$IS_TAG" = 1 ] && TAGS="$TAGS -t $repo:${VER}-amd64${sfx:+-$sfx}"
             echo "::group::build $name → $repo (${sfx})"
             # GIT_TOKEN (from KMS, via GITHUB_ENV) is passed as the `gh_token`
             # BuildKit secret so Dockerfiles can clone private Go modules; omitted
@@ -153,8 +156,8 @@ jobs:
           python3 -c "import yaml,json;print(json.dumps(yaml.safe_load(open('hanzo.yml'))['deploy']['services']))" | jq -c '.[]' | while read -r s; do
             svc=$(echo "$s"|jq -r .name); imgname=$(echo "$s"|jq -r .image)
             repo=$(jq -r --arg n "$imgname" '.[]|select(.name==$n)|.repo' /tmp/imgs.json)
-            sfx=$(jq -r --arg n "$imgname" '.[]|select(.name==$n)|."tag-suffix"' /tmp/imgs.json)
-            ref="$repo:sha-${SHORT}-amd64-${sfx}"
+            sfx=$(jq -r --arg n "$imgname" '.[]|select(.name==$n)|."tag-suffix" // ""' /tmp/imgs.json)
+            ref="$repo:sha-${SHORT}-amd64${sfx:+-$sfx}"
             echo "rolling $svc → $ref"
             kubectl -n "$NS" set image "deployment/$svc" "*=$ref"
             kubectl -n "$NS" rollout status "deployment/$svc" --timeout=180s
