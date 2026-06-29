@@ -1,3 +1,5 @@
+<p align="center"><img src=".github/hero.svg" alt="ci" width="880"></p>
+
 # hanzoai/ci
 
 One reusable CI/CD workflow for every Hanzo / Lux / Zoo repo. Build + test +
