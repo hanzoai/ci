@@ -98,6 +98,12 @@ jobs:
           KMS_ENDPOINT: ${{ vars.KMS_ENDPOINT || 'https://kms.hanzo.ai' }}
           KMS_ORG: ${{ vars.KMS_ORG }}
         run: |
+          # This step is BEST-EFFORT (see below): GHCR push already works via the
+          # workflow token, and deploy creds are optional. GitHub wraps `run:` in
+          # `bash -eo pipefail`, so we MUST explicitly `set +e` — otherwise an
+          # unguarded curl (e.g. a KMS secret 404 at this org/path) aborts the
+          # step and fails the whole build. Keep -u/-o pipefail; drop -e.
+          set +e
           set -uo pipefail
           # Canonical luxfi/kms surface — /v1/kms (the Infisical /api/* surface was
           # removed when KMS migrated to luxfi/kms, MPC-rooted). Auth = an IAM
