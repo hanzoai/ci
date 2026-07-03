@@ -15,7 +15,7 @@ on:
           the build, metered as build minutes). Bring-your-own: pass the labels
           of your own self-hosted arc runners instead.
         type: string
-        default: '["self-hosted","linux","amd64"]'
+        default: '["hanzo-build-linux-amd64"]'
 
 permissions:
   contents: read
