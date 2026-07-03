@@ -27,6 +27,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Provision parse toolchain (jq + PyYAML)
+        # This reusable parses the caller's hanzo.yml with python3 + PyYAML and
+        # slices JSON with jq. The stock arc runner image
+        # (ghcr.io/actions/actions-runner:latest) is minimal and ships NEITHER,
+        # so provision them here. Guarded (a no-op the moment a runner image bakes
+        # them in) — this keeps the reusable self-contained: any org can import it
+        # onto a bare runner and it just works.
+        run: |
+          set -e
+          need=0
+          python3 -c 'import yaml' 2>/dev/null || need=1
+          command -v jq >/dev/null 2>&1 || need=1
+          if [ "$need" = 1 ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq python3-yaml jq
+          fi
+          python3 -c 'import yaml; print("PyYAML", yaml.__version__)'
+          jq --version
+
       - name: Authenticated git for go modules (rate-limit + any private repo)
         # luxfi/hanzoai/zooai Go modules are PUBLIC, so `go` resolves them through
         # the default public proxy (proxy.golang.org) + checksum db (sum.golang.org)
