@@ -138,8 +138,19 @@ jobs:
           if [ -n "$KUBECONFIG_B64" ]; then echo "$KUBECONFIG_B64" | base64 -d > "$RUNNER_TEMP/kubeconfig"; echo "kubeconfig=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_OUTPUT"; fi
 
       - name: Build & push images (per hanzo.yml)
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           set -euo pipefail
+          # Build-time private cross-org Go module read (the buildx `gh_token`
+          # secret): prefer the KMS-fetched GIT_TOKEN, else fall back to the org
+          # GH_PAT — the SAME BuildKit gh_token cloud's release.yml uses (proven
+          # working). Keeps image builds green when the KMS deploy-cred fetch is
+          # unavailable (a repo with a private cross-org dep like hanzoai/cloud
+          # otherwise fails `go mod tidy` with git exit 128 in the buildx stage).
+          # No-op for public-only builds when both are empty. Exported so the
+          # `--secret id=gh_token,env=GIT_TOKEN` below reads it from the env.
+          export GIT_TOKEN="${GIT_TOKEN:-${GH_PAT:-}}"
           SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
           IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo 1 || echo 0)
           VER="${{ github.ref_name }}"; VER="${VER#v}"
