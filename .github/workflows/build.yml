@@ -16,6 +16,18 @@ on:
           of your own self-hosted arc runners instead.
         type: string
         default: '["hanzo-build-linux-amd64"]'
+      mode:
+        description: >-
+          Build execution mode. `buildx` (default) runs the full buildx →
+          test → deploy pipeline ON the arc runner. `delegate` instead POSTs the
+          build to platform.hanzo.ai (`/v1/arcd/enqueue`) — platform builds
+          in-cluster with BuildKit and rolls the operator Service CR itself, so
+          the GitHub job finishes in seconds with no runner buildx. A repo opts
+          in by passing `with: { mode: delegate }`; everything else is unchanged.
+          Requires the `PLATFORM_BUILD_CALLBACK_TOKEN` secret (via secrets:
+          inherit).
+        type: string
+        default: buildx
 
 permissions:
   contents: read
@@ -46,7 +58,57 @@ jobs:
           python3 -c 'import yaml; print("PyYAML", yaml.__version__)'
           jq --version
 
+      - name: Delegate build to platform (mode=delegate)
+        # The GHA-escape fast path: instead of running buildx on this runner, POST
+        # each image in hanzo.yml to platform.hanzo.ai's direct-enqueue webhook
+        # (`/v1/arcd/enqueue`). Platform creates a build_job row, launches an
+        # in-cluster BuildKit Job on its own pool, pushes to the registry, and —
+        # for a system service — patches the operator Service CR to roll it. The
+        # downstream is IDENTICAL to the platform GitHub-App webhook path (one
+        # build path, two front doors), so a delegated build behaves exactly like
+        # a platform-native one. This job then exits in seconds — no buildx, no
+        # KMS, no runner-side deploy.
+        if: inputs.mode == 'delegate'
+        env:
+          ENQUEUE_URL: ${{ vars.PLATFORM_ENQUEUE_URL || 'https://platform.hanzo.ai/v1/arcd/enqueue' }}
+          ENQUEUE_TOKEN: ${{ secrets.PLATFORM_BUILD_CALLBACK_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ENQUEUE_TOKEN:-}" ]; then
+            echo "::error::mode=delegate needs the PLATFORM_BUILD_CALLBACK_TOKEN secret (secrets: inherit)"; exit 1
+          fi
+          REPO="${{ github.repository }}"
+          SHA="${{ github.sha }}"
+          SHORT=$(echo "$SHA" | cut -c1-7)
+          REF="${{ github.ref }}"
+          BRANCH="${{ github.ref_name }}"
+          # One enqueue per (image, platform), mirroring the buildx tag shape the
+          # deploy path expects (`sha-<short>-<arch>[-<suffix>]`). Default arch is
+          # amd64 (single-arch), so an existing repo's tag shape is unchanged.
+          python3 -c "import yaml,json;print(json.dumps(yaml.safe_load(open('hanzo.yml'))['images']))" | jq -c '.[]' | while read -r img; do
+            name=$(echo "$img"|jq -r .name); repo=$(echo "$img"|jq -r .repo)
+            ctx=$(echo "$img"|jq -r .context); df=$(echo "$img"|jq -r '.dockerfile // (.context+"/Dockerfile")')
+            sfx=$(echo "$img"|jq -r '."tag-suffix" // ""')
+            echo "$img" | jq -r '(.platforms // ["linux/amd64"])[]' | while read -r plat; do
+              arch="${plat##*/}"
+              image="${repo}:sha-${SHORT}-${arch}${sfx:+-$sfx}"
+              body=$(jq -nc \
+                --arg repo "$REPO" --arg sha "$SHA" --arg image "$image" \
+                --arg ref "$REF" --arg branch "$BRANCH" \
+                --arg dockerfile "$df" --arg context "$ctx" --arg arch "$arch" \
+                '{repo:$repo,sha:$sha,image:$image,ref:$ref,branch:$branch,dockerfile:$dockerfile,context:$context,os:"linux",arch:$arch}')
+              echo "::group::delegate $name → $image"
+              code=$(curl -sS -o /tmp/enqueue.out -w '%{http_code}' -X POST "$ENQUEUE_URL" \
+                -H "Authorization: Bearer $ENQUEUE_TOKEN" -H 'Content-Type: application/json' -d "$body")
+              cat /tmp/enqueue.out; echo
+              # 202 Accepted = queued; 409 = no live runner for the pool (surface it loud).
+              if [ "$code" != "202" ]; then echo "::error::enqueue $image failed (HTTP $code)"; exit 1; fi
+              echo "::endgroup::"
+            done
+          done
+
       - name: Authenticated git for go modules (rate-limit + any private repo)
+        if: inputs.mode != 'delegate'
         # luxfi/hanzoai/zooai Go modules are PUBLIC, so `go` resolves them through
         # the default public proxy (proxy.golang.org) + checksum db (sum.golang.org)
         # — canonical, IMMUTABLE hashes that a force-moved tag can no longer break.
@@ -83,6 +145,7 @@ jobs:
             || echo "::warning::GH_PAT set but repo probe failed"
 
       - name: Log in to GHCR (automatic workflow token)
+        if: inputs.mode != 'delegate'
         # GHCR push needs no stored credential: GitHub injects a per-job
         # GITHUB_TOKEN scoped to THIS repo, and `permissions: packages: write`
         # (above) lets it push the repo's own package (e.g. zooai/node →
@@ -92,6 +155,7 @@ jobs:
 
       - name: Fetch deploy credentials from KMS
         id: kms
+        if: inputs.mode != 'delegate'
         env:
           KMS_CLIENT_ID: ${{ secrets.KMS_CLIENT_ID }}
           KMS_CLIENT_SECRET: ${{ secrets.KMS_CLIENT_SECRET }}
@@ -138,6 +202,7 @@ jobs:
           if [ -n "$KUBECONFIG_B64" ]; then echo "$KUBECONFIG_B64" | base64 -d > "$RUNNER_TEMP/kubeconfig"; echo "kubeconfig=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_OUTPUT"; fi
 
       - name: Build & push images (per hanzo.yml)
+        if: inputs.mode != 'delegate'
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
@@ -190,6 +255,7 @@ jobs:
           done
 
       - name: Test (per hanzo.yml)
+        if: inputs.mode != 'delegate'
         run: |
           set -euo pipefail
           python3 -c "import yaml,json;print(json.dumps(yaml.safe_load(open('hanzo.yml')).get('test') or []))" | jq -c '.[]' | while read -r t; do
@@ -198,7 +264,7 @@ jobs:
           done
 
       - name: Deploy (per hanzo.yml)
-        if: github.event_name != 'pull_request' && steps.kms.outputs.kubeconfig != ''
+        if: inputs.mode != 'delegate' && github.event_name != 'pull_request' && steps.kms.outputs.kubeconfig != ''
         env:
           KUBECONFIG: ${{ steps.kms.outputs.kubeconfig }}
         run: |
