@@ -150,13 +150,31 @@ jobs:
             # (e.g. "ce"/"ee") it qualifies every tag; when absent the tags are
             # clean (no trailing dash). Build + deploy must agree on this shape.
             sfx=$(echo "$img"|jq -r '."tag-suffix" // ""')
-            TAGS="-t $repo:sha-${SHORT}-amd64${sfx:+-$sfx} -t $repo:${sfx:+$sfx-}latest"
-            [ "$IS_TAG" = 1 ] && TAGS="$TAGS -t $repo:${VER}-amd64${sfx:+-$sfx}"
-            echo "::group::build $name → $repo (${sfx})"
+            # platforms is OPT-IN per image in hanzo.yml (default: amd64 only, so
+            # every existing repo's tag shape "-amd64" is UNCHANGED). Set e.g.
+            #   platforms: [linux/amd64, linux/arm64]
+            # to emit a multi-arch MANIFEST LIST — one digest serving both arches.
+            # DOKS has no arm64 nodes, so arm64 builds via buildx QEMU emulation
+            # (binfmt set up below); pure-Go (CGO_ENABLED=0) Dockerfiles that honor
+            # $TARGETARCH cross-compile natively (fast, no emulation). For true
+            # native-speed arm64, register a bare-metal arm64 host (spark/GB10) as
+            # the hanzo-build-linux-arm64 self-hosted runner (values-build-arm64.yaml).
+            plats=$(echo "$img"|jq -r '(.platforms // ["linux/amd64"]) | join(",")')
+            if [ "$plats" = "linux/amd64" ]; then
+              # single-arch: keep the exact legacy tag shape (-amd64) deploys expect.
+              TAGS="-t $repo:sha-${SHORT}-amd64${sfx:+-$sfx} -t $repo:${sfx:+$sfx-}latest"
+              [ "$IS_TAG" = 1 ] && TAGS="$TAGS -t $repo:${VER}-amd64${sfx:+-$sfx}"
+            else
+              # multi-arch: one arch-neutral manifest-list tag (no -amd64 suffix).
+              docker run --privileged --rm tonistiigi/binfmt --install arm64 >/dev/null 2>&1 || true
+              TAGS="-t $repo:sha-${SHORT}${sfx:+-$sfx} -t $repo:${sfx:+$sfx-}latest"
+              [ "$IS_TAG" = 1 ] && TAGS="$TAGS -t $repo:${VER}${sfx:+-$sfx}"
+            fi
+            echo "::group::build $name → $repo (${sfx}) [$plats]"
             # GIT_TOKEN (from KMS, via GITHUB_ENV) is passed as the `gh_token`
             # BuildKit secret so Dockerfiles can clone private Go modules; omitted
             # cleanly when absent (public-only builds unaffected).
-            docker buildx build --platform linux/amd64 ${GIT_TOKEN:+--secret id=gh_token,env=GIT_TOKEN} --push $TAGS -f "$df" "$ctx"
+            docker buildx build --platform "$plats" ${GIT_TOKEN:+--secret id=gh_token,env=GIT_TOKEN} --push $TAGS -f "$df" "$ctx"
             echo "::endgroup::"
           done
 
