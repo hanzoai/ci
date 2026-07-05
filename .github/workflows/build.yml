@@ -292,6 +292,28 @@ jobs:
         if: inputs.mode != 'delegate' && hashFiles('go.mod') != ''
         run: command -v gcc >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq gcc; }
 
+      - name: Authenticate runner git for private Go modules (test gates)
+        # The Test step runs `go vet`/`go test` ON the runner (not in buildx), so
+        # `go` fetches private hanzoai/* modules (GOPRIVATE → direct) through the
+        # runner's git, which needs a credential. The IMAGE build authenticates
+        # via the KMS `gh_token` inside buildx (GIT_TOKEN); the earlier GH_PAT
+        # git-auth step is a no-op for repos that rely on that KMS token (GH_PAT
+        # unset) — so `go vet` dies with `could not read Username for github.com`.
+        # Reuse the SAME token here for the runner's git (GIT_TOKEN, set by the
+        # KMS step above; GH_PAT fallback). No-op when neither is present.
+        if: inputs.mode != 'delegate' && hashFiles('go.mod') != ''
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          set -uo pipefail
+          TOKEN="${GIT_TOKEN:-${GH_PAT:-}}"
+          if [ -z "$TOKEN" ]; then echo "no git token — public modules only"; exit 0; fi
+          CFG="$RUNNER_TEMP/gitconfig-go-test"; : > "$CFG"
+          GIT_CONFIG_GLOBAL="$CFG" git config --global \
+            url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+          { echo "GIT_CONFIG_GLOBAL=$CFG"; echo "GIT_CONFIG_NOSYSTEM=1"; } >> "$GITHUB_ENV"
+          echo "runner git authenticated for private Go modules"
+
       - name: Test (per hanzo.yml)
         if: inputs.mode != 'delegate'
         run: |
