@@ -184,6 +184,22 @@ jobs:
           #   KUBECONFIG  — cluster access for the deploy step.
           ORG="$(python3 -c "import yaml;print((yaml.safe_load(open('hanzo.yml')).get('kms') or {}).get('org','') )" 2>/dev/null || true)"
           : "${ORG:=${KMS_ORG:-}}"
+          # Systemic default: when neither hanzo.yml `kms.org` nor the KMS_ORG var
+          # is set, derive the KMS org from the GitHub owner. The org → KMS-org
+          # relation is a small, stable first-party fact; keeping it here (ONE
+          # place) is why every repo gets the canonical KMS deploy-cred path with
+          # zero per-repo config — before this, ORG was always empty and this whole
+          # step short-circuited, so no build ever fetched its private-dep git
+          # credential from KMS (it silently fell back to GH_PAT and failed on
+          # private hanzoai/cloud). hanzo.yml `kms.org` and KMS_ORG still override.
+          if [ -z "$ORG" ]; then
+            case "${{ github.repository_owner }}" in
+              hanzoai) ORG=hanzo ;;
+              luxfi)   ORG=lux ;;
+              zooai)   ORG=zoo ;;
+              *)       ORG="${{ github.repository_owner }}" ;;
+            esac
+          fi
           ENV="$(python3 -c "import yaml;print((yaml.safe_load(open('hanzo.yml')).get('kms') or {}).get('environment','prod'))" 2>/dev/null || echo prod)"
           PATHQ="$(python3 -c "import yaml;print((yaml.safe_load(open('hanzo.yml')).get('kms') or {}).get('path','/deploy').strip('/'))" 2>/dev/null || echo deploy)"
           if [ -z "${KMS_CLIENT_ID:-}" ] || [ -z "$ORG" ]; then
