@@ -270,6 +270,28 @@ jobs:
             echo "::endgroup::"
           done
 
+      - name: Provision Go toolchain (go test gates on bare runners)
+        # hanzo.yml `test:` gates (e.g. `go vet ./...`, `go test ...`) run
+        # DIRECTLY on the runner, NOT inside a build container — but the stock
+        # arc runner image (ghcr.io/actions/actions-runner) ships no Go, so a Go
+        # gate dies with `go: command not found` (exit 127). Provision the repo's
+        # OWN Go version from go.mod so the toolchain matches the module exactly.
+        # Guarded to Go repos (go.mod present) so pure-JS/TS callers are
+        # unaffected; harmless if a future runner image bakes Go in.
+        if: inputs.mode != 'delegate' && hashFiles('go.mod') != ''
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Provision C toolchain (cgo test gates)
+        # CGO_ENABLED=1 gates (e.g. go-sqlite3, which bundles the sqlite
+        # amalgamation) need a C compiler; the minimal arc runner ships none
+        # (`cgo: gcc not found`). Same guarded provision the parse-toolchain step
+        # above uses — a no-op when gcc is already present.
+        if: inputs.mode != 'delegate' && hashFiles('go.mod') != ''
+        run: command -v gcc >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq gcc; }
+
       - name: Test (per hanzo.yml)
         if: inputs.mode != 'delegate'
         run: |
