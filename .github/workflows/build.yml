@@ -320,6 +320,22 @@ jobs:
           { echo "GIT_CONFIG_GLOBAL=$CFG"; echo "GIT_CONFIG_NOSYSTEM=1"; } >> "$GITHUB_ENV"
           echo "runner git authenticated for private Go modules"
 
+      - name: Provision Node toolchain (JS/TS test gates on bare runners)
+        # hanzo.yml `test:` gates for a JS/TS repo (e.g. `pnpm lint`, `npm test`)
+        # run DIRECTLY on the runner via corepack/pnpm/npm — but the minimal arc
+        # runner image (ghcr.io/actions/actions-runner) ships no user-PATH Node (its
+        # bundled node is for the runner's own action execution only), so the gate
+        # dies with `corepack: command not found` (exit 127). Provision Node so the
+        # gate runs — the JS twin of the Go-toolchain provision above. Guarded to
+        # repos with a package.json so non-JS callers are unaffected; harmless if a
+        # future runner image bakes Node in. Pins current LTS (22 — fine for a
+        # lint/test gate regardless of the app's runtime pin); corepack then
+        # activates the exact pnpm/npm the gate requests.
+        if: inputs.mode != 'delegate' && hashFiles('package.json') != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Test (per hanzo.yml)
         if: inputs.mode != 'delegate'
         run: |
