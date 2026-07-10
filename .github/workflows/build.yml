@@ -85,7 +85,7 @@ jobs:
           # One enqueue per (image, platform), mirroring the buildx tag shape the
           # deploy path expects (`sha-<short>-<arch>[-<suffix>]`). Default arch is
           # amd64 (single-arch), so an existing repo's tag shape is unchanged.
-          python3 -c "import yaml,json;print(json.dumps(yaml.safe_load(open('hanzo.yml'))['images']))" | jq -c '.[]' | while read -r img; do
+          python3 -c "import yaml,json;print(json.dumps(yaml.safe_load(open('hanzo.yml')).get('images') or []))" | jq -c '.[]' | while read -r img; do
             name=$(echo "$img"|jq -r .name); repo=$(echo "$img"|jq -r .repo)
             ctx=$(echo "$img"|jq -r .context); df=$(echo "$img"|jq -r '.dockerfile // (.context+"/Dockerfile")')
             sfx=$(echo "$img"|jq -r '."tag-suffix" // ""')
@@ -223,6 +223,12 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           set -euo pipefail
+          # `images:` is OPTIONAL. A repo that ships no container image — e.g. a
+          # static site deployed via Cloudflare Pages (its own deploy.yml), which
+          # imports this reusable purely for the `test:` lint gate — omits the key
+          # entirely. `.get('images') or []` yields an empty list, the loop below
+          # runs zero times, and no cross-org GHCR push is attempted (so a repo in
+          # a different GitHub org never hits `denied: permission_denied`).
           # Build-time private cross-org Go module read (the buildx `gh_token`
           # secret): prefer the KMS-fetched GIT_TOKEN, else fall back to the org
           # GH_PAT — the SAME BuildKit gh_token cloud's release.yml uses (proven
@@ -235,7 +241,7 @@ jobs:
           SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
           IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo 1 || echo 0)
           VER="${{ github.ref_name }}"; VER="${VER#v}"
-          python3 -c "import yaml,json;print(json.dumps(yaml.safe_load(open('hanzo.yml'))['images']))" | jq -c '.[]' | while read -r img; do
+          python3 -c "import yaml,json;print(json.dumps(yaml.safe_load(open('hanzo.yml')).get('images') or []))" | jq -c '.[]' | while read -r img; do
             name=$(echo "$img"|jq -r .name); ctx=$(echo "$img"|jq -r .context)
             df=$(echo "$img"|jq -r '.dockerfile // (.context+"/Dockerfile")'); repo=$(echo "$img"|jq -r .repo)
             # tag-suffix is OPTIONAL (most repos ship a single variant). When set
@@ -337,7 +343,7 @@ jobs:
           fi
           SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
           NS=$(python3 -c "import yaml;print(yaml.safe_load(open('hanzo.yml'))['deploy']['namespace'])")
-          python3 -c "import yaml,json;print(json.dumps(yaml.safe_load(open('hanzo.yml'))['images']))" > /tmp/imgs.json
+          python3 -c "import yaml,json;print(json.dumps(yaml.safe_load(open('hanzo.yml')).get('images') or []))" > /tmp/imgs.json
           python3 -c "import yaml,json;print(json.dumps(yaml.safe_load(open('hanzo.yml'))['deploy']['services']))" | jq -c '.[]' | while read -r s; do
             svc=$(echo "$s"|jq -r .name); imgname=$(echo "$s"|jq -r .image)
             repo=$(jq -r --arg n "$imgname" '.[]|select(.name==$n)|.repo' /tmp/imgs.json)
