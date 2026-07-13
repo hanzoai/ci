@@ -61,9 +61,12 @@ jobs:
             || { sudo apt-get update -qq && sudo apt-get install -y -qq jq; }
           fi
           if ! python3 -c 'import yaml' 2>/dev/null; then
+            # sudo is blocked on arc nodes (no_new_privs) and pip may be absent —
+            # bootstrap pip with ensurepip, then --user install (no sudo, no apt).
+            python3 -m ensurepip --user 2>/dev/null || true
             python3 -m pip install --user --quiet pyyaml 2>/dev/null \
             || pip3 install --user --quiet pyyaml 2>/dev/null \
-            || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
+            || pip install --user --quiet pyyaml 2>/dev/null || true
           fi
           python3 -c 'import yaml; print("PyYAML", yaml.__version__)'
           jq --version
