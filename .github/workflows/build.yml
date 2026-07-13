@@ -48,12 +48,22 @@ jobs:
         # onto a bare runner and it just works.
         run: |
           set -e
-          need=0
-          python3 -c 'import yaml' 2>/dev/null || need=1
-          command -v jq >/dev/null 2>&1 || need=1
-          if [ "$need" = 1 ]; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq python3-yaml jq
+          # Sudo-free FIRST (bare arc nodes often lack passwordless sudo / apt
+          # network — `sudo apt-get` then dies with no captured logs). Install jq
+          # as a static binary and PyYAML via pip --user into ~/.local/bin; fall
+          # back to apt only if those are unavailable. Works on bare AND baked nodes.
+          export PATH="$HOME/.local/bin:$PATH"
+          mkdir -p "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          if ! command -v jq >/dev/null 2>&1; then
+            curl -fsSL https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64 \
+              -o "$HOME/.local/bin/jq" && chmod +x "$HOME/.local/bin/jq" \
+            || { sudo apt-get update -qq && sudo apt-get install -y -qq jq; }
+          fi
+          if ! python3 -c 'import yaml' 2>/dev/null; then
+            python3 -m pip install --user --quiet pyyaml 2>/dev/null \
+            || pip3 install --user --quiet pyyaml 2>/dev/null \
+            || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
           fi
           python3 -c 'import yaml; print("PyYAML", yaml.__version__)'
           jq --version
