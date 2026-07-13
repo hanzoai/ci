@@ -48,15 +48,27 @@ jobs:
         # onto a bare runner and it just works.
         run: |
           set -e
-          need=0
-          python3 -c 'import yaml' 2>/dev/null || need=1
-          command -v jq >/dev/null 2>&1 || need=1
-          if [ "$need" = 1 ]; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq python3-yaml jq
+          # Sudo-free FIRST (bare arc nodes often lack passwordless sudo / apt
+          # network — `sudo apt-get` then dies with no captured logs). Install jq
+          # as a static binary and PyYAML via pip --user into ~/.local/bin; fall
+          # back to apt only if those are unavailable. Works on bare AND baked nodes.
+          export PATH="$HOME/.local/bin:$PATH"
+          mkdir -p "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          if ! command -v jq >/dev/null 2>&1; then
+            curl -fsSL https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64 \
+              -o "$HOME/.local/bin/jq" && chmod +x "$HOME/.local/bin/jq" \
+            || { sudo apt-get update -qq && sudo apt-get install -y -qq jq; }
           fi
-          python3 -c 'import yaml; print("PyYAML", yaml.__version__)'
+          # yq (mikefarah) — static Go binary, curl-installed like jq. Replaces the
+          # PyYAML/python3 YAML parse that could not be provisioned on locked-down
+          # arc nodes (sudo blocked by no_new_privs, pip/PyPI unavailable).
+          if ! command -v yq >/dev/null 2>&1; then
+            curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64 \
+              -o "$HOME/.local/bin/yq" && chmod +x "$HOME/.local/bin/yq"
+          fi
           jq --version
+          yq --version
 
       - name: Delegate build to platform (mode=delegate)
         # The GHA-escape fast path: instead of running buildx on this runner, POST
@@ -85,7 +97,7 @@ jobs:
           # One enqueue per (image, platform), mirroring the buildx tag shape the
           # deploy path expects (`sha-<short>-<arch>[-<suffix>]`). Default arch is
           # amd64 (single-arch), so an existing repo's tag shape is unchanged.
-          python3 -c "import yaml,json;print(json.dumps(yaml.safe_load(open('hanzo.yml')).get('images') or []))" | jq -c '.[]' | while read -r img; do
+          yq -o=json -I=0 '.images' hanzo.yml | jq -c '.[]' | while read -r img; do
             name=$(echo "$img"|jq -r .name); repo=$(echo "$img"|jq -r .repo)
             ctx=$(echo "$img"|jq -r .context); df=$(echo "$img"|jq -r '.dockerfile // (.context+"/Dockerfile")')
             sfx=$(echo "$img"|jq -r '."tag-suffix" // ""')
@@ -182,7 +194,7 @@ jobs:
           #     repo-scoped automatic token cannot read. Handed to buildx as the
           #     `gh_token` BuildKit secret.
           #   KUBECONFIG  — cluster access for the deploy step.
-          ORG="$(python3 -c "import yaml;print((yaml.safe_load(open('hanzo.yml')).get('kms') or {}).get('org','') )" 2>/dev/null || true)"
+          ORG="$(yq -r '.kms.org // ""' hanzo.yml 2>/dev/null || true)"
           : "${ORG:=${KMS_ORG:-}}"
           # Systemic default: when neither hanzo.yml `kms.org` nor the KMS_ORG var
           # is set, derive the KMS org from the GitHub owner. The org → KMS-org
@@ -200,8 +212,8 @@ jobs:
               *)       ORG="${{ github.repository_owner }}" ;;
             esac
           fi
-          ENV="$(python3 -c "import yaml;print((yaml.safe_load(open('hanzo.yml')).get('kms') or {}).get('environment','prod'))" 2>/dev/null || echo prod)"
-          PATHQ="$(python3 -c "import yaml;print((yaml.safe_load(open('hanzo.yml')).get('kms') or {}).get('path','/deploy').strip('/'))" 2>/dev/null || echo deploy)"
+          ENV="$(yq -r '.kms.environment // "prod"' hanzo.yml 2>/dev/null || echo prod)"
+          PATHQ="$(yq -r '.kms.path // "/deploy"' hanzo.yml | sed 's#^/##; s#/$##' 2>/dev/null || echo deploy)"
           if [ -z "${KMS_CLIENT_ID:-}" ] || [ -z "$ORG" ]; then
             echo "::notice::KMS not configured (no KMS_CLIENT_ID or org) — skipping; GHCR push uses the workflow token"; exit 0
           fi
@@ -223,12 +235,6 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           set -euo pipefail
-          # `images:` is OPTIONAL. A repo that ships no container image — e.g. a
-          # static site deployed via Cloudflare Pages (its own deploy.yml), which
-          # imports this reusable purely for the `test:` lint gate — omits the key
-          # entirely. `.get('images') or []` yields an empty list, the loop below
-          # runs zero times, and no cross-org GHCR push is attempted (so a repo in
-          # a different GitHub org never hits `denied: permission_denied`).
           # Build-time private cross-org Go module read (the buildx `gh_token`
           # secret): prefer the KMS-fetched GIT_TOKEN, else fall back to the org
           # GH_PAT — the SAME BuildKit gh_token cloud's release.yml uses (proven
@@ -241,7 +247,7 @@ jobs:
           SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
           IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo 1 || echo 0)
           VER="${{ github.ref_name }}"; VER="${VER#v}"
-          python3 -c "import yaml,json;print(json.dumps(yaml.safe_load(open('hanzo.yml')).get('images') or []))" | jq -c '.[]' | while read -r img; do
+          yq -o=json -I=0 '.images' hanzo.yml | jq -c '.[]' | while read -r img; do
             name=$(echo "$img"|jq -r .name); ctx=$(echo "$img"|jq -r .context)
             df=$(echo "$img"|jq -r '.dockerfile // (.context+"/Dockerfile")'); repo=$(echo "$img"|jq -r .repo)
             # tag-suffix is OPTIONAL (most repos ship a single variant). When set
@@ -320,27 +326,11 @@ jobs:
           { echo "GIT_CONFIG_GLOBAL=$CFG"; echo "GIT_CONFIG_NOSYSTEM=1"; } >> "$GITHUB_ENV"
           echo "runner git authenticated for private Go modules"
 
-      - name: Provision Node toolchain (JS/TS test gates on bare runners)
-        # hanzo.yml `test:` gates for a JS/TS repo (e.g. `pnpm lint`, `npm test`)
-        # run DIRECTLY on the runner via corepack/pnpm/npm — but the minimal arc
-        # runner image (ghcr.io/actions/actions-runner) ships no user-PATH Node (its
-        # bundled node is for the runner's own action execution only), so the gate
-        # dies with `corepack: command not found` (exit 127). Provision Node so the
-        # gate runs — the JS twin of the Go-toolchain provision above. Guarded to
-        # repos with a package.json so non-JS callers are unaffected; harmless if a
-        # future runner image bakes Node in. Pins current LTS (22 — fine for a
-        # lint/test gate regardless of the app's runtime pin); corepack then
-        # activates the exact pnpm/npm the gate requests.
-        if: inputs.mode != 'delegate' && hashFiles('package.json') != ''
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
       - name: Test (per hanzo.yml)
         if: inputs.mode != 'delegate'
         run: |
           set -euo pipefail
-          python3 -c "import yaml,json;print(json.dumps(yaml.safe_load(open('hanzo.yml')).get('test') or []))" | jq -c '.[]' | while read -r t; do
+          yq -o=json -I=0 '.test // []' hanzo.yml | jq -c '.[]' | while read -r t; do
             name=$(echo "$t"|jq -r .name); cmd=$(echo "$t"|jq -r .run)
             echo "::group::test $name"; bash -c "$cmd"; echo "::endgroup::"
           done
@@ -352,15 +342,15 @@ jobs:
         run: |
           set -euo pipefail
           REF="${{ github.ref_name }}"
-          ON=$(python3 -c "import yaml,json;print(json.dumps((yaml.safe_load(open('hanzo.yml')).get('deploy') or {}).get('on') or []))")
+          ON=$(yq -o=json -I=0 '.deploy.on // []' hanzo.yml)
           IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo 1 || echo 0)
           if [ "$IS_TAG" != 1 ] && ! echo "$ON" | jq -e --arg b "$REF" 'index($b)' >/dev/null; then
             echo "branch $REF not in deploy.on — skipping deploy"; exit 0
           fi
           SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
-          NS=$(python3 -c "import yaml;print(yaml.safe_load(open('hanzo.yml'))['deploy']['namespace'])")
-          python3 -c "import yaml,json;print(json.dumps(yaml.safe_load(open('hanzo.yml')).get('images') or []))" > /tmp/imgs.json
-          python3 -c "import yaml,json;print(json.dumps(yaml.safe_load(open('hanzo.yml'))['deploy']['services']))" | jq -c '.[]' | while read -r s; do
+          NS=$(yq -r '.deploy.namespace' hanzo.yml)
+          yq -o=json -I=0 '.images' hanzo.yml > /tmp/imgs.json
+          yq -o=json -I=0 '.deploy.services' hanzo.yml | jq -c '.[]' | while read -r s; do
             svc=$(echo "$s"|jq -r .name); imgname=$(echo "$s"|jq -r .image)
             repo=$(jq -r --arg n "$imgname" '.[]|select(.name==$n)|.repo' /tmp/imgs.json)
             sfx=$(jq -r --arg n "$imgname" '.[]|select(.name==$n)|."tag-suffix" // ""' /tmp/imgs.json)
