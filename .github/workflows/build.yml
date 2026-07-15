@@ -357,6 +357,14 @@ jobs:
           if [ "$IS_TAG" != 1 ] && ! echo "$ON" | jq -e --arg b "$REF" 'index($b)' >/dev/null; then
             echo "branch $REF not in deploy.on — skipping deploy"; exit 0
           fi
+          # Bare arc runners ship no kubectl — provision the static binary
+          # (same sudo-free pattern as jq/yq above).
+          command -v kubectl >/dev/null 2>&1 || {
+            mkdir -p "$HOME/.local/bin"; export PATH="$HOME/.local/bin:$PATH"
+            KVER=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
+            curl -fsSL "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl" \
+              -o "$HOME/.local/bin/kubectl" && chmod +x "$HOME/.local/bin/kubectl"
+          }
           SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
           NS=$(yq -r '.deploy.namespace' hanzo.yml)
           yq -o=json -I=0 '.images' hanzo.yml > /tmp/imgs.json
