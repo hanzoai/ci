@@ -1,9 +1,0 @@
-name: min7
-on:
-  workflow_call:
-jobs:
-  hello:
-    runs-on: zap-proto-build-linux-amd64
-    steps:
-      - uses: actions/checkout@v4
-      - run: echo checkout-only
