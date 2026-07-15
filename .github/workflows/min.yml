@@ -1,0 +1,8 @@
+name: min
+on:
+  workflow_call:
+jobs:
+  hello:
+    runs-on: zap-proto-build-linux-amd64
+    steps:
+      - run: echo cross-org-min-ok
