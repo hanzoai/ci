@@ -324,9 +324,17 @@ jobs:
             # registry.hanzo.ai/<org>/<name>; public consumers keep ghcr, the
             # fleet DEPLOYS from our registry.
             if [ "${MIRROR_OK:-}" = "1" ]; then
+              # crane, not buildx imagetools: the IAM token realm doesn't answer
+              # buildx's multi-scope token request (spec gap, tracked).
+              command -v crane >/dev/null 2>&1 || {
+                mkdir -p "$HOME/.local/bin"
+                curl -fsSL https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_Linux_x86_64.tar.gz \
+                  | tar -xz -C "$HOME/.local/bin" crane
+                export PATH="$HOME/.local/bin:$PATH"
+              }
               mrepo="registry.hanzo.ai/${repo#*/}"
               echo "$TAGS" | tr ' ' '\n' | grep -v '^-t$' | grep -v '^$' | while read -r ref; do
-                docker buildx imagetools create -t "${mrepo}:${ref##*:}" "$ref" \
+                crane copy "$ref" "${mrepo}:${ref##*:}" \
                   || echo "::warning::mirror of $ref failed (ghcr push unaffected)"
               done
             fi
