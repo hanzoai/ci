@@ -368,19 +368,40 @@ jobs:
           SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
           NS=$(yq -r '.deploy.namespace' hanzo.yml)
           yq -o=json -I=0 '.images' hanzo.yml > /tmp/imgs.json
+          # Desired state lives in the universe repo: the in-cluster
+          # gitops-reconcile job re-applies its CRs every ~5 minutes, so any
+          # direct patch that is not ALSO recorded there is reverted on the
+          # next cycle. Record first (durable), then patch (accelerates the
+          # roll). Universe write rides the same KMS git token as module reads.
+          UNIVERSE=""
+          if [ -n "${GIT_TOKEN:-}" ]; then
+            git clone -q --depth 1 \
+              "https://x-access-token:${GIT_TOKEN}@github.com/hanzoai/universe.git" \
+              /tmp/universe 2>/dev/null && UNIVERSE=/tmp/universe \
+              || echo "::warning::universe clone failed — rolls below are transient until recorded there"
+          fi
           yq -o=json -I=0 '.deploy.services' hanzo.yml | jq -c '.[]' | while read -r s; do
             svc=$(echo "$s"|jq -r .name); imgname=$(echo "$s"|jq -r .image)
             repo=$(jq -r --arg n "$imgname" '.[]|select(.name==$n)|.repo' /tmp/imgs.json)
             sfx=$(jq -r --arg n "$imgname" '.[]|select(.name==$n)|."tag-suffix" // ""' /tmp/imgs.json)
-            ref="$repo:sha-${SHORT}-amd64${sfx:+-$sfx}"
+            tag="sha-${SHORT}-amd64${sfx:+-$sfx}"
+            ref="$repo:$tag"
             echo "rolling $svc → $ref"
-            # Operator-managed services (Service CR) are the source of truth —
-            # a bare `set image` on the Deployment gets reconciled straight
-            # back. Patch the CR when it exists; fall back to the Deployment
-            # for services the operator does not manage.
+            CR="$UNIVERSE/infra/k8s/operator/crs/$svc.yaml"
+            if [ -n "$UNIVERSE" ] && [ -f "$CR" ]; then
+              yq -i ".spec.image.tag = \"$tag\"" "$CR"
+              git -C "$UNIVERSE" diff --quiet || {
+                git -C "$UNIVERSE" -c user.name=hanzo-ci -c user.email=dev@hanzo.ai \
+                  commit -qam "deploy($svc): $tag (${GITHUB_REPOSITORY}@${SHORT})"
+                git -C "$UNIVERSE" push -q \
+                  || echo "::warning::universe push failed for $svc — roll is transient"
+              }
+            fi
+            # Operator-managed services (Service CR) reconcile the Deployment —
+            # patch the CR when it exists; bare Deployments get set-image.
             if kubectl -n "$NS" get "services.hanzo.ai/$svc" >/dev/null 2>&1; then
               kubectl -n "$NS" patch "services.hanzo.ai/$svc" --type=merge \
-                -p "{\"spec\":{\"image\":{\"repository\":\"$repo\",\"tag\":\"sha-${SHORT}-amd64${sfx:+-$sfx}\"}}}"
+                -p "{\"spec\":{\"image\":{\"repository\":\"$repo\",\"tag\":\"$tag\"}}}"
             else
               kubectl -n "$NS" set image "deployment/$svc" "*=$ref"
             fi
