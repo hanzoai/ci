@@ -300,9 +300,19 @@ jobs:
         # CGO_ENABLED=1 gates (e.g. go-sqlite3, which bundles the sqlite
         # amalgamation) need a C compiler; the minimal arc runner ships none
         # (`cgo: gcc not found`). Same guarded provision the parse-toolchain step
-        # above uses — a no-op when gcc is already present.
+        # above uses — a no-op when gcc is already present. If apt-get update
+        # fails (arc snapshot mirror rot: "no longer has a Release file"),
+        # repoint archive.ubuntu.com at the DO mirror — both sources.list and
+        # noble's deb822 ubuntu.sources — and retry once.
         if: inputs.mode != 'delegate' && hashFiles('go.mod') != ''
-        run: command -v gcc >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq gcc; }
+        run: |
+          command -v gcc >/dev/null 2>&1 && exit 0
+          sudo apt-get update -qq || {
+            sudo find /etc/apt -name '*.list' -o -name '*.sources' | \
+              xargs -r sudo sed -i 's|https\?://archive.ubuntu.com/ubuntu|http://mirrors.digitalocean.com/ubuntu|g'
+            sudo apt-get update -qq
+          }
+          sudo apt-get install -y -qq gcc
 
       - name: Authenticate runner git for private Go modules (test gates)
         # The Test step runs `go vet`/`go test` ON the runner (not in buildx), so
