@@ -259,6 +259,12 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           set -euo pipefail
+          # Test-only callers (hanzo.yml without `images:` — e.g. a repo whose
+          # image lane lives in its own release.yml, or a pure library) skip the
+          # build step entirely instead of exploding on a null .images.
+          if [ "$(yq -r '.images // [] | length' hanzo.yml 2>/dev/null || echo 0)" = "0" ]; then
+            echo "::notice::no images: in hanzo.yml — test-only caller, skipping build"; exit 0
+          fi
           # Build-time private cross-org Go module read (the buildx `gh_token`
           # secret): prefer the KMS-fetched GIT_TOKEN, else fall back to the org
           # GH_PAT — the SAME BuildKit gh_token cloud's release.yml uses (proven
