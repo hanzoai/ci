@@ -229,6 +229,30 @@ jobs:
           KUBECONFIG_B64=$(get KUBECONFIG)
           if [ -n "$KUBECONFIG_B64" ]; then echo "$KUBECONFIG_B64" | base64 -d > "$RUNNER_TEMP/kubeconfig"; echo "kubeconfig=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_OUTPUT"; fi
 
+      - name: Mirror credential (registry.hanzo.ai)
+        if: inputs.mode != 'delegate' && steps.kms.outputs.kubeconfig != ''
+        env:
+          KUBECONFIG: ${{ steps.kms.outputs.kubeconfig }}
+        run: |
+          set -uo pipefail
+          # Bare arc runners ship no kubectl — same static provision the deploy
+          # step uses.
+          command -v kubectl >/dev/null 2>&1 || {
+            KVER=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
+            mkdir -p "$HOME/.local/bin"
+            curl -fsSL "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl"               -o "$HOME/.local/bin/kubectl" && chmod +x "$HOME/.local/bin/kubectl"
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"; export PATH="$HOME/.local/bin:$PATH"
+          }
+          CFG=$(kubectl -n hanzo get secret registry-credentials                   -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null | base64 -d || true)
+          if [ -z "$CFG" ]; then
+            echo "::notice::registry-credentials not readable from this kubeconfig — mirror skipped (GHCR-only push)"; exit 0
+          fi
+          USERPASS=$(echo "$CFG" | jq -r '.auths["registry.hanzo.ai"].auth // empty' | base64 -d)
+          [ -z "$USERPASS" ] && { echo "::notice::no registry.hanzo.ai auth in dockerconfig — mirror skipped"; exit 0; }
+          echo "::add-mask::${USERPASS#*:}"
+          echo "${USERPASS#*:}" | docker login registry.hanzo.ai -u "${USERPASS%%:*}" --password-stdin
+          echo "MIRROR_OK=1" >> "$GITHUB_ENV"
+
       - name: Build & push images (per hanzo.yml)
         if: inputs.mode != 'delegate'
         env:
@@ -279,6 +303,17 @@ jobs:
             # BuildKit secret so Dockerfiles can clone private Go modules; omitted
             # cleanly when absent (public-only builds unaffected).
             docker buildx build --platform "$plats" ${GIT_TOKEN:+--secret id=gh_token,env=GIT_TOKEN} --push $TAGS -f "$df" "$ctx"
+            # Dual-host: mirror the exact tag set to registry.hanzo.ai (server-
+            # side manifest copy — no rebuild). ghcr.io/<org>/<name> →
+            # registry.hanzo.ai/<org>/<name>; public consumers keep ghcr, the
+            # fleet DEPLOYS from our registry.
+            if [ "${MIRROR_OK:-}" = "1" ]; then
+              mrepo="registry.hanzo.ai/${repo#*/}"
+              echo "$TAGS" | tr ' ' '\n' | grep -v '^-t$' | grep -v '^$' | while read -r ref; do
+                docker buildx imagetools create -t "${mrepo}:${ref##*:}" "$ref" \
+                  || echo "::warning::mirror of $ref failed (ghcr push unaffected)"
+              done
+            fi
             echo "::endgroup::"
           done
 
