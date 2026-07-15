@@ -374,6 +374,15 @@ jobs:
             sfx=$(jq -r --arg n "$imgname" '.[]|select(.name==$n)|."tag-suffix" // ""' /tmp/imgs.json)
             ref="$repo:sha-${SHORT}-amd64${sfx:+-$sfx}"
             echo "rolling $svc → $ref"
-            kubectl -n "$NS" set image "deployment/$svc" "*=$ref"
+            # Operator-managed services (Service CR) are the source of truth —
+            # a bare `set image` on the Deployment gets reconciled straight
+            # back. Patch the CR when it exists; fall back to the Deployment
+            # for services the operator does not manage.
+            if kubectl -n "$NS" get "services.hanzo.ai/$svc" >/dev/null 2>&1; then
+              kubectl -n "$NS" patch "services.hanzo.ai/$svc" --type=merge \
+                -p "{\"spec\":{\"image\":{\"repository\":\"$repo\",\"tag\":\"sha-${SHORT}-amd64${sfx:+-$sfx}\"}}}"
+            else
+              kubectl -n "$NS" set image "deployment/$svc" "*=$ref"
+            fi
             kubectl -n "$NS" rollout status "deployment/$svc" --timeout=180s
           done
