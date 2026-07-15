@@ -230,11 +230,21 @@ jobs:
           if [ -n "$KUBECONFIG_B64" ]; then echo "$KUBECONFIG_B64" | base64 -d > "$RUNNER_TEMP/kubeconfig"; echo "kubeconfig=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_OUTPUT"; fi
 
       - name: Mirror credential (registry.hanzo.ai)
-        if: inputs.mode != 'delegate' && steps.kms.outputs.kubeconfig != ''
+        if: inputs.mode != 'delegate'
         env:
           KUBECONFIG: ${{ steps.kms.outputs.kubeconfig }}
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
         run: |
           set -uo pipefail
+          # Direct credential first (repo/org secret — works on private repos,
+          # where the Free plan hides org secrets... including these; private
+          # repos set them at REPO level). KMS-kubeconfig read is the fallback.
+          if [ -n "${REGISTRY_USER:-}" ] && [ -n "${REGISTRY_PASSWORD:-}" ]; then
+            echo "$REGISTRY_PASSWORD" | docker login registry.hanzo.ai -u "$REGISTRY_USER" --password-stdin
+            echo "MIRROR_OK=1" >> "$GITHUB_ENV"; exit 0
+          fi
+          [ -z "${KUBECONFIG:-}" ] && { echo "::notice::no registry secret and no kubeconfig — mirror skipped"; exit 0; }
           # Bare arc runners ship no kubectl — same static provision the deploy
           # step uses.
           command -v kubectl >/dev/null 2>&1 || {
