@@ -373,6 +373,22 @@ jobs:
           }
           sudo apt-get install -y -qq gcc
 
+      - name: Provision Node toolchain (JS test gates)
+        # JS/TS `test:` gates (e.g. `pnpm install --frozen-lockfile && pnpm lint`)
+        # also run DIRECTLY on the runner, and the stock arc runner image ships
+        # no Node — so the gate dies at `corepack: command not found` (exit 127)
+        # before it ever reads package.json. Same guarded provision as the Go
+        # step above: only for JS callers (package.json present), harmless if a
+        # future runner image bakes Node in. `corepack enable` shims the repo's
+        # own packageManager (pnpm/yarn) at its pinned version.
+        if: inputs.mode != 'delegate' && hashFiles('package.json') != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Enable corepack (pnpm/yarn shims for JS test gates)
+        if: inputs.mode != 'delegate' && hashFiles('package.json') != ''
+        run: corepack enable
+
       - name: Authenticate runner git for private Go modules (test gates)
         # The Test step runs `go vet`/`go test` ON the runner (not in buildx), so
         # `go` fetches private hanzoai/* modules (GOPRIVATE → direct) through the
