@@ -426,6 +426,7 @@ jobs:
           }
           SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
           NS=$(yq -r '.deploy.namespace' hanzo.yml)
+          RTO=$(yq -r '.deploy."rollout-timeout" // "600s"' hanzo.yml)
           yq -o=json -I=0 '.images' hanzo.yml > /tmp/imgs.json
           # Desired state lives in the universe repo: the in-cluster
           # gitops-reconcile job re-applies its CRs every ~5 minutes, so any
@@ -462,7 +463,21 @@ jobs:
               kubectl -n "$NS" patch "services.hanzo.ai/$svc" --type=merge \
                 -p "{\"spec\":{\"image\":{\"repository\":\"$repo\",\"tag\":\"$tag\"}}}"
             else
-              kubectl -n "$NS" set image "deployment/$svc" "*=$ref"
+              # Bare Deployment: set the new image ONLY on containers already running
+              # THIS repo's image — never the '*' wildcard, which clobbers foreign
+              # sidecars (e.g. an rclone S3-mirror) with the app image and wedges the
+              # rollout. Fall back to the service-named container on first deploy.
+              mapfile -t CS < <(kubectl -n "$NS" get "deployment/$svc" \
+                -o jsonpath='{range .spec.template.spec.containers[*]}{.name} {.image}{"\n"}{end}' \
+                | awk -v r="$repo" 'index($2, r"@")==1 || index($2, r":")==1 {print $1}')
+              [ "${#CS[@]}" -eq 0 ] && CS=("$svc")
+              args=(); for c in "${CS[@]}"; do args+=("$c=$ref"); done
+              kubectl -n "$NS" set image "deployment/$svc" "${args[@]}"
             fi
-            kubectl -n "$NS" rollout status "deployment/$svc" --timeout=180s
+            # Timeout scales with the image: a service vendoring GB-scale model/node
+            # packs (e.g. studio) pulls multi-GB layers on a cold node + waits for the
+            # operator to reconcile — legitimately minutes. 180s failed mid-pull and
+            # is THE reason studio deploys silently failed since 0.15.8. Override
+            # per-repo with deploy.rollout-timeout.
+            kubectl -n "$NS" rollout status "deployment/$svc" --timeout="$RTO"
           done
