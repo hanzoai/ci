@@ -465,13 +465,29 @@ jobs:
             echo "rolling $svc → $ref"
             CR="$UNIVERSE/infra/k8s/operator/crs/$svc.yaml"
             if [ -n "$UNIVERSE" ] && [ -f "$CR" ]; then
-              yq -i ".spec.image.tag = \"$tag\"" "$CR"
-              git -C "$UNIVERSE" diff --quiet || {
-                git -C "$UNIVERSE" -c user.name=hanzo-ci -c user.email=dev@hanzo.ai \
-                  commit -qam "deploy($svc): $tag (${GITHUB_REPOSITORY}@${SHORT})"
-                git -C "$UNIVERSE" push -q \
-                  || echo "::warning::universe push failed for $svc — roll is transient"
-              }
+              # Never roll a pin BACKWARD: builds finish out of order, and a slow
+              # build of an older commit must not overwrite a newer roll. If the
+              # CR's current sha is a descendant of ours, ours is stale — skip.
+              CURSHA=$(yq -r '.spec.image.tag // ""' "$CR" | sed -nE 's/^sha-([a-f0-9]{7}).*/\1/p')
+              git fetch -q --unshallow origin 2>/dev/null || true
+              if [ -n "$CURSHA" ] && [ "$CURSHA" != "$SHORT" ] \
+                 && git cat-file -e "$CURSHA" 2>/dev/null \
+                 && git merge-base --is-ancestor "$SHORT" "$CURSHA" 2>/dev/null; then
+                echo "::notice::$svc CR already at descendant $CURSHA — not rolling back to $SHORT"
+              else
+                yq -i ".spec.image.tag = \"$tag\"" "$CR"
+                # Sweep EVERY same-repo image reference in the CR (sidecars,
+                # initContainers pinned to this image) — the tag field alone
+                # left sidecars on stale tags every roll.
+                repoEsc=$(printf '%s' "$repo" | sed 's/[.[\*^$]/\\&/g')
+                sed -i -E "s|(${repoEsc}):sha-[A-Za-z0-9-]+|\1:${tag}|g" "$CR"
+                git -C "$UNIVERSE" diff --quiet || {
+                  git -C "$UNIVERSE" -c user.name=hanzo-ci -c user.email=dev@hanzo.ai \
+                    commit -qam "deploy($svc): $tag (${GITHUB_REPOSITORY}@${SHORT})"
+                  git -C "$UNIVERSE" push -q \
+                    || echo "::warning::universe push failed for $svc — roll is transient"
+                }
+              fi
             fi
             # Operator-managed services (Service CR) reconcile the Deployment —
             # patch the CR when it exists; bare Deployments get set-image.
