@@ -307,7 +307,10 @@ jobs:
             if [ "$plats" = "linux/amd64" ]; then
               # single-arch: keep the exact legacy tag shape (-amd64) deploys expect.
               TAGS="-t $repo:sha-${SHORT}-amd64${sfx:+-$sfx} -t $repo:${sfx:+$sfx-}latest"
-              [ "$IS_TAG" = 1 ] && TAGS="$TAGS -t $repo:${VER}-amd64${sfx:+-$sfx}"
+              # Release (tag) build: publish the CANONICAL bare semver tag (what the
+              # universe CR pins to — matches world 2.4.10 / cloud v1.801.62) AND the
+              # legacy -amd64 semver alias (back-compat for CRs still on that shape).
+              [ "$IS_TAG" = 1 ] && TAGS="$TAGS -t $repo:${VER}${sfx:+-$sfx} -t $repo:${VER}-amd64${sfx:+-$sfx}"
             else
               # multi-arch: one arch-neutral manifest-list tag (no -amd64 suffix).
               docker run --privileged --rm tonistiigi/binfmt --install arm64 >/dev/null 2>&1 || true
@@ -429,6 +432,7 @@ jobs:
           REF="${{ github.ref_name }}"
           ON=$(yq -o=json -I=0 '.deploy.on // []' hanzo.yml)
           IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo 1 || echo 0)
+          VER="${REF#v}"   # canonical semver for tag releases (ref_name without the v)
           if [ "$IS_TAG" != 1 ] && ! echo "$ON" | jq -e --arg b "$REF" 'index($b)' >/dev/null; then
             echo "branch $REF not in deploy.on — skipping deploy"; exit 0
           fi
@@ -460,10 +464,29 @@ jobs:
             svc=$(echo "$s"|jq -r .name); imgname=$(echo "$s"|jq -r .image)
             repo=$(jq -r --arg n "$imgname" '.[]|select(.name==$n)|.repo' /tmp/imgs.json)
             sfx=$(jq -r --arg n "$imgname" '.[]|select(.name==$n)|."tag-suffix" // ""' /tmp/imgs.json)
-            tag="sha-${SHORT}-amd64${sfx:+-$sfx}"
+            plats=$(jq -r --arg n "$imgname" '.[]|select(.name==$n)|(.platforms // ["linux/amd64"])|join(",")' /tmp/imgs.json)
+            # A TAGGED release pins the CANONICAL bare semver (VER = ref_name w/o the
+            # v) — the very image the build step published above; a branch build stays
+            # on its transient per-commit sha tag (arch-matched: bare for multi-arch).
+            if [ "$IS_TAG" = 1 ]; then
+              tag="${VER}${sfx:+-$sfx}"
+            elif [ "$plats" = "linux/amd64" ]; then
+              tag="sha-${SHORT}-amd64${sfx:+-$sfx}"
+            else
+              tag="sha-${SHORT}${sfx:+-$sfx}"
+            fi
             ref="$repo:$tag"
-            echo "rolling $svc → $ref"
             CR="$UNIVERSE/infra/k8s/operator/crs/$svc.yaml"
+            # Backward-clobber guard (semver): a transient BRANCH build must NEVER
+            # overwrite a service pinned to a semver RELEASE (rolls prod back to a dev
+            # image). Complements the sha-ancestry guard below, which only sees sha-
+            # tags. Releases are tagged; a branch push leaves the semver pin untouched.
+            cur=""
+            if [ -n "$UNIVERSE" ] && [ -f "$CR" ]; then cur="$(yq -r '.spec.image.tag // ""' "$CR")"; fi
+            if [ "$IS_TAG" != 1 ] && printf '%s' "$cur" | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]+'; then
+              echo "::notice::$svc pinned to release $cur — branch build ${SHORT} leaves it (tag a release to deploy)"; continue
+            fi
+            echo "rolling $svc → $ref"
             if [ -n "$UNIVERSE" ] && [ -f "$CR" ]; then
               # Never roll a pin BACKWARD: builds finish out of order, and a slow
               # build of an older commit must not overwrite a newer roll. If the
