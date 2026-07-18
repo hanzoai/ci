@@ -237,6 +237,21 @@ jobs:
           if [ -n "$GIT_TOKEN" ]; then echo "::add-mask::$GIT_TOKEN"; echo "GIT_TOKEN=$GIT_TOKEN" >> "$GITHUB_ENV"; fi
           KUBECONFIG_B64=$(get KUBECONFIG)
           if [ -n "$KUBECONFIG_B64" ]; then echo "$KUBECONFIG_B64" | base64 -d > "$RUNNER_TEMP/kubeconfig"; echo "kubeconfig=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_OUTPUT"; fi
+          # Build-time secrets → --build-arg. A repo declares per-image
+          # `build_secrets: [NAME, ...]` in hanzo.yml; each NAME is fetched from
+          # the SAME org/path/env and exported (masked) so the build step bakes
+          # it in as `--build-arg NAME=value`. The KMS key name IS the build-arg
+          # name — one name, one place. For publishable client tokens a Vite SPA
+          # must embed at build (e.g. VITE_MAPBOX_TOKEN). Undeclared → no-op, so
+          # every existing repo is byte-for-byte unchanged.
+          for bs in $(yq -r '[(.images // [])[] | (.build_secrets // [])[]] | unique | .[]' hanzo.yml 2>/dev/null || true); do
+            case "$bs" in ''|*[!A-Za-z0-9_]*) echo "::warning::skipping invalid build_secret name '$bs'"; continue;; esac
+            v=$(get "$bs" || true)
+            if [ -n "$v" ]; then
+              echo "::add-mask::$v"
+              { echo "$bs<<__KMS_BUILDARG_EOF__"; echo "$v"; echo "__KMS_BUILDARG_EOF__"; } >> "$GITHUB_ENV"
+            else echo "::warning::build_secret $bs not in KMS ($ORG/$PATHQ env=$ENV) — build-arg will be empty"; fi
+          done
 
       - name: GHCR push credential (KMS write:packages token)
         if: inputs.mode != 'delegate'
@@ -370,10 +385,20 @@ jobs:
               [ "$IS_TAG" = 1 ] && TAGS="$TAGS -t $repo:${VER}${sfx:+-$sfx}"
             fi
             echo "::group::build $name → $repo (${sfx}) [$plats]"
+            # --build-arg assembly: static hanzo.yml `args` (a fixed value, e.g. a
+            # pinned base image tag) + `build_secrets` (KMS values the KMS step
+            # exported into the env above). Empty when a repo declares neither, so
+            # the buildx line is unchanged for every existing repo.
+            BUILD_ARGS=""
+            while IFS= read -r kv; do [ -n "$kv" ] && BUILD_ARGS="$BUILD_ARGS --build-arg $kv"; done \
+              < <(echo "$img" | jq -r '(.args // {}) | to_entries[] | "\(.key)=\(.value)"')
+            for bs in $(echo "$img" | jq -r '(.build_secrets // [])[]'); do
+              v=$(printenv "$bs" 2>/dev/null || true); [ -n "$v" ] && BUILD_ARGS="$BUILD_ARGS --build-arg $bs=$v"
+            done
             # GIT_TOKEN (from KMS, via GITHUB_ENV) is passed as the `gh_token`
             # BuildKit secret so Dockerfiles can clone private Go modules; omitted
             # cleanly when absent (public-only builds unaffected).
-            docker buildx build --platform "$plats" ${GIT_TOKEN:+--secret id=gh_token,env=GIT_TOKEN} --push $TAGS -f "$df" "$ctx"
+            docker buildx build --platform "$plats" $BUILD_ARGS ${GIT_TOKEN:+--secret id=gh_token,env=GIT_TOKEN} --push $TAGS -f "$df" "$ctx"
             # Dual-host: mirror the exact tag set to registry.hanzo.ai (server-
             # side manifest copy — no rebuild). ghcr.io/<org>/<name> →
             # registry.hanzo.ai/<org>/<name>; public consumers keep ghcr, the
