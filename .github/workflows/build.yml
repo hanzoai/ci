@@ -238,6 +238,37 @@ jobs:
           KUBECONFIG_B64=$(get KUBECONFIG)
           if [ -n "$KUBECONFIG_B64" ]; then echo "$KUBECONFIG_B64" | base64 -d > "$RUNNER_TEMP/kubeconfig"; echo "kubeconfig=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_OUTPUT"; fi
 
+      - name: GHCR push credential (KMS write:packages token)
+        if: inputs.mode != 'delegate'
+        env:
+          KUBECONFIG: ${{ steps.kms.outputs.kubeconfig }}
+        # The per-job GITHUB_TOKEN — and a package-less GH_PAT — can only push a
+        # package LINKED to this repo, so they 403 on a package created/linked
+        # elsewhere (ghcr.io/hanzoai/cms). Upgrade the ghcr login to the org's
+        # ghcr push token from the cluster (buildx-ghcr-auth, admin write:packages,
+        # KMS-synced) when a kubeconfig is present — it pushes/creates ANY <org>
+        # package. Fail-safe: keep the earlier login if anything is unavailable
+        # (public forks with no KMS keep their repo-linked GITHUB_TOKEN push).
+        run: |
+          set -uo pipefail
+          [ -z "${KUBECONFIG:-}" ] && { echo "::notice::no kubeconfig — keeping the earlier GHCR login"; exit 0; }
+          command -v kubectl >/dev/null 2>&1 || {
+            KVER=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
+            mkdir -p "$HOME/.local/bin"
+            curl -fsSL "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl" -o "$HOME/.local/bin/kubectl" && chmod +x "$HOME/.local/bin/kubectl"
+            export PATH="$HOME/.local/bin:$PATH"
+          }
+          CFG=$(kubectl -n hanzo get secret buildx-ghcr-auth -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null | base64 -d || true)
+          [ -z "$CFG" ] && { echo "::notice::buildx-ghcr-auth not readable — keeping the earlier GHCR login"; exit 0; }
+          UP=$(echo "$CFG" | jq -r '.auths | to_entries[] | select(.key|test("ghcr")) | .value.auth' | head -1 | base64 -d 2>/dev/null || true)
+          [ -z "$UP" ] && { echo "::notice::no ghcr auth in buildx-ghcr-auth — keeping the earlier login"; exit 0; }
+          echo "::add-mask::${UP#*:}"
+          if echo "${UP#*:}" | docker login ghcr.io -u "${UP%%:*}" --password-stdin; then
+            echo "::notice::GHCR login upgraded to the KMS write:packages token"
+          else
+            echo "::notice::KMS GHCR token login failed — keeping the earlier login"
+          fi
+
       - name: Mirror credential (registry.hanzo.ai)
         if: inputs.mode != 'delegate'
         env:
