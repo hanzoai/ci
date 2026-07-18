@@ -156,14 +156,23 @@ jobs:
             && echo "git auth OK" \
             || echo "::warning::GH_PAT set but repo probe failed"
 
-      - name: Log in to GHCR (automatic workflow token)
+      - name: Log in to GHCR (GH_PAT when present, else automatic token)
         if: inputs.mode != 'delegate'
-        # GHCR push needs no stored credential: GitHub injects a per-job
-        # GITHUB_TOKEN scoped to THIS repo, and `permissions: packages: write`
-        # (above) lets it push the repo's own package (e.g. zooai/node →
-        # ghcr.io/zooai/node, same org). First push creates the package
-        # repo-linked. No KMS, no PAT for the push path.
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        # Prefer the KMS-backed GH_PAT (admin:org + write:packages): it can push
+        # or CREATE any <org> package regardless of which repo the package is
+        # linked to. The per-job GITHUB_TOKEN only writes a package linked to THIS
+        # repo, so it 403s on a package created/linked elsewhere (e.g.
+        # ghcr.io/hanzoai/cms). Fall back to the automatic token when GH_PAT is
+        # absent (public forks like zooai/node that create their own repo-linked
+        # package on first push).
+        run: |
+          if [ -n "${GH_PAT:-}" ]; then
+            echo "$GH_PAT" | docker login ghcr.io -u hanzo-dev --password-stdin
+          else
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          fi
 
       - name: Fetch deploy credentials from KMS
         id: kms
