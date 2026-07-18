@@ -241,8 +241,16 @@ jobs:
           # where the Free plan hides org secrets... including these; private
           # repos set them at REPO level). KMS-kubeconfig read is the fallback.
           if [ -n "${REGISTRY_USER:-}" ] && [ -n "${REGISTRY_PASSWORD:-}" ]; then
-            echo "$REGISTRY_PASSWORD" | docker login registry.hanzo.ai -u "$REGISTRY_USER" --password-stdin
-            echo "MIRROR_OK=1" >> "$GITHUB_ENV"; exit 0
+            # Best-effort: a registry.hanzo.ai login FAILURE (not just a missing
+            # cred) must never fail the run — the image still pushes to GHCR, the
+            # primary. Without this guard, bash -e aborts the step and SKIPS the
+            # build entirely (a registry hiccup takes the whole lane red).
+            if echo "$REGISTRY_PASSWORD" | docker login registry.hanzo.ai -u "$REGISTRY_USER" --password-stdin; then
+              echo "MIRROR_OK=1" >> "$GITHUB_ENV"
+            else
+              echo "::notice::registry.hanzo.ai login failed — mirror skipped (GHCR-only push)"
+            fi
+            exit 0
           fi
           [ -z "${KUBECONFIG:-}" ] && { echo "::notice::no registry secret and no kubeconfig — mirror skipped"; exit 0; }
           # Bare arc runners ship no kubectl — same static provision the deploy
@@ -260,8 +268,12 @@ jobs:
           USERPASS=$(echo "$CFG" | jq -r '.auths["registry.hanzo.ai"].auth // empty' | base64 -d)
           [ -z "$USERPASS" ] && { echo "::notice::no registry.hanzo.ai auth in dockerconfig — mirror skipped"; exit 0; }
           echo "::add-mask::${USERPASS#*:}"
-          echo "${USERPASS#*:}" | docker login registry.hanzo.ai -u "${USERPASS%%:*}" --password-stdin
-          echo "MIRROR_OK=1" >> "$GITHUB_ENV"
+          # Best-effort: login failure → skip mirror, never fail the run (see above).
+          if echo "${USERPASS#*:}" | docker login registry.hanzo.ai -u "${USERPASS%%:*}" --password-stdin; then
+            echo "MIRROR_OK=1" >> "$GITHUB_ENV"
+          else
+            echo "::notice::registry.hanzo.ai login failed — mirror skipped (GHCR-only push)"
+          fi
 
       - name: Build & push images (per hanzo.yml)
         if: inputs.mode != 'delegate'
