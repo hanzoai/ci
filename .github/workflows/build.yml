@@ -564,6 +564,11 @@ jobs:
               echo "::notice::$svc pinned to release $cur — branch build ${SHORT} leaves it (tag a release to deploy)"; continue
             fi
             echo "rolling $svc → $ref"
+            # recorded=1 once the desired tag is durably in universe: the
+            # in-cluster operator reconciles that every ~5min, so an expired
+            # runner kubeconfig must not fail a deploy it will complete. Stays 0
+            # for bare-Deployment repos (no CR) where kubectl is the only path.
+            recorded=0
             if [ -n "$UNIVERSE" ] && [ -f "$CR" ]; then
               # Never roll a pin BACKWARD: builds finish out of order, and a slow
               # build of an older commit must not overwrite a newer roll. If the
@@ -574,6 +579,7 @@ jobs:
                  && git cat-file -e "$CURSHA" 2>/dev/null \
                  && git merge-base --is-ancestor "$SHORT" "$CURSHA" 2>/dev/null; then
                 echo "::notice::$svc CR already at descendant $CURSHA — not rolling back to $SHORT"
+                recorded=1   # newer release already recorded + reconciling
               else
                 yq -i ".spec.image.tag = \"$tag\"" "$CR"
                 # Sweep EVERY same-repo image reference in the CR (sidecars,
@@ -581,18 +587,29 @@ jobs:
                 # left sidecars on stale tags every roll.
                 repoEsc=$(printf '%s' "$repo" | sed 's/[.[\*^$]/\\&/g')
                 sed -i -E "s|(${repoEsc}):sha-[A-Za-z0-9-]+|\1:${tag}|g" "$CR"
-                git -C "$UNIVERSE" diff --quiet || {
+                if git -C "$UNIVERSE" diff --quiet; then
+                  recorded=1   # CR already pins $tag (recorded on a prior run)
+                else
                   git -C "$UNIVERSE" -c user.name=hanzo-ci -c user.email=dev@hanzo.ai \
                     commit -qam "deploy($svc): $tag (${GITHUB_REPOSITORY}@${SHORT})"
-                  git -C "$UNIVERSE" push -q \
-                    || echo "::warning::universe push failed for $svc — roll is transient"
-                }
+                  if git -C "$UNIVERSE" push -q; then recorded=1
+                  else echo "::warning::universe push failed for $svc — roll is transient (runner kubectl must land it)"; fi
+                fi
               fi
+            fi
+            # Runner-side kubectl ACCELERATES the operator roll + smoke-tests it.
+            # When recorded=1 the operator owns the rollout, so an expired runner
+            # kubeconfig warns instead of failing the deploy; when recorded=0
+            # kubectl is the only path and stays fatal.
+            if [ "$recorded" = 1 ]; then
+              kc() { kubectl "$@" || echo "::warning::$svc: runner kubectl failed (expired kubeconfig?) — universe record stands; operator reconciles"; }
+            else
+              kc() { kubectl "$@"; }
             fi
             # Operator-managed services (Service CR) reconcile the Deployment —
             # patch the CR when it exists; bare Deployments get set-image.
             if kubectl -n "$NS" get "services.hanzo.ai/$svc" >/dev/null 2>&1; then
-              kubectl -n "$NS" patch "services.hanzo.ai/$svc" --type=merge \
+              kc -n "$NS" patch "services.hanzo.ai/$svc" --type=merge \
                 -p "{\"spec\":{\"image\":{\"repository\":\"$repo\",\"tag\":\"$tag\"}}}"
             else
               # Bare Deployment: set the new image ONLY on containers already running
@@ -604,12 +621,12 @@ jobs:
                 | awk -v r="$repo" 'index($2, r"@")==1 || index($2, r":")==1 {print $1}')
               [ "${#CS[@]}" -eq 0 ] && CS=("$svc")
               args=(); for c in "${CS[@]}"; do args+=("$c=$ref"); done
-              kubectl -n "$NS" set image "deployment/$svc" "${args[@]}"
+              kc -n "$NS" set image "deployment/$svc" "${args[@]}"
             fi
             # Timeout scales with the image: a service vendoring GB-scale model/node
             # packs (e.g. studio) pulls multi-GB layers on a cold node + waits for the
             # operator to reconcile — legitimately minutes. 180s failed mid-pull and
             # is THE reason studio deploys silently failed since 0.15.8. Override
             # per-repo with deploy.rollout-timeout.
-            kubectl -n "$NS" rollout status "deployment/$svc" --timeout="$RTO"
+            kc -n "$NS" rollout status "deployment/$svc" --timeout="$RTO"
           done
