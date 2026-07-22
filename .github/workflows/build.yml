@@ -592,8 +592,19 @@ jobs:
                 else
                   git -C "$UNIVERSE" -c user.name=hanzo-ci -c user.email=dev@hanzo.ai \
                     commit -qam "deploy($svc): $tag (${GITHUB_REPOSITORY}@${SHORT})"
-                  if git -C "$UNIVERSE" push -q; then recorded=1
-                  else echo "::warning::universe push failed for $svc — roll is transient (runner kubectl must land it)"; fi
+                  # EVERY service's deploy pushes to universe/main, so under
+                  # concurrent rolls a plain push loses the race with a
+                  # non-fast-forward reject (THE reason deploys stall when many
+                  # land at once). Rebase our one-file CR change onto the moved
+                  # remote and retry; a genuine same-CR conflict (a concurrent
+                  # roll of THIS service) aborts cleanly and stays recorded=0 —
+                  # never force, so no silent backward roll.
+                  for _try in 1 2 3 4 5 6; do
+                    if git -C "$UNIVERSE" push -q; then recorded=1; break; fi
+                    git -C "$UNIVERSE" pull -q --rebase --autostash \
+                      || { git -C "$UNIVERSE" rebase --abort 2>/dev/null; break; }
+                  done
+                  [ "$recorded" = 1 ] || echo "::warning::universe push failed for $svc after retries — roll is transient (runner kubectl must land it)"
                 fi
               fi
             fi
