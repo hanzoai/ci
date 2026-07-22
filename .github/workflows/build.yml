@@ -590,19 +590,27 @@ jobs:
                 if git -C "$UNIVERSE" diff --quiet; then
                   recorded=1   # CR already pins $tag (recorded on a prior run)
                 else
-                  git -C "$UNIVERSE" -c user.name=hanzo-ci -c user.email=dev@hanzo.ai \
-                    commit -qam "deploy($svc): $tag (${GITHUB_REPOSITORY}@${SHORT})"
+                  commitCR() { git -C "$UNIVERSE" -c user.name=hanzo-ci -c user.email=dev@hanzo.ai \
+                    commit -qam "deploy($svc): $tag (${GITHUB_REPOSITORY}@${SHORT})"; }
+                  commitCR
                   # EVERY service's deploy pushes to universe/main, so under
                   # concurrent rolls a plain push loses the race with a
                   # non-fast-forward reject (THE reason deploys stall when many
-                  # land at once). Rebase our one-file CR change onto the moved
-                  # remote and retry; a genuine same-CR conflict (a concurrent
-                  # roll of THIS service) aborts cleanly and stays recorded=0 —
-                  # never force, so no silent backward roll.
+                  # land at once). The clone is shallow (--depth 1) so `pull
+                  # --rebase` has no merge base and fails — instead fetch the moved
+                  # tip, hard-reset onto it, and re-apply our one-file CR change,
+                  # then retry the push. A no-op after reset (remote already
+                  # carries our tag) counts as recorded. We never force-push, so a
+                  # newer roll of THIS service is preserved (its tag survives the
+                  # reset; our re-apply is last-writer only when tags differ).
                   for _try in 1 2 3 4 5 6; do
                     if git -C "$UNIVERSE" push -q; then recorded=1; break; fi
-                    git -C "$UNIVERSE" pull -q --rebase --autostash \
-                      || { git -C "$UNIVERSE" rebase --abort 2>/dev/null; break; }
+                    git -C "$UNIVERSE" fetch -q --depth 1 origin main || break
+                    git -C "$UNIVERSE" reset -q --hard FETCH_HEAD
+                    yq -i ".spec.image.tag = \"$tag\"" "$CR"
+                    sed -i -E "s|(${repoEsc}):sha-[A-Za-z0-9-]+|\1:${tag}|g" "$CR"
+                    if git -C "$UNIVERSE" diff --quiet; then recorded=1; break; fi
+                    commitCR
                   done
                   [ "$recorded" = 1 ] || echo "::warning::universe push failed for $svc after retries — roll is transient (runner kubectl must land it)"
                 fi
