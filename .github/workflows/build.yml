@@ -284,7 +284,7 @@ jobs:
             echo "::notice::KMS GHCR token login failed — keeping the earlier login"
           fi
 
-      - name: Mirror credential (registry.hanzo.ai)
+      - name: Native registry credential (oci.hanzo.ai)
         if: inputs.mode != 'delegate'
         env:
           KUBECONFIG: ${{ steps.kms.outputs.kubeconfig }}
@@ -300,14 +300,14 @@ jobs:
             # cred) must never fail the run — the image still pushes to GHCR, the
             # primary. Without this guard, bash -e aborts the step and SKIPS the
             # build entirely (a registry hiccup takes the whole lane red).
-            if echo "$REGISTRY_PASSWORD" | docker login registry.hanzo.ai -u "$REGISTRY_USER" --password-stdin; then
+            if echo "$REGISTRY_PASSWORD" | docker login oci.hanzo.ai -u "$REGISTRY_USER" --password-stdin; then
               echo "MIRROR_OK=1" >> "$GITHUB_ENV"
             else
               echo "::notice::registry.hanzo.ai login failed — mirror skipped (GHCR-only push)"
             fi
             exit 0
           fi
-          [ -z "${KUBECONFIG:-}" ] && { echo "::notice::no registry secret and no kubeconfig — mirror skipped"; exit 0; }
+          [ -z "${KUBECONFIG:-}" ] && { echo "::warning::no registry credential and no kubeconfig — image will NOT reach oci.hanzo.ai (ghcr only)"; exit 0; }
           # Bare arc runners ship no kubectl — same static provision the deploy
           # step uses.
           command -v kubectl >/dev/null 2>&1 || {
@@ -318,13 +318,13 @@ jobs:
           }
           CFG=$(kubectl -n hanzo get secret registry-credentials                   -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null | base64 -d || true)
           if [ -z "$CFG" ]; then
-            echo "::notice::registry-credentials not readable from this kubeconfig — mirror skipped (GHCR-only push)"; exit 0
+            echo "::warning::registry-credentials not readable from this kubeconfig — image will NOT reach oci.hanzo.ai (ghcr only)"; exit 0
           fi
           USERPASS=$(echo "$CFG" | jq -r '.auths["registry.hanzo.ai"].auth // empty' | base64 -d)
-          [ -z "$USERPASS" ] && { echo "::notice::no registry.hanzo.ai auth in dockerconfig — mirror skipped"; exit 0; }
+          [ -z "$USERPASS" ] && { echo "::warning::no registry auth in dockerconfig — image will NOT reach oci.hanzo.ai (ghcr only)"; exit 0; }
           echo "::add-mask::${USERPASS#*:}"
           # Best-effort: login failure → skip mirror, never fail the run (see above).
-          if echo "${USERPASS#*:}" | docker login registry.hanzo.ai -u "${USERPASS%%:*}" --password-stdin; then
+          if echo "${USERPASS#*:}" | docker login oci.hanzo.ai -u "${USERPASS%%:*}" --password-stdin; then
             echo "MIRROR_OK=1" >> "$GITHUB_ENV"
           else
             echo "::notice::registry.hanzo.ai login failed — mirror skipped (GHCR-only push)"
@@ -401,8 +401,11 @@ jobs:
             docker buildx build --platform "$plats" $BUILD_ARGS ${GIT_TOKEN:+--secret id=gh_token,env=GIT_TOKEN} --push $TAGS -f "$df" "$ctx"
             # Dual-host: mirror the exact tag set to registry.hanzo.ai (server-
             # side manifest copy — no rebuild). ghcr.io/<org>/<name> →
-            # registry.hanzo.ai/<org>/<name>; public consumers keep ghcr, the
-            # fleet DEPLOYS from our registry.
+            # oci.hanzo.ai/<org>/<name>; public consumers keep ghcr, the fleet
+            # is migrating to pull from ours. A skip here is now a WARNING, not
+            # a notice: an image that never reaches our registry is the reason
+            # a deploy still depends on GitHub, and that should be visible in
+            # the run, not buried.
             if [ "${MIRROR_OK:-}" = "1" ]; then
               # crane, not buildx imagetools: the IAM token realm doesn't answer
               # buildx's multi-scope token request (spec gap, tracked).
@@ -412,10 +415,10 @@ jobs:
                   | tar -xz -C "$HOME/.local/bin" crane
                 export PATH="$HOME/.local/bin:$PATH"
               }
-              mrepo="registry.hanzo.ai/${repo#*/}"
+              mrepo="oci.hanzo.ai/${repo#*/}"
               echo "$TAGS" | tr ' ' '\n' | grep -v '^-t$' | grep -v '^$' | while read -r ref; do
                 crane copy "$ref" "${mrepo}:${ref##*:}" \
-                  || echo "::warning::mirror of $ref failed (ghcr push unaffected)"
+                  || echo "::warning::$ref did not reach oci.hanzo.ai (ghcr push unaffected)"
               done
             fi
             echo "::endgroup::"
