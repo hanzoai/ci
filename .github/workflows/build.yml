@@ -353,7 +353,8 @@ jobs:
           export GIT_TOKEN="${GIT_TOKEN:-${GH_PAT:-}}"
           SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
           IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo 1 || echo 0)
-          VER="${{ github.ref_name }}"; VER="${VER#v}"
+          REL="${{ github.ref_name }}"   # the git tag, verbatim: v1.26.19
+          VER="${REL#v}"                 # v-stripped alias: 1.26.19
           yq -o=json -I=0 '.images' hanzo.yml | jq -c '.[]' | while read -r img; do
             name=$(echo "$img"|jq -r .name); ctx=$(echo "$img"|jq -r .context)
             df=$(echo "$img"|jq -r '.dockerfile // (.context+"/Dockerfile")'); repo=$(echo "$img"|jq -r .repo)
@@ -374,15 +375,21 @@ jobs:
             if [ "$plats" = "linux/amd64" ]; then
               # single-arch: keep the exact legacy tag shape (-amd64) deploys expect.
               TAGS="-t $repo:sha-${SHORT}-amd64${sfx:+-$sfx} -t $repo:${sfx:+$sfx-}latest"
-              # Release (tag) build: publish the CANONICAL bare semver tag (what the
-              # universe CR pins to — matches world 2.4.10 / cloud v1.801.62) AND the
-              # legacy -amd64 semver alias (back-compat for CRs still on that shape).
-              [ "$IS_TAG" = 1 ] && TAGS="$TAGS -t $repo:${VER}${sfx:+-$sfx} -t $repo:${VER}-amd64${sfx:+-$sfx}"
             else
               # multi-arch: one arch-neutral manifest-list tag (no -amd64 suffix).
               docker run --privileged --rm tonistiigi/binfmt --install arm64 >/dev/null 2>&1 || true
               TAGS="-t $repo:sha-${SHORT}${sfx:+-$sfx} -t $repo:${sfx:+$sfx-}latest"
-              [ "$IS_TAG" = 1 ] && TAGS="$TAGS -t $repo:${VER}${sfx:+-$sfx}"
+            fi
+            # Release (tag) build. The git tag IS the release name, so publish it
+            # VERBATIM (v1.26.19) — that is the shape a universe CR pins, and
+            # stripping the v is why releases were finished by hand-`crane copy`ing
+            # sha-<sha7> onto the semver a human typed. Identity in, identity out.
+            # The v-stripped alias stays for CRs already pinned that way (world
+            # 2.4.51), and is skipped when a repo tags without a v. The old
+            # `<ver>-amd64` alias is deleted: no CR in the fleet pinned it.
+            if [ "$IS_TAG" = 1 ]; then
+              TAGS="$TAGS -t $repo:${REL}${sfx:+-$sfx}"
+              [ "$REL" != "$VER" ] && TAGS="$TAGS -t $repo:${VER}${sfx:+-$sfx}"
             fi
             echo "::group::build $name → $repo (${sfx}) [$plats]"
             # --build-arg assembly: static hanzo.yml `args` (a fixed value, e.g. a
@@ -510,9 +517,17 @@ jobs:
         run: |
           set -euo pipefail
           REF="${{ github.ref_name }}"
+          # A caller with no `deploy:` declares its rollout elsewhere (hanzoai/git
+          # pins its own CR by a reviewed universe change). Leave before reading
+          # deploy.services, which is null there — `jq '.[]'` over null aborts the
+          # step, and on a TAG build the deploy.on gate below is bypassed, so this
+          # used to surface only on a release. Same guard the build step has for
+          # `images:`.
+          if [ "$(yq -r '.deploy | type' hanzo.yml 2>/dev/null || echo '!!null')" != '!!map' ]; then
+            echo "::notice::no deploy: in hanzo.yml — build-only caller, skipping deploy"; exit 0
+          fi
           ON=$(yq -o=json -I=0 '.deploy.on // []' hanzo.yml)
           IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo 1 || echo 0)
-          VER="${REF#v}"   # canonical semver for tag releases (ref_name without the v)
           if [ "$IS_TAG" != 1 ] && ! echo "$ON" | jq -e --arg b "$REF" 'index($b)' >/dev/null; then
             echo "branch $REF not in deploy.on — skipping deploy"; exit 0
           fi
@@ -545,11 +560,11 @@ jobs:
             repo=$(jq -r --arg n "$imgname" '.[]|select(.name==$n)|.repo' /tmp/imgs.json)
             sfx=$(jq -r --arg n "$imgname" '.[]|select(.name==$n)|."tag-suffix" // ""' /tmp/imgs.json)
             plats=$(jq -r --arg n "$imgname" '.[]|select(.name==$n)|(.platforms // ["linux/amd64"])|join(",")' /tmp/imgs.json)
-            # A TAGGED release pins the CANONICAL bare semver (VER = ref_name w/o the
-            # v) — the very image the build step published above; a branch build stays
-            # on its transient per-commit sha tag (arch-matched: bare for multi-arch).
+            # A TAGGED release pins the git tag VERBATIM (REF) — the very image the
+            # build step published above; a branch build stays on its transient
+            # per-commit sha tag (arch-matched: bare for multi-arch).
             if [ "$IS_TAG" = 1 ]; then
-              tag="${VER}${sfx:+-$sfx}"
+              tag="${REF}${sfx:+-$sfx}"
             elif [ "$plats" = "linux/amd64" ]; then
               tag="sha-${SHORT}-amd64${sfx:+-$sfx}"
             else
