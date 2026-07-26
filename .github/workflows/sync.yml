@@ -1,0 +1,39 @@
+name: Sync to Hanzo Git
+# THE ONE thing GitHub does for this repo: tell git.hanzo.ai to pull.
+#
+# git.hanzo.ai is canonical and runs all CI natively from .hanzo/workflows.
+# GitHub is a mirror, so a workflow here that BUILT anything would be a second
+# build plane producing a second answer. There is one builder.
+#
+# The reusable this repo publishes now lives at .hanzo/workflows/build.yml,
+# because the forge resolves `uses:` only under WORKFLOW_DIRS (.hanzo/workflows).
+# While it sat in .github/workflows the forge refused it and every caller --
+# cloud, commerce, console, git -- built nothing.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+concurrency:
+  group: sync-to-hanzo-git
+  cancel-in-progress: false
+jobs:
+  nudge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ask git.hanzo.ai to fast-forward
+        env:
+          HANZO_GIT_TOKEN: ${{ secrets.HANZO_GIT_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Fail-soft: a missing token or a forge blip must not red-flag a push
+          # that already landed. The canonical side also polls on its own timer.
+          if [ -z "${HANZO_GIT_TOKEN:-}" ]; then
+            echo "no HANZO_GIT_TOKEN; canonical will pick this up on its own poll"
+            exit 0
+          fi
+          curl -fsS --max-time 20 -X POST \
+            -H "Authorization: token ${HANZO_GIT_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://git.hanzo.ai/v1/repos/hanzoai/ci/actions/workflows/sync-from-github.yml/dispatches" \
+            -d '{"ref":"main"}' \
+            || echo "nudge failed; canonical polls anyway"
