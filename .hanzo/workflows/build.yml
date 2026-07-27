@@ -30,7 +30,7 @@ on:
         default: buildx
 
 permissions:
-  contents: read
+  contents: write # release assets for `binaries:`; read is enough without it
   packages: write
 
 jobs:
@@ -509,6 +509,106 @@ jobs:
             name=$(echo "$t"|jq -r .name); cmd=$(echo "$t"|jq -r .run)
             echo "::group::test $name"; bash -c "$cmd"; echo "::endgroup::"
           done
+
+      - name: Build & publish binaries (per hanzo.yml)
+        # The plugin lane. `images:` ships an OCI image a CLUSTER runs;
+        # `binaries:` ships an EXECUTABLE a RUNNING HOST installs — a zip plugin
+        # (`zip.Load(zip.Plugin{URL, Sum})`), which fetches the artifact,
+        # verifies its SHA-256 BEFORE making it executable, and caches it by
+        # digest. So a plugin is built ONCE per OS/arch and every host picks up
+        # the same bits: nobody rebuilds the world to ship a plugin, and no host
+        # is trusted to have built it right.
+        #
+        # It rides THIS pipeline, not a second one — same hanzo.yml, same job,
+        # same runner, same KMS token — and adds two rules of its own:
+        #   - BUILT on every push, PUBLISHED only on a tag. A cross-compile that
+        #     breaks arm64 fails the PR that broke it, not the release.
+        #   - published AFTER the test gate above, because a host installs an
+        #     artifact unattended. (Images push before tests; an image is rolled
+        #     out by a deliberate, reviewed pin — an artifact is not.)
+        # dist/binaries.json is uploaded with them: url + sha256 for every
+        # artifact, so the bits and the digest that authorizes them are the same
+        # release, and a host reads url+sum from ONE place.
+        if: inputs.mode != 'delegate'
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GH_AUTOMATIC: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "$(yq -r '.binaries // [] | length' hanzo.yml 2>/dev/null || echo 0)" = "0" ]; then
+            echo "::notice::no binaries: in hanzo.yml — nothing to publish"; exit 0
+          fi
+          TAG="${{ github.ref_name }}"; REPO="${{ github.repository }}"
+          IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo 1 || echo 0)
+          # The runner tells us which forge it is talking to — github.com on the
+          # arc pool, a GHES/forge front door elsewhere. Reading it instead of
+          # hardcoding the hostname is what keeps ONE lane serving both.
+          SERVER="${GITHUB_SERVER_URL:-https://github.com}"
+          API="${GITHUB_API_URL:-https://api.github.com}"
+          case "$API" in
+            https://api.github.com) UPLOADS=https://uploads.github.com ;;
+            *) UPLOADS="$SERVER/api/uploads" ;;
+          esac
+          BASE="$SERVER/$REPO/releases/download/$TAG"
+          rm -rf dist; mkdir -p dist
+          # CGO_ENABLED=0 is not a preference: the host that installs this runs
+          # it on WHATEVER base image the host happens to be, so a binary linked
+          # against that runner's glibc is a plugin that starts on the runner and
+          # nowhere else. -trimpath keeps the digest a function of the source,
+          # not of the checkout path.
+          yq -o=json -I=0 '.binaries' hanzo.yml | jq -c '.[]' | while read -r b; do
+            name=$(echo "$b"|jq -r .name); main=$(echo "$b"|jq -r '.main // "."')
+            lf=$(echo "$b"|jq -r '.ldflags // "-s -w"')
+            echo "$b" | jq -r '(.platforms // ["linux/amd64"])[]' | while read -r plat; do
+              os="${plat%%/*}"; arch="${plat##*/}"
+              file="${name}-${os}-${arch}"; [ "$os" = windows ] && file="${file}.exe"
+              echo "::group::build $name $os/$arch"
+              CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+                go build -trimpath -ldflags "$lf" -o "dist/$file" "$main"
+              sha=$(sha256sum "dist/$file" | cut -d' ' -f1)
+              jq -nc --arg n "$name" --arg os "$os" --arg arch "$arch" \
+                     --arg url "$BASE/$file" --arg sha "$sha" \
+                '{name:$n,os:$os,arch:$arch,url:$url,sha256:$sha}' >> dist/index.jsonl
+              echo "$file  $sha"
+              echo "::endgroup::"
+            done
+          done
+          jq -s --arg repo "$REPO" --arg tag "$TAG" \
+            '{repo:$repo,tag:$tag,binaries:.}' dist/index.jsonl > dist/binaries.json
+          rm dist/index.jsonl
+          if [ "$IS_TAG" != 1 ]; then
+            echo "::notice::binaries built for $(jq '.binaries|length' dist/binaries.json) platform(s) — publishing happens on a tag"; exit 0
+          fi
+          # Same token ladder the rest of this file uses: the KMS org token, the
+          # org PAT, then the per-job automatic one (which can write a release on
+          # its OWN repo, so a repo with no KMS still publishes).
+          TOKEN="${GIT_TOKEN:-${GH_PAT:-$GH_AUTOMATIC}}"
+          api() { curl -fsS -H "Authorization: Bearer $TOKEN" -H 'Accept: application/vnd.github+json' "$@"; }
+          rel=$(api "$API/repos/$REPO/releases/tags/$TAG" 2>/dev/null | jq -r '.id // empty' || true)
+          if [ -z "$rel" ]; then
+            rel=$(api -X POST "$API/repos/$REPO/releases" \
+              -d "$(jq -nc --arg t "$TAG" '{tag_name:$t,name:$t,generate_release_notes:true}')" | jq -r .id)
+          fi
+          for f in dist/*; do
+            n=$(basename "$f")
+            # Re-running a release must converge, not 422: drop a same-named
+            # asset first. The digest in binaries.json is regenerated with it,
+            # so the pair can never disagree.
+            old=$(api "$API/repos/$REPO/releases/$rel/assets" | jq -r --arg n "$n" '.[]?|select(.name==$n)|.id')
+            for id in $old; do api -X DELETE "$API/repos/$REPO/releases/assets/$id" >/dev/null; done
+            api -X POST -H 'Content-Type: application/octet-stream' --data-binary @"$f" \
+              "$UPLOADS/repos/$REPO/releases/$rel/assets?name=$n" >/dev/null
+            echo "published $BASE/$n"
+          done
+          # The job prints what a host pastes. A digest a human retypes is a
+          # digest a human gets wrong.
+          {
+            echo "### Plugin artifacts — \`$TAG\`"
+            echo '```go'
+            jq -r '.binaries[]|"zip.Load(zip.Plugin{\n    Name: \"\(.name)\",   // \(.os)/\(.arch)\n    URL:  \"\(.url)\",\n    Sum:  \"\(.sha256)\",\n}, \"/v1/\(.name)\")"' dist/binaries.json
+            echo '```'
+            echo "Index: \`$BASE/binaries.json\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Deploy (per hanzo.yml)
         if: inputs.mode != 'delegate' && github.event_name != 'pull_request' && steps.kms.outputs.kubeconfig != ''
