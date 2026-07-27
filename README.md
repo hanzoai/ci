@@ -40,6 +40,40 @@ jobs:
 
 That's it. The build/test/deploy logic lives here, once.
 
+## `binaries:` — publish a plugin once, install it everywhere
+
+`images:` ships an OCI image a **cluster** runs. `binaries:` ships an
+executable a **running host** installs: a [zip](https://github.com/zap-proto/zip)
+plugin, fetched at run time by URL and verified against its SHA-256 before it is
+ever made executable. Build it once per OS/arch here; every host picks up the
+same bits, and nobody rebuilds the world to ship a plugin.
+
+```yaml
+binaries:
+  - name: billing
+    main: ./cmd/billing              # the Go package; default "."
+    platforms: [linux/amd64, linux/arm64]   # default [linux/amd64]
+    ldflags: "-s -w"                 # default
+```
+
+Built on every push (an arm64 cross-compile that breaks fails the PR that broke
+it) and **published on a tag**, after the `test:` gate — a host installs an
+artifact unattended, so the tests gate the bits. Each artifact lands on the
+GitHub Release for that tag:
+
+```
+https://github.com/<owner>/<repo>/releases/download/<tag>/<name>-<os>-<arch>
+```
+
+plus `binaries.json` beside them — `{name, os, arch, url, sha256}` for every
+artifact, so the bits and the digest that authorizes them ship as one release
+and a host reads both from one place. The job summary prints the
+`zip.Load(zip.Plugin{URL, Sum})` a host pastes.
+
+Builds are `CGO_ENABLED=0 -trimpath`: the host that installs this runs it on
+whatever base image the host is, and the digest must be a function of the
+source, not of the checkout path.
+
 ## Runners — our cloud or your own
 
 By default the build runs on the **Hanzo cloud** arc pool (we run it; metered as
