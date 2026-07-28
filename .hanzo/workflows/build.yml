@@ -1,7 +1,14 @@
 # Hanzo CI/CD — reusable build + test + deploy, driven by the caller repo's root
 # hanzo.yml. Runs on our self-hosted arc runners; pulls registry + kubeconfig
 # creds from KMS via Universal Auth at run time. Public so any org can import it
-# with `uses: hanzoai/ci/.github/workflows/build.yml@v1` + `secrets: inherit`.
+# with `uses: hanzoai/ci/.hanzo/workflows/build.yml@v2` + `secrets: inherit`.
+#
+# The `uses:` PATH is part of the version. This file lived at
+# `.github/workflows/build.yml` through v1 and moved here for v2, so
+# `.github/...@v1` and `.hanzo/...@v2` are BOTH valid — each resolves the tree at
+# its own tag. Pair them wrongly and the reference 404s, which on this plane is
+# a silent no-run rather than an error. Callers today: cloud, commerce, console,
+# git and this repo on @v2; tasks still on @v1.
 #
 # The caller is ~7 lines (triggers + this `uses:`); all real config is hanzo.yml.
 name: Hanzo CI/CD
