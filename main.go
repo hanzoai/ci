@@ -64,14 +64,18 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 	})
 	mux.HandleFunc("/v1/runs", func(w http.ResponseWriter, r *http.Request) {
+		v, ok := requireViewer(w, r, cfg.adminOrg)
+		if !ok {
+			return
+		}
 		snap := cache.get()
 		writeJSON(w, http.StatusOK, map[string]any{
-			"runs":      filterByOrg(snap.Runs, r.URL.Query().Get("org")),
+			"runs":      v.visible(snap.Runs, r.URL.Query().Get("org")),
 			"fetchedAt": snap.FetchedAt,
 			"stale":     snap.stale(cfg.staleAfter),
 			"sourceErr": snap.errString(),
 			"repos":     snap.Repos,
-			"orgs":      orgsOf(snap.Runs),
+			"orgs":      v.orgs(snap.Runs),
 		})
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -79,7 +83,11 @@ func main() {
 			http.NotFound(w, r)
 			return
 		}
-		renderDashboard(w, cache.get(), r.URL.Query().Get("org"), cfg)
+		v, ok := requireViewer(w, r, cfg.adminOrg)
+		if !ok {
+			return
+		}
+		renderDashboard(w, cache.get(), v, r.URL.Query().Get("org"), cfg)
 	})
 
 	srv := &http.Server{
@@ -104,8 +112,13 @@ func main() {
 // ───────────────────────────── config ─────────────────────────────
 
 type config struct {
-	listen     string
-	gitBase    string
+	listen  string
+	gitBase string
+	// adminOrg is the ONE org whose members see across tenants. It must match
+	// admin-guard's IAM_ADMIN_ORG — the guard decides who gets in, this decides
+	// who sees everything, and a mismatch would silently demote the fleet view to
+	// a single-org view (or, if set too wide, promote a tenant to it).
+	adminOrg   string
 	gitToken   string
 	refresh    time.Duration
 	staleAfter time.Duration
@@ -117,6 +130,7 @@ func loadConfig() (config, error) {
 	c := config{
 		listen:    env("CI_LISTEN", ":8080"),
 		gitBase:   strings.TrimRight(env("CI_GIT_BASE", "https://git.hanzo.ai"), "/"),
+		adminOrg:  env("CI_ADMIN_ORG", "admin"),
 		gitToken:  os.Getenv("CI_GIT_TOKEN"),
 		scanRepos: envInt("CI_SCAN_REPOS", 60),
 		runsPer:   envInt("CI_RUNS_PER_REPO", 8),

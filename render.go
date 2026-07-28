@@ -14,8 +14,12 @@ import (
 // has to be readable when the thing it reports on is broken, which is exactly
 // when a build pipeline for its own frontend is the wrong dependency.
 
-func renderDashboard(w http.ResponseWriter, snap snapshot, org string, cfg config) {
-	runs := filterByOrg(snap.Runs, org)
+// renderDashboard writes the page for ONE viewer. Every row it renders has
+// already passed v.visible — the template is never handed the full snapshot and
+// asked to be careful with it, because a template that can see everything is one
+// edit away from showing it.
+func renderDashboard(w http.ResponseWriter, snap snapshot, v viewer, org string, cfg config) {
+	runs := v.visible(snap.Runs, org)
 	if len(runs) > 200 {
 		runs = runs[:200]
 	}
@@ -24,6 +28,8 @@ func renderDashboard(w http.ResponseWriter, snap snapshot, org string, cfg confi
 		Runs      []Run
 		Orgs      []string
 		Org       string
+		Viewer    string
+		Sudo      bool
 		Repos     int
 		FetchedAt time.Time
 		Age       string
@@ -33,8 +39,10 @@ func renderDashboard(w http.ResponseWriter, snap snapshot, org string, cfg confi
 		Counts    map[string]int
 	}{
 		Runs:      runs,
-		Orgs:      orgsOf(snap.Runs),
+		Orgs:      v.orgs(snap.Runs),
 		Org:       org,
+		Viewer:    v.org,
+		Sudo:      v.sudo,
 		Repos:     snap.Repos,
 		FetchedAt: snap.FetchedAt,
 		Age:       humanAge(snap.FetchedAt),
@@ -144,6 +152,7 @@ nav{display:flex;gap:6px;padding:0 24px 16px;flex-wrap:wrap}
 nav a{padding:5px 11px;border:1px solid var(--line);border-radius:999px;
       background:var(--panel);color:var(--dim);text-decoration:none;font-size:12px}
 nav a.on{border-color:var(--accent);color:var(--fg)}
+nav .who{margin-left:auto;align-self:center;color:var(--dim);font-size:12px}
 .warn{margin:0 24px 16px;padding:10px 14px;border:1px solid var(--run);
       border-radius:8px;background:#221b0c;color:#f0d58c;font-size:13px}
 table{width:100%;border-collapse:collapse}
@@ -183,8 +192,9 @@ footer{padding:16px 24px;color:var(--dim);font-size:12px;border-top:1px solid va
 </div>
 
 <nav>
-  <a href="/" {{if eq .Org ""}}class="on"{{end}}>all orgs</a>
+  {{if .Sudo}}<a href="/" {{if eq .Org ""}}class="on"{{end}}>all orgs</a>{{end}}
   {{range .Orgs}}<a href="/?org={{.}}" {{if eq $.Org .}}class="on"{{end}}>{{.}}</a>{{end}}
+  <span class="who">signed in as {{.Viewer}}{{if .Sudo}} &middot; fleet view{{end}}</span>
 </nav>
 
 {{if .Stale}}<div class="warn">
