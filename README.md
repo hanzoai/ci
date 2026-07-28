@@ -92,6 +92,18 @@ artifact, so the bits and the digest that authorizes them ship as one release
 and a host reads both from one place. The job summary prints the
 `zip.Load(zip.Plugin{URL, Sum})` a host pastes.
 
+Add a top-level `bucket:` and they publish to **hanzoai/s3** instead — same
+artifacts, same index, only the url changes:
+
+```yaml
+bucket: plugins   # → https://s3.hanzo.ai/plugins/<owner>/<repo>/<tag>/binaries.json
+```
+
+Credentials are the `S3_ADMIN_*` names the services already read, pulled from
+KMS at run time; a declared bucket with no credential fails the publish rather
+than shipping an index whose artifacts are missing. Use it for anything large or
+frequent — a GitHub release stores it on a quota we do not own.
+
 Builds are `CGO_ENABLED=0 -trimpath`: the host that installs this runs it on
 whatever base image the host is, and the digest must be a function of the
 source, not of the checkout path.
