@@ -1,0 +1,27 @@
+name: CI/CD
+# The gate for hanzoai/ci itself, on our own runners against git.hanzo.ai.
+#
+# THE LAW: `.github/workflows` runs zero CI; everything that gates or builds
+# lives here. All real config is the repo-root hanzo.yml — this file is the
+# ~7-line caller, exactly like cloud/commerce/console/git.
+#
+# Self-referential on purpose: this repo's dashboard image is built by this
+# repo's own reusable pipeline, pinned at the @v2 TAG rather than at the working
+# tree. That pin is what keeps a broken edit to build.yml from also breaking the
+# build that would have caught it — the tag moves only when a release is cut.
+on:
+  push:
+    branches: [main]
+    # A v* tag is what produces a published, immutable image tag (branch pushes
+    # only ever yield sha-<sha7>). Without this trigger a release tag builds
+    # nothing at all and the CR has no version to pin.
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+concurrency:
+  group: cicd-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  gate:
+    uses: hanzoai/ci/.hanzo/workflows/build.yml@v2
+    secrets: inherit
