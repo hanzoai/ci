@@ -1,0 +1,879 @@
+# Hanzo CI/CD — reusable build + test + deploy, driven by the caller repo's root
+# hanzo.yml. Runs on our self-hosted arc runners; pulls registry + kubeconfig
+# creds from KMS via Universal Auth at run time. Public so any org can import it
+# with `uses: hanzoai/ci/.github/workflows/build.yml@v1` + `secrets: inherit`.
+#
+# The caller is ~7 lines (triggers + this `uses:`); all real config is hanzo.yml.
+name: Hanzo CI/CD
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: >-
+          Runner labels as a JSON array. Default = Hanzo cloud arc pool (we run
+          the build, metered as build minutes). Bring-your-own: pass the labels
+          of your own self-hosted arc runners instead.
+        type: string
+        default: '["hanzo-build-linux-amd64"]'
+      mode:
+        description: >-
+          Build execution mode. `buildx` (default) runs the full buildx →
+          test → deploy pipeline ON the arc runner. `delegate` instead POSTs the
+          build to platform.hanzo.ai (`/v1/arcd/enqueue`) — platform builds
+          in-cluster with BuildKit and rolls the operator Service CR itself, so
+          the GitHub job finishes in seconds with no runner buildx. A repo opts
+          in by passing `with: { mode: delegate }`; everything else is unchanged.
+          Requires the `PLATFORM_BUILD_CALLBACK_TOKEN` secret (via secrets:
+          inherit).
+        type: string
+        default: buildx
+      tests:
+        description: >-
+          Run the `test:` block. Default true, and a caller should leave it that
+          way. false asserts that THIS EXACT COMMIT was already gated before this
+          run — it does not mean "ship untested". The one shape that holds today
+          is hanzoai/cloud's release: clients/platform/release.go mints the v* tag
+          only after that SHA passed the gate on main AND built AND smoked, so the
+          tag build would re-test a commit already proven, at the cost of a
+          3108-package link storm. Passing false there runs the gate once instead
+          of twice; passing it anywhere else runs it zero times.
+        type: boolean
+        default: true
+
+permissions:
+  contents: write # release assets for `binaries:`; read is enough without it
+  packages: write
+
+jobs:
+  cicd:
+    runs-on: ${{ fromJson(inputs.runner) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Provision parse toolchain (jq + PyYAML)
+        # This reusable parses the caller's hanzo.yml with python3 + PyYAML and
+        # slices JSON with jq. The stock arc runner image
+        # (ghcr.io/actions/actions-runner:latest) is minimal and ships NEITHER,
+        # so provision them here. Guarded (a no-op the moment a runner image bakes
+        # them in) — this keeps the reusable self-contained: any org can import it
+        # onto a bare runner and it just works.
+        run: |
+          set -e
+          # Sudo-free FIRST (bare arc nodes often lack passwordless sudo / apt
+          # network — `sudo apt-get` then dies with no captured logs). Install jq
+          # as a static binary and PyYAML via pip --user into ~/.local/bin; fall
+          # back to apt only if those are unavailable. Works on bare AND baked nodes.
+          export PATH="$HOME/.local/bin:$PATH"
+          mkdir -p "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          if ! command -v jq >/dev/null 2>&1; then
+            curl -fsSL https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64 \
+              -o "$HOME/.local/bin/jq" && chmod +x "$HOME/.local/bin/jq" \
+            || { sudo apt-get update -qq && sudo apt-get install -y -qq jq; }
+          fi
+          # yq (mikefarah) — static Go binary, curl-installed like jq. Replaces the
+          # PyYAML/python3 YAML parse that could not be provisioned on locked-down
+          # arc nodes (sudo blocked by no_new_privs, pip/PyPI unavailable).
+          if ! command -v yq >/dev/null 2>&1; then
+            curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64 \
+              -o "$HOME/.local/bin/yq" && chmod +x "$HOME/.local/bin/yq"
+          fi
+          jq --version
+          yq --version
+
+      - name: Delegate build to platform (mode=delegate)
+        # The GHA-escape fast path: instead of running buildx on this runner, POST
+        # each image in hanzo.yml to platform.hanzo.ai's direct-enqueue webhook
+        # (`/v1/arcd/enqueue`). Platform creates a build_job row, launches an
+        # in-cluster BuildKit Job on its own pool, pushes to the registry, and —
+        # for a system service — patches the operator Service CR to roll it. The
+        # downstream is IDENTICAL to the platform GitHub-App webhook path (one
+        # build path, two front doors), so a delegated build behaves exactly like
+        # a platform-native one. This job then exits in seconds — no buildx, no
+        # KMS, no runner-side deploy.
+        if: inputs.mode == 'delegate'
+        env:
+          ENQUEUE_URL: ${{ vars.PLATFORM_ENQUEUE_URL || 'https://platform.hanzo.ai/v1/arcd/enqueue' }}
+          ENQUEUE_TOKEN: ${{ secrets.PLATFORM_BUILD_CALLBACK_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ENQUEUE_TOKEN:-}" ]; then
+            echo "::error::mode=delegate needs the PLATFORM_BUILD_CALLBACK_TOKEN secret (secrets: inherit)"; exit 1
+          fi
+          REPO="${{ github.repository }}"
+          SHA="${{ github.sha }}"
+          SHORT=$(echo "$SHA" | cut -c1-7)
+          REF="${{ github.ref }}"
+          BRANCH="${{ github.ref_name }}"
+          # One enqueue per (image, platform), mirroring the buildx tag shape the
+          # deploy path expects (`sha-<short>-<arch>[-<suffix>]`). Default arch is
+          # amd64 (single-arch), so an existing repo's tag shape is unchanged.
+          yq -o=json -I=0 '.images' hanzo.yml | jq -c '.[]' | while read -r img; do
+            name=$(echo "$img"|jq -r .name); repo=$(echo "$img"|jq -r .repo)
+            ctx=$(echo "$img"|jq -r .context); df=$(echo "$img"|jq -r '.dockerfile // (.context+"/Dockerfile")')
+            sfx=$(echo "$img"|jq -r '."tag-suffix" // ""')
+            echo "$img" | jq -r '(.platforms // ["linux/amd64"])[]' | while read -r plat; do
+              arch="${plat##*/}"
+              image="${repo}:sha-${SHORT}-${arch}${sfx:+-$sfx}"
+              body=$(jq -nc \
+                --arg repo "$REPO" --arg sha "$SHA" --arg image "$image" \
+                --arg ref "$REF" --arg branch "$BRANCH" \
+                --arg dockerfile "$df" --arg context "$ctx" --arg arch "$arch" \
+                '{repo:$repo,sha:$sha,image:$image,ref:$ref,branch:$branch,dockerfile:$dockerfile,context:$context,os:"linux",arch:$arch}')
+              echo "::group::delegate $name → $image"
+              code=$(curl -sS -o /tmp/enqueue.out -w '%{http_code}' -X POST "$ENQUEUE_URL" \
+                -H "Authorization: Bearer $ENQUEUE_TOKEN" -H 'Content-Type: application/json' -d "$body")
+              cat /tmp/enqueue.out; echo
+              # 202 Accepted = queued; 409 = no live runner for the pool (surface it loud).
+              if [ "$code" != "202" ]; then echo "::error::enqueue $image failed (HTTP $code)"; exit 1; fi
+              echo "::endgroup::"
+            done
+          done
+
+      - name: Authenticated git for go modules (rate-limit + any private repo)
+        if: inputs.mode != 'delegate'
+        # luxfi/hanzoai/zooai Go modules are PUBLIC, so `go` resolves them through
+        # the default public proxy (proxy.golang.org) + checksum db (sum.golang.org)
+        # — canonical, IMMUTABLE hashes that a force-moved tag can no longer break.
+        # We deliberately do NOT set GOPRIVATE: that would route these public
+        # modules `direct` and bypass the sumdb, re-introducing the re-publish
+        # poisoning we just removed. This step only adds a GH_PAT git credential so
+        # the proxy's `direct` fallback (and any genuinely-private repo added later,
+        # via a narrow GOPRIVATE) authenticates instead of hitting the anon rate
+        # limit. No-op when GH_PAT is absent.
+        #
+        # Robustness (learned the hard way in hanzoai/iam): a plain
+        # `git config --global` is defeated on shared self-hosted arc runners by
+        # (a) a stale insteadOf/credential left in ~/.gitconfig by a prior run and
+        # (b) actions/checkout's persisted http.<github>.extraheader (the repo-
+        # scoped GITHUB_TOKEN) in the checked-out repo's local config. So use a
+        # FRESH per-job GIT_CONFIG_GLOBAL + GIT_CONFIG_NOSYSTEM=1 and verify from
+        # a NEUTRAL dir (matches where go clones modules — GOMODCACHE).
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          if [ -z "${GH_PAT:-}" ]; then
+            echo "GH_PAT not set — public proxy+sumdb handles everything"; exit 0
+          fi
+          CFG="$RUNNER_TEMP/gitconfig-private"; : > "$CFG"
+          GIT_CONFIG_GLOBAL="$CFG" git config --global \
+            url."https://x-access-token:${GH_PAT}@github.com/".insteadOf "https://github.com/"
+          {
+            echo "GIT_CONFIG_GLOBAL=$CFG"
+            echo "GIT_CONFIG_NOSYSTEM=1"
+          } >> "$GITHUB_ENV"
+          ( cd "$RUNNER_TEMP" && GIT_CONFIG_GLOBAL="$CFG" GIT_CONFIG_NOSYSTEM=1 \
+              git ls-remote https://github.com/hanzoai/authz >/dev/null 2>&1 ) \
+            && echo "git auth OK" \
+            || echo "::warning::GH_PAT set but repo probe failed"
+
+      - name: Log in to GHCR (GH_PAT when present, else automatic token)
+        if: inputs.mode != 'delegate'
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        # Prefer the KMS-backed GH_PAT (admin:org + write:packages): it can push
+        # or CREATE any <org> package regardless of which repo the package is
+        # linked to. The per-job GITHUB_TOKEN only writes a package linked to THIS
+        # repo, so it 403s on a package created/linked elsewhere (e.g.
+        # ghcr.io/hanzoai/cms). Fall back to the automatic token when GH_PAT is
+        # absent (public forks like zooai/node that create their own repo-linked
+        # package on first push).
+        run: |
+          if [ -n "${GH_PAT:-}" ]; then
+            echo "$GH_PAT" | docker login ghcr.io -u hanzo-dev --password-stdin
+          else
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          fi
+
+      - name: Fetch deploy credentials from KMS
+        id: kms
+        if: inputs.mode != 'delegate'
+        env:
+          KMS_CLIENT_ID: ${{ secrets.KMS_CLIENT_ID }}
+          KMS_CLIENT_SECRET: ${{ secrets.KMS_CLIENT_SECRET }}
+          KMS_ENDPOINT: ${{ vars.KMS_ENDPOINT || 'https://kms.hanzo.ai' }}
+          KMS_ORG: ${{ vars.KMS_ORG }}
+        run: |
+          # This step is BEST-EFFORT (see below): GHCR push already works via the
+          # workflow token, and deploy creds are optional. GitHub wraps `run:` in
+          # `bash -eo pipefail`, so we MUST explicitly `set +e` — otherwise an
+          # unguarded curl (e.g. a KMS secret 404 at this org/path) aborts the
+          # step and fails the whole build. Keep -u/-o pipefail; drop -e.
+          set +e
+          set -uo pipefail
+          # Canonical luxfi/kms surface — /v1/kms (the Infisical /api/* surface was
+          # removed when KMS migrated to luxfi/kms, MPC-rooted). Auth = an IAM
+          # client_credentials JWT minted by the per-org `<org>-kms` application;
+          # secrets are org-scoped and fetched one at a time (no bulk /secrets/raw).
+          #
+          # This step is BEST-EFFORT: the automatic workflow token already
+          # authorizes GHCR push, so a repo with no cross-org private deps and no
+          # deploy can build without KMS. KMS provides only:
+          #   GITHUB_TOKEN — a cross-org PAT for cloning OTHER orgs' private Go
+          #     modules (luxfi/dex, luxfi/precompile from a zooai build), which the
+          #     repo-scoped automatic token cannot read. Handed to buildx as the
+          #     `gh_token` BuildKit secret.
+          #   KUBECONFIG  — cluster access for the deploy step.
+          ORG="$(yq -r '.kms.org // ""' hanzo.yml 2>/dev/null || true)"
+          : "${ORG:=${KMS_ORG:-}}"
+          # Systemic default: when neither hanzo.yml `kms.org` nor the KMS_ORG var
+          # is set, derive the KMS org from the GitHub owner. The org → KMS-org
+          # relation is a small, stable first-party fact; keeping it here (ONE
+          # place) is why every repo gets the canonical KMS deploy-cred path with
+          # zero per-repo config — before this, ORG was always empty and this whole
+          # step short-circuited, so no build ever fetched its private-dep git
+          # credential from KMS (it silently fell back to GH_PAT and failed on
+          # private hanzoai/cloud). hanzo.yml `kms.org` and KMS_ORG still override.
+          if [ -z "$ORG" ]; then
+            case "${{ github.repository_owner }}" in
+              hanzoai) ORG=hanzo ;;
+              luxfi)   ORG=lux ;;
+              zooai)   ORG=zoo ;;
+              *)       ORG="${{ github.repository_owner }}" ;;
+            esac
+          fi
+          ENV="$(yq -r '.kms.environment // "prod"' hanzo.yml 2>/dev/null || echo prod)"
+          PATHQ="$(yq -r '.kms.path // "/deploy"' hanzo.yml | sed 's#^/##; s#/$##' 2>/dev/null || echo deploy)"
+          if [ -z "${KMS_CLIENT_ID:-}" ] || [ -z "$ORG" ]; then
+            echo "::notice::KMS not configured (no KMS_CLIENT_ID or org) — skipping; GHCR push uses the workflow token"; exit 0
+          fi
+          TOKEN=$(curl -sf "$KMS_ENDPOINT/v1/kms/auth/login" \
+            -H 'Content-Type: application/json' \
+            -d "{\"clientId\":\"$KMS_CLIENT_ID\",\"clientSecret\":\"$KMS_CLIENT_SECRET\"}" | jq -r '.accessToken // empty')
+          if [ -z "$TOKEN" ]; then echo "::warning::KMS login failed (org=$ORG client=$KMS_CLIENT_ID) — cross-org private deps & deploy unavailable"; exit 0; fi
+          get() { curl -sf "$KMS_ENDPOINT/v1/kms/orgs/$ORG/secrets/$PATHQ/$1?env=$ENV" -H "Authorization: Bearer $TOKEN" | jq -r '.secret.value // empty'; }
+          # Cross-org private Go module read token → buildx `gh_token` secret.
+          # GIT_TOKEN is not a reserved name, so it's safe in GITHUB_ENV.
+          GIT_TOKEN=$(get GITHUB_TOKEN)
+          if [ -n "$GIT_TOKEN" ]; then echo "::add-mask::$GIT_TOKEN"; echo "GIT_TOKEN=$GIT_TOKEN" >> "$GITHUB_ENV"; fi
+          KUBECONFIG_B64=$(get KUBECONFIG)
+          if [ -n "$KUBECONFIG_B64" ]; then echo "$KUBECONFIG_B64" | base64 -d > "$RUNNER_TEMP/kubeconfig"; echo "kubeconfig=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_OUTPUT"; fi
+          # Object-store credential for a repo that publishes `binaries:` to a
+          # bucket:. Same four names the services read at run time, from the same
+          # org/path/env — a CI-only copy of a credential is a second thing to
+          # rotate and the one nobody remembers.
+          if [ -n "$(yq -r '.bucket // ""' hanzo.yml 2>/dev/null || true)" ]; then
+            for k in S3_ADMIN_ACCESS_KEY S3_ADMIN_SECRET_KEY; do
+              v=$(get "$k")
+              if [ -n "$v" ]; then echo "::add-mask::$v"; echo "$k=$v" >> "$GITHUB_ENV"; fi
+            done
+            # Endpoint and region are NOT masked: both appear in every published
+            # URL, and a redacted host turns the printed index into noise.
+            for k in S3_PUBLIC_ENDPOINT S3_REGION S3_PUBLIC_SECURE; do
+              v=$(get "$k")
+              if [ -n "$v" ]; then echo "$k=$v" >> "$GITHUB_ENV"; fi
+            done
+          fi
+          # Build-time secrets → --build-arg. A repo declares per-image
+          # `build_secrets: [NAME, ...]` in hanzo.yml; each NAME is fetched from
+          # the SAME org/path/env and exported (masked) so the build step bakes
+          # it in as `--build-arg NAME=value`. The KMS key name IS the build-arg
+          # name — one name, one place. For publishable client tokens a Vite SPA
+          # must embed at build (e.g. VITE_MAPBOX_TOKEN). Undeclared → no-op, so
+          # every existing repo is byte-for-byte unchanged.
+          for bs in $(yq -r '[(.images // [])[] | (.build_secrets // [])[]] | unique | .[]' hanzo.yml 2>/dev/null || true); do
+            case "$bs" in ''|*[!A-Za-z0-9_]*) echo "::warning::skipping invalid build_secret name '$bs'"; continue;; esac
+            v=$(get "$bs" || true)
+            if [ -n "$v" ]; then
+              echo "::add-mask::$v"
+              { echo "$bs<<__KMS_BUILDARG_EOF__"; echo "$v"; echo "__KMS_BUILDARG_EOF__"; } >> "$GITHUB_ENV"
+            else echo "::warning::build_secret $bs not in KMS ($ORG/$PATHQ env=$ENV) — build-arg will be empty"; fi
+          done
+
+      - name: GHCR push credential (KMS write:packages token)
+        if: inputs.mode != 'delegate'
+        env:
+          KUBECONFIG: ${{ steps.kms.outputs.kubeconfig }}
+        # The per-job GITHUB_TOKEN — and a package-less GH_PAT — can only push a
+        # package LINKED to this repo, so they 403 on a package created/linked
+        # elsewhere (ghcr.io/hanzoai/cms). Upgrade the ghcr login to the org's
+        # ghcr push token from the cluster (buildx-ghcr-auth, admin write:packages,
+        # KMS-synced) when a kubeconfig is present — it pushes/creates ANY <org>
+        # package. Fail-safe: keep the earlier login if anything is unavailable
+        # (public forks with no KMS keep their repo-linked GITHUB_TOKEN push).
+        run: |
+          set -uo pipefail
+          [ -z "${KUBECONFIG:-}" ] && { echo "::notice::no kubeconfig — keeping the earlier GHCR login"; exit 0; }
+          command -v kubectl >/dev/null 2>&1 || {
+            KVER=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
+            mkdir -p "$HOME/.local/bin"
+            curl -fsSL "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl" -o "$HOME/.local/bin/kubectl" && chmod +x "$HOME/.local/bin/kubectl"
+            export PATH="$HOME/.local/bin:$PATH"
+          }
+          CFG=$(kubectl -n hanzo get secret buildx-ghcr-auth -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null | base64 -d || true)
+          [ -z "$CFG" ] && { echo "::notice::buildx-ghcr-auth not readable — keeping the earlier GHCR login"; exit 0; }
+          UP=$(echo "$CFG" | jq -r '.auths | to_entries[] | select(.key|test("ghcr")) | .value.auth' | head -1 | base64 -d 2>/dev/null || true)
+          [ -z "$UP" ] && { echo "::notice::no ghcr auth in buildx-ghcr-auth — keeping the earlier login"; exit 0; }
+          echo "::add-mask::${UP#*:}"
+          if echo "${UP#*:}" | docker login ghcr.io -u "${UP%%:*}" --password-stdin; then
+            echo "::notice::GHCR login upgraded to the KMS write:packages token"
+          else
+            echo "::notice::KMS GHCR token login failed — keeping the earlier login"
+          fi
+
+      - name: Native registry credential (oci.hanzo.ai)
+        if: inputs.mode != 'delegate'
+        env:
+          KUBECONFIG: ${{ steps.kms.outputs.kubeconfig }}
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        run: |
+          set -uo pipefail
+          # Direct credential first (repo/org secret — works on private repos,
+          # where the Free plan hides org secrets... including these; private
+          # repos set them at REPO level). KMS-kubeconfig read is the fallback.
+          if [ -n "${REGISTRY_USER:-}" ] && [ -n "${REGISTRY_PASSWORD:-}" ]; then
+            # Best-effort: a registry.hanzo.ai login FAILURE (not just a missing
+            # cred) must never fail the run — the image still pushes to GHCR, the
+            # primary. Without this guard, bash -e aborts the step and SKIPS the
+            # build entirely (a registry hiccup takes the whole lane red).
+            if echo "$REGISTRY_PASSWORD" | docker login oci.hanzo.ai -u "$REGISTRY_USER" --password-stdin; then
+              echo "MIRROR_OK=1" >> "$GITHUB_ENV"
+            else
+              echo "::notice::registry.hanzo.ai login failed — mirror skipped (GHCR-only push)"
+            fi
+            exit 0
+          fi
+          [ -z "${KUBECONFIG:-}" ] && { echo "::warning::no registry credential and no kubeconfig — image will NOT reach oci.hanzo.ai (ghcr only)"; exit 0; }
+          # Bare arc runners ship no kubectl — same static provision the deploy
+          # step uses.
+          command -v kubectl >/dev/null 2>&1 || {
+            KVER=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
+            mkdir -p "$HOME/.local/bin"
+            curl -fsSL "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl"               -o "$HOME/.local/bin/kubectl" && chmod +x "$HOME/.local/bin/kubectl"
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"; export PATH="$HOME/.local/bin:$PATH"
+          }
+          CFG=$(kubectl -n hanzo get secret registry-credentials                   -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null | base64 -d || true)
+          if [ -z "$CFG" ]; then
+            echo "::warning::registry-credentials not readable from this kubeconfig — image will NOT reach oci.hanzo.ai (ghcr only)"; exit 0
+          fi
+          USERPASS=$(echo "$CFG" | jq -r '.auths["registry.hanzo.ai"].auth // empty' | base64 -d)
+          [ -z "$USERPASS" ] && { echo "::warning::no registry auth in dockerconfig — image will NOT reach oci.hanzo.ai (ghcr only)"; exit 0; }
+          echo "::add-mask::${USERPASS#*:}"
+          # Best-effort: login failure → skip mirror, never fail the run (see above).
+          if echo "${USERPASS#*:}" | docker login oci.hanzo.ai -u "${USERPASS%%:*}" --password-stdin; then
+            echo "MIRROR_OK=1" >> "$GITHUB_ENV"
+          else
+            echo "::notice::registry.hanzo.ai login failed — mirror skipped (GHCR-only push)"
+          fi
+
+      - name: Build & push images (per hanzo.yml)
+        if: inputs.mode != 'delegate'
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          # Test-only callers (hanzo.yml without `images:` — e.g. a repo whose
+          # image lane lives in its own release.yml, or a pure library) skip the
+          # build step entirely instead of exploding on a null .images.
+          if [ "$(yq -r '.images // [] | length' hanzo.yml 2>/dev/null || echo 0)" = "0" ]; then
+            echo "::notice::no images: in hanzo.yml — test-only caller, skipping build"; exit 0
+          fi
+          # Build-time private cross-org Go module read (the buildx `gh_token`
+          # secret): prefer the KMS-fetched GIT_TOKEN, else fall back to the org
+          # GH_PAT — the SAME BuildKit gh_token cloud's release.yml uses (proven
+          # working). Keeps image builds green when the KMS deploy-cred fetch is
+          # unavailable (a repo with a private cross-org dep like hanzoai/cloud
+          # otherwise fails `go mod tidy` with git exit 128 in the buildx stage).
+          # No-op for public-only builds when both are empty. Exported so the
+          # `--secret id=gh_token,env=GIT_TOKEN` below reads it from the env.
+          export GIT_TOKEN="${GIT_TOKEN:-${GH_PAT:-}}"
+          SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
+          IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo 1 || echo 0)
+          REL="${{ github.ref_name }}"   # the git tag, verbatim: v1.26.19
+          VER="${REL#v}"                 # v-stripped alias: 1.26.19
+          yq -o=json -I=0 '.images' hanzo.yml | jq -c '.[]' | while read -r img; do
+            name=$(echo "$img"|jq -r .name); ctx=$(echo "$img"|jq -r .context)
+            df=$(echo "$img"|jq -r '.dockerfile // (.context+"/Dockerfile")'); repo=$(echo "$img"|jq -r .repo)
+            # tag-suffix is OPTIONAL (most repos ship a single variant). When set
+            # (e.g. "ce"/"ee") it qualifies every tag; when absent the tags are
+            # clean (no trailing dash). Build + deploy must agree on this shape.
+            sfx=$(echo "$img"|jq -r '."tag-suffix" // ""')
+            # platforms is OPT-IN per image in hanzo.yml (default: amd64 only, so
+            # every existing repo's tag shape "-amd64" is UNCHANGED). Set e.g.
+            #   platforms: [linux/amd64, linux/arm64]
+            # to emit a multi-arch MANIFEST LIST — one digest serving both arches.
+            # DOKS has no arm64 nodes, so arm64 builds via buildx QEMU emulation
+            # (binfmt set up below); pure-Go (CGO_ENABLED=0) Dockerfiles that honor
+            # $TARGETARCH cross-compile natively (fast, no emulation). For true
+            # native-speed arm64, register a bare-metal arm64 host (spark/GB10) as
+            # the hanzo-build-linux-arm64 self-hosted runner (values-build-arm64.yaml).
+            plats=$(echo "$img"|jq -r '(.platforms // ["linux/amd64"]) | join(",")')
+            if [ "$plats" = "linux/amd64" ]; then
+              # single-arch: keep the exact legacy tag shape (-amd64) deploys expect.
+              TAGS="-t $repo:sha-${SHORT}-amd64${sfx:+-$sfx} -t $repo:${sfx:+$sfx-}latest"
+            else
+              # multi-arch: one arch-neutral manifest-list tag (no -amd64 suffix).
+              docker run --privileged --rm tonistiigi/binfmt --install arm64 >/dev/null 2>&1 || true
+              TAGS="-t $repo:sha-${SHORT}${sfx:+-$sfx} -t $repo:${sfx:+$sfx-}latest"
+            fi
+            # Release (tag) build. The git tag IS the release name, so publish it
+            # VERBATIM (v1.26.19) — that is the shape a universe CR pins, and
+            # stripping the v is why releases were finished by hand-`crane copy`ing
+            # sha-<sha7> onto the semver a human typed. Identity in, identity out.
+            # The v-stripped alias stays for CRs already pinned that way (world
+            # 2.4.51), and is skipped when a repo tags without a v. The old
+            # `<ver>-amd64` alias is deleted: no CR in the fleet pinned it.
+            if [ "$IS_TAG" = 1 ]; then
+              TAGS="$TAGS -t $repo:${REL}${sfx:+-$sfx}"
+              [ "$REL" != "$VER" ] && TAGS="$TAGS -t $repo:${VER}${sfx:+-$sfx}"
+            fi
+            echo "::group::build $name → $repo (${sfx}) [$plats]"
+            # --build-arg assembly: static hanzo.yml `args` (a fixed value, e.g. a
+            # pinned base image tag) + `build_secrets` (KMS values the KMS step
+            # exported into the env above). Empty when a repo declares neither, so
+            # the buildx line is unchanged for every existing repo.
+            BUILD_ARGS=""
+            while IFS= read -r kv; do [ -n "$kv" ] && BUILD_ARGS="$BUILD_ARGS --build-arg $kv"; done \
+              < <(echo "$img" | jq -r '(.args // {}) | to_entries[] | "\(.key)=\(.value)"')
+            for bs in $(echo "$img" | jq -r '(.build_secrets // [])[]'); do
+              v=$(printenv "$bs" 2>/dev/null || true); [ -n "$v" ] && BUILD_ARGS="$BUILD_ARGS --build-arg $bs=$v"
+            done
+            # GIT_TOKEN (from KMS, via GITHUB_ENV) is passed as the `gh_token`
+            # BuildKit secret so Dockerfiles can clone private Go modules; omitted
+            # cleanly when absent (public-only builds unaffected).
+            docker buildx build --platform "$plats" $BUILD_ARGS ${GIT_TOKEN:+--secret id=gh_token,env=GIT_TOKEN} --push $TAGS -f "$df" "$ctx"
+            # Dual-host: mirror the exact tag set to registry.hanzo.ai (server-
+            # side manifest copy — no rebuild). ghcr.io/<org>/<name> →
+            # oci.hanzo.ai/<org>/<name>; public consumers keep ghcr, the fleet
+            # is migrating to pull from ours. A skip here is now a WARNING, not
+            # a notice: an image that never reaches our registry is the reason
+            # a deploy still depends on GitHub, and that should be visible in
+            # the run, not buried.
+            if [ "${MIRROR_OK:-}" = "1" ]; then
+              # crane, not buildx imagetools: the IAM token realm doesn't answer
+              # buildx's multi-scope token request (spec gap, tracked).
+              command -v crane >/dev/null 2>&1 || {
+                mkdir -p "$HOME/.local/bin"
+                curl -fsSL https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_Linux_x86_64.tar.gz \
+                  | tar -xz -C "$HOME/.local/bin" crane
+                export PATH="$HOME/.local/bin:$PATH"
+              }
+              mrepo="oci.hanzo.ai/${repo#*/}"
+              echo "$TAGS" | tr ' ' '\n' | grep -v '^-t$' | grep -v '^$' | while read -r ref; do
+                crane copy "$ref" "${mrepo}:${ref##*:}" \
+                  || echo "::warning::$ref did not reach oci.hanzo.ai (ghcr push unaffected)"
+              done
+            fi
+            echo "::endgroup::"
+          done
+
+      - name: Provision Go toolchain (go test gates on bare runners)
+        # hanzo.yml `test:` gates (e.g. `go vet ./...`, `go test ...`) run
+        # DIRECTLY on the runner, NOT inside a build container — but the stock
+        # arc runner image (ghcr.io/actions/actions-runner) ships no Go, so a Go
+        # gate dies with `go: command not found` (exit 127). Provision the repo's
+        # OWN Go version from go.mod so the toolchain matches the module exactly.
+        # Guarded to Go repos (go.mod present) so pure-JS/TS callers are
+        # unaffected; harmless if a future runner image bakes Go in.
+        if: inputs.mode != 'delegate' && hashFiles('go.mod') != ''
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Provision C toolchain (cgo test gates)
+        # CGO_ENABLED=1 gates (e.g. go-sqlite3, which bundles the sqlite
+        # amalgamation) need a C compiler; the minimal arc runner ships none
+        # (`cgo: gcc not found`). Same guarded provision the parse-toolchain step
+        # above uses — a no-op when gcc is already present. If apt-get update
+        # fails (arc snapshot mirror rot: "no longer has a Release file"),
+        # repoint archive.ubuntu.com at the DO mirror — both sources.list and
+        # noble's deb822 ubuntu.sources — and retry once.
+        if: inputs.mode != 'delegate' && hashFiles('go.mod') != ''
+        run: |
+          command -v gcc >/dev/null 2>&1 && exit 0
+          sudo apt-get update -qq || {
+            sudo find /etc/apt -name '*.list' -o -name '*.sources' | \
+              xargs -r sudo sed -i 's|https\?://archive.ubuntu.com/ubuntu|http://mirrors.digitalocean.com/ubuntu|g'
+            sudo apt-get update -qq
+          }
+          sudo apt-get install -y -qq gcc
+
+      - name: Provision Node toolchain (JS test gates)
+        # JS/TS `test:` gates (e.g. `pnpm install --frozen-lockfile && pnpm lint`)
+        # also run DIRECTLY on the runner, and the stock arc runner image ships
+        # no Node — so the gate dies at `corepack: command not found` (exit 127)
+        # before it ever reads package.json. Same guarded provision as the Go
+        # step above: only for JS callers (package.json present), harmless if a
+        # future runner image bakes Node in. `corepack enable` shims the repo's
+        # own packageManager (pnpm/yarn) at its pinned version.
+        if: inputs.mode != 'delegate' && hashFiles('package.json') != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Enable corepack (pnpm/yarn shims for JS test gates)
+        if: inputs.mode != 'delegate' && hashFiles('package.json') != ''
+        run: corepack enable
+
+      - name: Authenticate runner git for private Go modules (test gates)
+        # The Test step runs `go vet`/`go test` ON the runner (not in buildx), so
+        # `go` fetches private hanzoai/* modules (GOPRIVATE → direct) through the
+        # runner's git, which needs a credential. The IMAGE build authenticates
+        # via the KMS `gh_token` inside buildx (GIT_TOKEN); the earlier GH_PAT
+        # git-auth step is a no-op for repos that rely on that KMS token (GH_PAT
+        # unset) — so `go vet` dies with `could not read Username for github.com`.
+        # Reuse the SAME token here for the runner's git (GIT_TOKEN, set by the
+        # KMS step above; GH_PAT fallback). No-op when neither is present.
+        if: inputs.mode != 'delegate' && hashFiles('go.mod') != ''
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          set -uo pipefail
+          TOKEN="${GIT_TOKEN:-${GH_PAT:-}}"
+          if [ -z "$TOKEN" ]; then echo "no git token — public modules only"; exit 0; fi
+          CFG="$RUNNER_TEMP/gitconfig-go-test"; : > "$CFG"
+          GIT_CONFIG_GLOBAL="$CFG" git config --global \
+            url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+          { echo "GIT_CONFIG_GLOBAL=$CFG"; echo "GIT_CONFIG_NOSYSTEM=1"; } >> "$GITHUB_ENV"
+          echo "runner git authenticated for private Go modules"
+
+      - name: Test (per hanzo.yml)
+        if: inputs.mode != 'delegate' && inputs.tests
+        run: |
+          set -euo pipefail
+          yq -o=json -I=0 '.test // []' hanzo.yml | jq -c '.[]' | while read -r t; do
+            name=$(echo "$t"|jq -r .name); cmd=$(echo "$t"|jq -r .run)
+            echo "::group::test $name"; bash -c "$cmd"; echo "::endgroup::"
+          done
+
+      - name: Build & publish binaries (per hanzo.yml)
+        # The plugin lane. `images:` ships an OCI image a CLUSTER runs;
+        # `binaries:` ships an EXECUTABLE a RUNNING HOST installs — a zip plugin
+        # (`zip.Load(zip.Plugin{URL, Sum})`), which fetches the artifact,
+        # verifies its SHA-256 BEFORE making it executable, and caches it by
+        # digest. So a plugin is built ONCE per OS/arch and every host picks up
+        # the same bits: nobody rebuilds the world to ship a plugin, and no host
+        # is trusted to have built it right.
+        #
+        # It rides THIS pipeline, not a second one — same hanzo.yml, same job,
+        # same runner, same KMS token — and adds two rules of its own:
+        #   - BUILT on every push, PUBLISHED only on a tag. A cross-compile that
+        #     breaks arm64 fails the PR that broke it, not the release.
+        #   - published AFTER the bits are GATED, because a host installs an
+        #     artifact unattended. Normally that gate is the `test:` step above,
+        #     in this same run. A caller passing `tests: false` asserts it ran
+        #     EARLIER on this exact commit: hanzoai/cloud mints its v* tag only
+        #     after that SHA passed the gate on main and built and smoked
+        #     (clients/platform/release.go), so the tag build would re-test a
+        #     commit already proven. The invariant did not weaken — it is
+        #     enforced once instead of twice, and the assertion is the input.
+        #     (Images push before tests; an image is rolled out by a deliberate,
+        #     reviewed pin — an artifact is not.)
+        # dist/binaries.json is uploaded with them: url + sha256 for every
+        # artifact, so the bits and the digest that authorizes them are the same
+        # release, and a host reads url+sum from ONE place.
+        if: inputs.mode != 'delegate'
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GH_AUTOMATIC: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "$(yq -r '.binaries // [] | length' hanzo.yml 2>/dev/null || echo 0)" = "0" ]; then
+            echo "::notice::no binaries: in hanzo.yml — nothing to publish"; exit 0
+          fi
+          TAG="${{ github.ref_name }}"; REPO="${{ github.repository }}"
+          IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo 1 || echo 0)
+          # The runner tells us which forge it is talking to — github.com on the
+          # arc pool, a GHES/forge front door elsewhere. Reading it instead of
+          # hardcoding the hostname is what keeps ONE lane serving both.
+          SERVER="${GITHUB_SERVER_URL:-https://github.com}"
+          API="${GITHUB_API_URL:-https://api.github.com}"
+          case "$API" in
+            https://api.github.com) UPLOADS=https://uploads.github.com ;;
+            *) UPLOADS="$SERVER/api/uploads" ;;
+          esac
+          # A repo naming a bucket: publishes to hanzoai/s3 instead of a release.
+          # Same artifacts, same index, one url per artifact — only where it
+          # points changes, and it is decided HERE because the url is baked into
+          # binaries.json at build time.
+          BUCKET="$(yq -r '.bucket // ""' hanzo.yml 2>/dev/null || true)"
+          if [ -n "$BUCKET" ]; then
+            # Host and scheme are the two clients/s3admin reads, so CI publishes
+            # to the same URL the services resolve.
+            SCHEME=https
+            if [ "${S3_PUBLIC_SECURE:-true}" = "false" ]; then SCHEME=http; fi
+            BASE="$SCHEME://${S3_PUBLIC_ENDPOINT:-s3.hanzo.ai}/$BUCKET/$REPO/$TAG"
+          else
+            BASE="$SERVER/$REPO/releases/download/$TAG"
+          fi
+          rm -rf dist; mkdir -p dist
+          # CGO_ENABLED=0 is not a preference: the host that installs this runs
+          # it on WHATEVER base image the host happens to be, so a binary linked
+          # against that runner's glibc is a plugin that starts on the runner and
+          # nowhere else. -trimpath keeps the digest a function of the source,
+          # not of the checkout path.
+          yq -o=json -I=0 '.binaries' hanzo.yml | jq -c '.[]' | while read -r b; do
+            name=$(echo "$b"|jq -r .name); main=$(echo "$b"|jq -r '.main // ""')
+            lf=$(echo "$b"|jq -r '.ldflags // "-s -w"')
+            run=$(echo "$b"|jq -r '.run // ""'); out=$(echo "$b"|jq -r '.out // ""')
+            # `run:` + `out:` is the SAME lane for every toolchain that is not Go:
+            # the command that builds, and the glob of what it produced. It is why
+            # a repo with no Dockerfile and no Go can still publish an artifact —
+            # an npm tarball, a wheel, a Rust binary — through this one block.
+            # (`image:` also appears on such an entry: it names the toolchain
+            # container the PLATFORM lane runs the command in. Here the toolchain
+            # is the runner, so this lane reads past it.)
+            if [ -n "$run" ]; then
+              [ -n "$out" ] || { echo "::error::binaries[$name] declares run: without out: — nothing names what it produced"; exit 1; }
+              echo "::group::build $name ($run)"
+              sh -c "$run"
+              n=0
+              for f in $out; do
+                [ -f "$f" ] || continue
+                base=$(basename "$f"); cp "$f" "dist/$base"
+                sha=$(sha256sum "dist/$base" | cut -d' ' -f1)
+                # os/arch are "any": an npm tarball or a wheel is not per-platform,
+                # and an index entry that claimed one would be a lie a host acts on.
+                jq -nc --arg n "$name" --arg os any --arg arch any \
+                       --arg url "$BASE/$base" --arg sha "$sha" \
+                  '{name:$n,os:$os,arch:$arch,url:$url,sha256:$sha}' >> dist/index.jsonl
+                echo "$base  $sha"; n=$((n+1))
+              done
+              echo "::endgroup::"
+              [ "$n" -gt 0 ] || { echo "::error::binaries[$name] out: '$out' matched no file the recipe produced"; exit 1; }
+              continue
+            fi
+            main="${main:-.}"
+            echo "$b" | jq -r '(.platforms // ["linux/amd64"])[]' | while read -r plat; do
+              os="${plat%%/*}"; arch="${plat##*/}"
+              file="${name}-${os}-${arch}"; [ "$os" = windows ] && file="${file}.exe"
+              echo "::group::build $name $os/$arch"
+              CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+                go build -trimpath -ldflags "$lf" -o "dist/$file" "$main"
+              sha=$(sha256sum "dist/$file" | cut -d' ' -f1)
+              jq -nc --arg n "$name" --arg os "$os" --arg arch "$arch" \
+                     --arg url "$BASE/$file" --arg sha "$sha" \
+                '{name:$n,os:$os,arch:$arch,url:$url,sha256:$sha}' >> dist/index.jsonl
+              echo "$file  $sha"
+              echo "::endgroup::"
+            done
+          done
+          jq -s --arg repo "$REPO" --arg tag "$TAG" \
+            '{repo:$repo,tag:$tag,binaries:.}' dist/index.jsonl > dist/binaries.json
+          rm dist/index.jsonl
+          if [ "$IS_TAG" != 1 ]; then
+            echo "::notice::binaries built for $(jq '.binaries|length' dist/binaries.json) platform(s) — publishing happens on a tag"; exit 0
+          fi
+          if [ -n "$BUCKET" ]; then
+            # Fail closed. An index published without its artifacts is a host
+            # that resolves every app to a 404, which is worse than a host with
+            # no index at all.
+            if [ -z "${S3_ADMIN_ACCESS_KEY:-}" ] || [ -z "${S3_ADMIN_SECRET_KEY:-}" ]; then
+              echo "::error::hanzo.yml names bucket: $BUCKET but KMS holds no S3_ADMIN_ACCESS_KEY/SECRET_KEY for this org — refusing to publish"; exit 1
+            fi
+            # PUT is idempotent, so re-running a release converges on the object
+            # rather than colliding with the one already there.
+            put() { curl -fsS -X PUT --aws-sigv4 "aws:amz:${S3_REGION:-us-east-1}:s3" \
+              -u "$S3_ADMIN_ACCESS_KEY:$S3_ADMIN_SECRET_KEY" \
+              -H 'Content-Type: application/octet-stream' \
+              --data-binary @"$1" "$BASE/$(basename "$1")" >/dev/null
+              echo "published $BASE/$(basename "$1")"; }
+            # Artifacts first, index LAST. The index is the only file a host
+            # reads, so between the two writes it must never name an object that
+            # is not there yet.
+            for f in dist/*; do
+              [ "$f" = dist/binaries.json ] || put "$f"
+            done
+            put dist/binaries.json
+            # A host reads the index with NO credentials, so prove one can
+            # before calling this published — a private object is an index that
+            # resolves every app to a 403. Granting read is the BUCKET's job
+            # (one policy, once), which is why this checks rather than sets it.
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/binaries.json")
+            if [ "$code" != 200 ]; then
+              echo "::error::published, but $BASE/binaries.json answers $code unauthenticated — grant s3:GetObject on $BUCKET/* to Principal \"*\" with a bucket policy"; exit 1
+            fi
+            echo "### Plugin artifacts — \`$TAG\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "Index: \`$BASE/binaries.json\`" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # Same token ladder the rest of this file uses: the KMS org token, the
+          # org PAT, then the per-job automatic one (which can write a release on
+          # its OWN repo, so a repo with no KMS still publishes).
+          TOKEN="${GIT_TOKEN:-${GH_PAT:-$GH_AUTOMATIC}}"
+          api() { curl -fsS -H "Authorization: Bearer $TOKEN" -H 'Accept: application/vnd.github+json' "$@"; }
+          rel=$(api "$API/repos/$REPO/releases/tags/$TAG" 2>/dev/null | jq -r '.id // empty' || true)
+          if [ -z "$rel" ]; then
+            rel=$(api -X POST "$API/repos/$REPO/releases" \
+              -d "$(jq -nc --arg t "$TAG" '{tag_name:$t,name:$t,generate_release_notes:true}')" | jq -r .id)
+          fi
+          for f in dist/*; do
+            n=$(basename "$f")
+            # Re-running a release must converge, not 422: drop a same-named
+            # asset first. The digest in binaries.json is regenerated with it,
+            # so the pair can never disagree.
+            old=$(api "$API/repos/$REPO/releases/$rel/assets" | jq -r --arg n "$n" '.[]?|select(.name==$n)|.id')
+            for id in $old; do api -X DELETE "$API/repos/$REPO/releases/assets/$id" >/dev/null; done
+            api -X POST -H 'Content-Type: application/octet-stream' --data-binary @"$f" \
+              "$UPLOADS/repos/$REPO/releases/$rel/assets?name=$n" >/dev/null
+            echo "published $BASE/$n"
+          done
+          # The job prints what a host pastes. A digest a human retypes is a
+          # digest a human gets wrong.
+          {
+            echo "### Plugin artifacts — \`$TAG\`"
+            echo '```go'
+            jq -r '.binaries[]|"zip.Load(zip.Plugin{\n    Name: \"\(.name)\",   // \(.os)/\(.arch)\n    URL:  \"\(.url)\",\n    Sum:  \"\(.sha256)\",\n}, \"/v1/\(.name)\")"' dist/binaries.json
+            echo '```'
+            echo "Index: \`$BASE/binaries.json\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy (per hanzo.yml)
+        if: inputs.mode != 'delegate' && github.event_name != 'pull_request' && steps.kms.outputs.kubeconfig != ''
+        env:
+          KUBECONFIG: ${{ steps.kms.outputs.kubeconfig }}
+        run: |
+          set -euo pipefail
+          REF="${{ github.ref_name }}"
+          # A caller with no `deploy:` declares its rollout elsewhere (hanzoai/git
+          # pins its own CR by a reviewed universe change). Leave before reading
+          # deploy.services, which is null there — `jq '.[]'` over null aborts the
+          # step, and on a TAG build the deploy.on gate below is bypassed, so this
+          # used to surface only on a release. Same guard the build step has for
+          # `images:`.
+          if [ "$(yq -r '.deploy | type' hanzo.yml 2>/dev/null || echo '!!null')" != '!!map' ]; then
+            echo "::notice::no deploy: in hanzo.yml — build-only caller, skipping deploy"; exit 0
+          fi
+          ON=$(yq -o=json -I=0 '.deploy.on // []' hanzo.yml)
+          IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo 1 || echo 0)
+          if [ "$IS_TAG" != 1 ] && ! echo "$ON" | jq -e --arg b "$REF" 'index($b)' >/dev/null; then
+            echo "branch $REF not in deploy.on — skipping deploy"; exit 0
+          fi
+          # Bare arc runners ship no kubectl — provision the static binary
+          # (same sudo-free pattern as jq/yq above).
+          command -v kubectl >/dev/null 2>&1 || {
+            mkdir -p "$HOME/.local/bin"; export PATH="$HOME/.local/bin:$PATH"
+            KVER=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
+            curl -fsSL "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl" \
+              -o "$HOME/.local/bin/kubectl" && chmod +x "$HOME/.local/bin/kubectl"
+          }
+          SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
+          NS=$(yq -r '.deploy.namespace' hanzo.yml)
+          RTO=$(yq -r '.deploy."rollout-timeout" // "600s"' hanzo.yml)
+          yq -o=json -I=0 '.images' hanzo.yml > /tmp/imgs.json
+          # Desired state lives in the universe repo: the in-cluster
+          # gitops-reconcile job re-applies its CRs every ~5 minutes, so any
+          # direct patch that is not ALSO recorded there is reverted on the
+          # next cycle. Record first (durable), then patch (accelerates the
+          # roll). Universe write rides the same KMS git token as module reads.
+          UNIVERSE=""
+          if [ -n "${GIT_TOKEN:-}" ]; then
+            git clone -q --depth 1 \
+              "https://x-access-token:${GIT_TOKEN}@github.com/hanzoai/universe.git" \
+              /tmp/universe 2>/dev/null && UNIVERSE=/tmp/universe \
+              || echo "::warning::universe clone failed — rolls below are transient until recorded there"
+          fi
+          yq -o=json -I=0 '.deploy.services' hanzo.yml | jq -c '.[]' | while read -r s; do
+            svc=$(echo "$s"|jq -r .name); imgname=$(echo "$s"|jq -r .image)
+            repo=$(jq -r --arg n "$imgname" '.[]|select(.name==$n)|.repo' /tmp/imgs.json)
+            sfx=$(jq -r --arg n "$imgname" '.[]|select(.name==$n)|."tag-suffix" // ""' /tmp/imgs.json)
+            plats=$(jq -r --arg n "$imgname" '.[]|select(.name==$n)|(.platforms // ["linux/amd64"])|join(",")' /tmp/imgs.json)
+            # A TAGGED release pins the git tag VERBATIM (REF) — the very image the
+            # build step published above; a branch build stays on its transient
+            # per-commit sha tag (arch-matched: bare for multi-arch).
+            if [ "$IS_TAG" = 1 ]; then
+              tag="${REF}${sfx:+-$sfx}"
+            elif [ "$plats" = "linux/amd64" ]; then
+              tag="sha-${SHORT}-amd64${sfx:+-$sfx}"
+            else
+              tag="sha-${SHORT}${sfx:+-$sfx}"
+            fi
+            ref="$repo:$tag"
+            CR="$UNIVERSE/infra/k8s/operator/crs/$svc.yaml"
+            # Backward-clobber guard (semver): a transient BRANCH build must NEVER
+            # overwrite a service pinned to a semver RELEASE (rolls prod back to a dev
+            # image). Complements the sha-ancestry guard below, which only sees sha-
+            # tags. Releases are tagged; a branch push leaves the semver pin untouched.
+            cur=""
+            if [ -n "$UNIVERSE" ] && [ -f "$CR" ]; then cur="$(yq -r '.spec.image.tag // ""' "$CR")"; fi
+            if [ "$IS_TAG" != 1 ] && printf '%s' "$cur" | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]+'; then
+              echo "::notice::$svc pinned to release $cur — branch build ${SHORT} leaves it (tag a release to deploy)"; continue
+            fi
+            echo "rolling $svc → $ref"
+            # recorded=1 once the desired tag is durably in universe: the
+            # in-cluster operator reconciles that every ~5min, so an expired
+            # runner kubeconfig must not fail a deploy it will complete. Stays 0
+            # for bare-Deployment repos (no CR) where kubectl is the only path.
+            recorded=0
+            if [ -n "$UNIVERSE" ] && [ -f "$CR" ]; then
+              # Never roll a pin BACKWARD: builds finish out of order, and a slow
+              # build of an older commit must not overwrite a newer roll. If the
+              # CR's current sha is a descendant of ours, ours is stale — skip.
+              CURSHA=$(yq -r '.spec.image.tag // ""' "$CR" | sed -nE 's/^sha-([a-f0-9]{7}).*/\1/p')
+              git fetch -q --unshallow origin 2>/dev/null || true
+              if [ -n "$CURSHA" ] && [ "$CURSHA" != "$SHORT" ] \
+                 && git cat-file -e "$CURSHA" 2>/dev/null \
+                 && git merge-base --is-ancestor "$SHORT" "$CURSHA" 2>/dev/null; then
+                echo "::notice::$svc CR already at descendant $CURSHA — not rolling back to $SHORT"
+                recorded=1   # newer release already recorded + reconciling
+              else
+                yq -i ".spec.image.tag = \"$tag\"" "$CR"
+                # Sweep EVERY same-repo image reference in the CR (sidecars,
+                # initContainers pinned to this image) — the tag field alone
+                # left sidecars on stale tags every roll.
+                repoEsc=$(printf '%s' "$repo" | sed 's/[.[\*^$]/\\&/g')
+                sed -i -E "s|(${repoEsc}):sha-[A-Za-z0-9-]+|\1:${tag}|g" "$CR"
+                if git -C "$UNIVERSE" diff --quiet; then
+                  recorded=1   # CR already pins $tag (recorded on a prior run)
+                else
+                  commitCR() { git -C "$UNIVERSE" -c user.name=hanzo-ci -c user.email=dev@hanzo.ai \
+                    commit -qam "deploy($svc): $tag (${GITHUB_REPOSITORY}@${SHORT})"; }
+                  commitCR
+                  # EVERY service's deploy pushes to universe/main, so under
+                  # concurrent rolls a plain push loses the race with a
+                  # non-fast-forward reject (THE reason deploys stall when many
+                  # land at once). The clone is shallow (--depth 1) so `pull
+                  # --rebase` has no merge base and fails — instead fetch the moved
+                  # tip, hard-reset onto it, and re-apply our one-file CR change,
+                  # then retry the push. A no-op after reset (remote already
+                  # carries our tag) counts as recorded. We never force-push, so a
+                  # newer roll of THIS service is preserved (its tag survives the
+                  # reset; our re-apply is last-writer only when tags differ).
+                  for _try in 1 2 3 4 5 6; do
+                    if git -C "$UNIVERSE" push -q; then recorded=1; break; fi
+                    git -C "$UNIVERSE" fetch -q --depth 1 origin main || break
+                    git -C "$UNIVERSE" reset -q --hard FETCH_HEAD
+                    yq -i ".spec.image.tag = \"$tag\"" "$CR"
+                    sed -i -E "s|(${repoEsc}):sha-[A-Za-z0-9-]+|\1:${tag}|g" "$CR"
+                    if git -C "$UNIVERSE" diff --quiet; then recorded=1; break; fi
+                    commitCR
+                  done
+                  [ "$recorded" = 1 ] || echo "::warning::universe push failed for $svc after retries — roll is transient (runner kubectl must land it)"
+                fi
+              fi
+            fi
+            # Runner-side kubectl ACCELERATES the operator roll + smoke-tests it.
+            # When recorded=1 the operator owns the rollout, so an expired runner
+            # kubeconfig warns instead of failing the deploy; when recorded=0
+            # kubectl is the only path and stays fatal.
+            if [ "$recorded" = 1 ]; then
+              kc() { kubectl "$@" || echo "::warning::$svc: runner kubectl failed (expired kubeconfig?) — universe record stands; operator reconciles"; }
+            else
+              kc() { kubectl "$@"; }
+            fi
+            # Operator-managed services (Service CR) reconcile the Deployment —
+            # patch the CR when it exists; bare Deployments get set-image.
+            if kubectl -n "$NS" get "services.hanzo.ai/$svc" >/dev/null 2>&1; then
+              kc -n "$NS" patch "services.hanzo.ai/$svc" --type=merge \
+                -p "{\"spec\":{\"image\":{\"repository\":\"$repo\",\"tag\":\"$tag\"}}}"
+            else
+              # Bare Deployment: set the new image ONLY on containers already running
+              # THIS repo's image — never the '*' wildcard, which clobbers foreign
+              # sidecars (e.g. an rclone S3-mirror) with the app image and wedges the
+              # rollout. Fall back to the service-named container on first deploy.
+              mapfile -t CS < <(kubectl -n "$NS" get "deployment/$svc" \
+                -o jsonpath='{range .spec.template.spec.containers[*]}{.name} {.image}{"\n"}{end}' \
+                | awk -v r="$repo" 'index($2, r"@")==1 || index($2, r":")==1 {print $1}')
+              [ "${#CS[@]}" -eq 0 ] && CS=("$svc")
+              args=(); for c in "${CS[@]}"; do args+=("$c=$ref"); done
+              kc -n "$NS" set image "deployment/$svc" "${args[@]}"
+            fi
+            # Timeout scales with the image: a service vendoring GB-scale model/node
+            # packs (e.g. studio) pulls multi-GB layers on a cold node + waits for the
+            # operator to reconcile — legitimately minutes. 180s failed mid-pull and
+            # is THE reason studio deploys silently failed since 0.15.8. Override
+            # per-repo with deploy.rollout-timeout.
+            kc -n "$NS" rollout status "deployment/$svc" --timeout="$RTO"
+          done
