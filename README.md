@@ -56,6 +56,28 @@ binaries:
     ldflags: "-s -w"                 # default
 ```
 
+`main:` is the zero-config **Go** lane. Every other toolchain uses the same block
+with `run:` (the command that builds) and `out:` (the glob of what it produced) —
+which is how a repo with no Dockerfile and no Go still publishes an artifact:
+
+```yaml
+binaries:
+  - name: sdk
+    run: npm install && npm run build && npm pack --pack-destination .
+    out: "*.tgz"
+    image: node:22-bookworm          # the toolchain — see below
+```
+
+`image:` names the container the **platform** lane runs `run:` in
+(`POST /v1/runner`, one initContainer per entry, in-cluster). Here the toolchain
+IS the runner, so this workflow reads past it. It is not a second recipe: both
+lanes read the same `binaries:` block out of the same `hanzo.yml` and publish the
+same `binaries.json` at the same URL.
+
+Artifacts land under `<name>` in the index regardless of lane; a `run:` entry is
+`os: any, arch: any`, because an npm tarball or a wheel is not per-platform and
+an index entry that claimed one would be a lie a host acts on.
+
 Built on every push (an arm64 cross-compile that breaks fails the PR that broke
 it) and **published on a tag**, after the `test:` gate — a host installs an
 artifact unattended, so the tests gate the bits. Each artifact lands on the
