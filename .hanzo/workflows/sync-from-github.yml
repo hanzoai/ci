@@ -76,3 +76,20 @@ jobs:
             echo "Resolve by hand; this job will not force-push either side." >&2
             exit 1
           fi
+
+      - name: Mirror release tags from GitHub
+        # A git tag is the ONLY trigger for every publish workflow (v* / <pkg>-v*
+        # → twine / npm / go release), and until now the sync carried `main` and
+        # never tags — so a tag pushed to GitHub never reached the forge that runs
+        # the publish, and every release stalled "tagged but not published". Mirror
+        # them here, right beside the branch sync, so the same job that lands the
+        # commit lands the tag that releases it. Idempotent: existing tags are
+        # skipped; only a genuinely new tag reaches the forge and fires a publish.
+        run: |
+          set -euo pipefail
+          git fetch --quiet --tags --force https://github.com/${{ github.repository }}.git
+          # --no-verify is not needed; origin is the forge. Push tags only (never a
+          # branch), so this can never move main. A tag push made with the workflow
+          # token DOES fire tag-triggered workflows on the forge (unlike a branch
+          # push), which is exactly the publish we want.
+          git push --quiet --tags origin 2>&1 | grep -v 'Everything up-to-date' || true
