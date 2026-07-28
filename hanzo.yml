@@ -1,0 +1,40 @@
+# Hanzo CI — this repo's own build, driven by this repo's own reusable workflow.
+#
+# hanzoai/ci is two things that belong together: the reusable pipeline every
+# other repo imports (.hanzo/workflows/build.yml), and ci.hanzo.ai, the
+# dashboard that shows what that pipeline did. So the dashboard image is built
+# by the pipeline it reports on — if the pipeline breaks, the thing that would
+# tell you cannot ship, which is the correct and honest coupling.
+#
+# Until now there was no self-build at all: build.yml is workflow_call-only, so
+# the v0.1.0 image was produced out of band and there was no repeatable way to
+# cut a second one.
+images:
+  - name: ci
+    context: .
+    dockerfile: Dockerfile
+    repo: ghcr.io/hanzoai/ci
+
+test:
+  - name: go-vet
+    run: |
+      set -e
+      export GOWORK=off
+      go vet ./...
+  - name: go-unit
+    # The whole tree, not a named list — an allowlist stops covering whatever is
+    # added after it is written. Small repo; ./... costs nothing.
+    #
+    # scope_test.go is the load-bearing one: it asserts the surface refuses a
+    # request with no X-Org-Id and that `?org=` can only narrow. This service
+    # shipped once with those properties absent and disclosed every org's build
+    # metadata to the internet, so a red gate here must block the image.
+    run: |
+      set -e
+      export GOWORK=off
+      go test -count=1 ./...
+
+# No `deploy:` ON PURPOSE. Rollout is a reviewed tag pin in hanzoai/universe
+# (infra/k8s/operator/crs/ci.yaml), the same rule cloud and git follow: a
+# pipeline that both builds and rolls itself out can put an unreviewed image on
+# a public host, and cd.hanzo.ai's selfHeal would undo a direct patch anyway.
