@@ -1,0 +1,71 @@
+/* dashboard.css — this page's own rules: what is a row, what sticks, what
+   collapses on a phone. It names no colour, radius or type size of its own;
+   every such value is a var() into @hanzo/brand (see brand.go). That is the
+   difference between consuming the design system and being a second copy of it,
+   and it is asserted, not merely intended — see TestDashboardCSSNamesNoColours. */
+
+*{box-sizing:border-box}
+body{margin:0;background:var(--surface-0);color:var(--text-primary);
+     font-family:var(--font-sans);font-size:var(--font-size-base);line-height:1.5}
+header{display:flex;align-items:center;gap:var(--space-4);
+       padding:var(--space-4) var(--space-6);background:var(--surface-1);
+       border-bottom:1px solid var(--border-hairline)}
+h1{margin:0;font-size:var(--font-size-lg);font-weight:600;letter-spacing:-.01em}
+h1 span{color:var(--hanzo-accent-muted)}
+.meta{margin-left:auto;color:var(--text-secondary);font-size:var(--font-size-sm);text-align:right}
+
+.strip{display:flex;gap:var(--space-2);padding:var(--space-4) var(--space-6);flex-wrap:wrap}
+.chip{padding:var(--space-2) var(--space-3);background:var(--surface-1);
+      border:1px solid var(--border-hairline);border-radius:var(--radius-card);
+      font-size:var(--font-size-sm);color:var(--text-secondary)}
+.chip b{color:var(--text-primary);font-weight:600}
+.chip.ok b{color:var(--success)} .chip.fail b{color:var(--error)}
+.chip.run b{color:var(--warning)} .chip.cancel b{color:var(--text-muted)}
+
+nav{display:flex;gap:var(--space-2);padding:0 var(--space-6) var(--space-4);flex-wrap:wrap}
+nav a{padding:var(--space-1) var(--space-3);background:var(--surface-1);
+      border:1px solid var(--border-hairline);border-radius:var(--radius-full);
+      color:var(--text-secondary);text-decoration:none;font-size:var(--font-size-sm)}
+/* --hanzo-accent-soft is the house "selected row" fill; the active tab is the
+   one place on this page that is a selection, so it is the one place it is used. */
+nav a.on{border-color:var(--hanzo-accent);background:var(--hanzo-accent-soft);color:var(--text-primary)}
+nav .who{margin-left:auto;align-self:center;color:var(--text-muted);font-size:var(--font-size-sm)}
+
+/* The stale banner tints its own border colour rather than introducing an amber
+   of its own — @hanzo/brand ships no warning-surface token, and inventing one
+   here is exactly the drift this file exists to stop. */
+.warn{margin:0 var(--space-6) var(--space-4);padding:var(--space-3) var(--space-4);
+      border:1px solid var(--warning);border-radius:var(--radius-card);
+      background:color-mix(in srgb, var(--warning) 10%, transparent);
+      color:var(--warning-light);font-size:var(--font-size-sm)}
+
+table{width:100%;border-collapse:collapse}
+th{position:sticky;top:0;background:var(--surface-1);text-align:left;
+   font-size:var(--font-size-xs);text-transform:uppercase;letter-spacing:.06em;
+   font-weight:600;color:var(--text-muted);padding:var(--space-2) var(--space-3);
+   border-bottom:1px solid var(--border-hairline-strong)}
+td{padding:var(--space-2) var(--space-3);border-bottom:1px solid var(--border-hairline);
+   vertical-align:top}
+/* The table is full-bleed but its text has to sit on the same gutter as the
+   header, chips and nav above it, which are all --space-6 in. */
+th:first-child,td:first-child{padding-left:var(--space-6)}
+th:last-child,td:last-child{padding-right:var(--space-6)}
+tr:hover td{background:var(--surface-2)}
+a{color:inherit}
+
+.dot{display:inline-block;width:8px;height:8px;border-radius:var(--radius-full);
+     margin-right:var(--space-2)}
+.dot.success{background:var(--success)} .dot.failure{background:var(--error)}
+.dot.running{background:var(--warning);animation:p 1.4s ease-in-out infinite}
+.dot.cancelled{background:var(--text-disabled)}
+@keyframes p{50%{opacity:.35}}
+
+.repo{font-weight:600}
+.org{color:var(--text-muted)}
+.title{color:var(--text-secondary);max-width:42ch;
+       overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mono{font-family:var(--font-mono);font-size:var(--font-size-sm);color:var(--text-secondary)}
+.empty{padding:var(--space-12) var(--space-6);text-align:center;color:var(--text-secondary)}
+footer{padding:var(--space-4) var(--space-6);color:var(--text-muted);
+       font-size:var(--font-size-sm);border-top:1px solid var(--border-hairline)}
+@media(max-width:760px){.hide-sm{display:none}}

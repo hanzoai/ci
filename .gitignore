@@ -1,1 +1,5 @@
+# `go build ./...` writes the binary into the package directory, named after the
+# package — which is how a 12MB darwin/arm64 `ci` came to be committed here, in
+# a repo whose image is built linux/amd64 from source by the Dockerfile. The
+# artifact is never an input to anything; only the source is.
 /ci
