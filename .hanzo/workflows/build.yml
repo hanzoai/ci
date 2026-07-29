@@ -3,12 +3,14 @@
 # creds from KMS via Universal Auth at run time. Public so any org can import it
 # with `uses: hanzoai/ci/.hanzo/workflows/build.yml@v2` + `secrets: inherit`.
 #
-# The `uses:` PATH is part of the version. This file lived at
-# `.github/workflows/build.yml` through v1 and moved here for v2, so
-# `.github/...@v1` and `.hanzo/...@v2` are BOTH valid — each resolves the tree at
-# its own tag. Pair them wrongly and the reference 404s, which on this plane is
-# a silent no-run rather than an error. Callers today: cloud, commerce, console,
-# git and this repo on @v2; tasks still on @v1.
+# The PATH is not the version, and pairing it with one is a trap that no longer
+# needs to exist. GitHub resolves only `.github/workflows`, git.hanzo.ai only
+# `.hanzo/workflows`, so aeb6adf carries this file at BOTH — byte-identical apart
+# from this header — and since then every tag serves both forges. All four
+# combinations of path x {v1,v2} resolve the same pipeline; v1 and v2 are the
+# same tree, kept that way as moving channels by sync-from-github.yml. A `uses:`
+# that does NOT resolve is the danger: on this plane it is a silent no-run, not
+# an error, which is the same failure mode as a gate that runs zero tests.
 #
 # The caller is ~7 lines (triggers + this `uses:`); all real config is hanzo.yml.
 name: Hanzo CI/CD
