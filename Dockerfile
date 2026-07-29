@@ -1,9 +1,11 @@
 # syntax=docker/dockerfile:1
 #
-# ci — the ci.hanzo.ai dashboard. Pure-Go, no cgo, no assets: the page is
-# server-rendered from a template compiled into the binary, so the image is the
-# binary and a CA bundle. Nothing to serve from disk, nothing to go stale
-# against the code.
+# ci — the ci.hanzo.ai dashboard. Pure-Go, no cgo, no node: the page is
+# server-rendered from a template compiled into the binary, and the design
+# tokens it spends are @hanzo/brand's published stylesheet, go:embed-ed beside
+# it. So the image is still the binary and a CA bundle — nothing served from
+# disk, nothing to go stale against the code, and no JS toolchain on the path
+# that ships the board you read when the builds are broken.
 FROM golang:1.24-alpine AS builder
 WORKDIR /build
 # Resolve through the module proxy: proxy.golang.org and sum.golang.org agree
