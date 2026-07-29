@@ -93,3 +93,22 @@ jobs:
           # token DOES fire tag-triggered workflows on the forge (unlike a branch
           # push), which is exactly the publish we want.
           git push --quiet --tags origin 2>&1 | grep -v 'Everything up-to-date' || true
+
+          # ...and then the CHANNELS, which are the other half and were missing.
+          #
+          # `vX.Y.Z` is a release: immutable, and the push above is right to skip
+          # one that already exists. `vX` is a CHANNEL — it means "the current
+          # tree of that major", which is the entire reason a caller can write
+          # @v1 once and keep getting today's pipeline. A channel that cannot
+          # move is a pin with a misleading name.
+          #
+          # `--tags` cannot move one: repointing a tag is a non-fast-forward, the
+          # push is rejected, and `|| true` swallows it. So the forge's v1 and v2
+          # sat at 522aa9e / ddf1234 while GitHub's v1 moved on, and the 12
+          # callers that import `.hanzo/workflows/build.yml@v1|@v2` were frozen
+          # on a months-old pipeline — including the one that fails a gate which
+          # runs zero tests. Force ONLY these names; releases stay immutable.
+          for ch in $(git tag -l | grep -xE 'v[0-9]+' || true); do
+            git push --quiet --force origin "refs/tags/$ch:refs/tags/$ch"
+            echo "channel $ch -> $(git rev-list -n1 "$ch")"
+          done
