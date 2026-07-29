@@ -13,6 +13,13 @@ import (
 // and a loading state to show the same rows a second later. The dashboard also
 // has to be readable when the thing it reports on is broken, which is exactly
 // when a build pipeline for its own frontend is the wrong dependency.
+//
+// That argument is about the BUILD, not about the design. The look is the
+// house's and is not restated here: the <style> block is @hanzo/brand's own
+// published token sheet plus this page's layout rules, both compiled in — see
+// brand.go. Server rendering and one design system are not in tension; only
+// server rendering and a JS component library are, and it is the tokens, not
+// the components, that this page ever needed.
 
 // renderDashboard writes the page for ONE viewer. Every row it renders has
 // already passed v.visible — the template is never handed the full snapshot and
@@ -121,60 +128,23 @@ func humanDur(d time.Duration) string {
 	return fmt.Sprintf("%dm%02ds", int(d.Minutes()), int(d.Seconds())%60)
 }
 
+// `class="dark"` is @hanzo/brand's own dark hook, not a local convention: the
+// sheet's :root IS the dark scale, and the class is what additionally sets
+// color-scheme so the scrollbars and form controls the browser draws match.
+// Elsewhere in the fleet next-themes toggles that class; this page has no JS and
+// no toggle, so it states its scheme once and means it.
 var tmpl = template.Must(template.New("ci").Funcs(template.FuncMap{
 	"outcome": outcome,
 	"dur":     func(r Run) string { return humanDur(r.Duration()) },
 	"ago":     humanAge,
+	"css":     pageCSS,
 }).Parse(`<!doctype html>
-<html lang="en"><head>
+<html lang="en" class="dark"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Hanzo CI</title>
 <meta http-equiv="refresh" content="60">
-<style>
-:root{--bg:#0b0b0d;--panel:#141417;--line:#25252b;--fg:#e8e8ea;--dim:#8b8b95;
-      --ok:#3fb950;--fail:#f85149;--run:#d29922;--accent:#8B5CF6}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);
-     font:14px/1.5 ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif}
-header{display:flex;align-items:center;gap:16px;padding:16px 24px;
-       border-bottom:1px solid var(--line);background:var(--panel)}
-h1{margin:0;font-size:16px;font-weight:600;letter-spacing:-.01em}
-h1 span{color:var(--accent)}
-.meta{margin-left:auto;color:var(--dim);font-size:12px;text-align:right}
-.strip{display:flex;gap:8px;padding:16px 24px;flex-wrap:wrap}
-.chip{padding:6px 12px;border:1px solid var(--line);border-radius:8px;
-      background:var(--panel);font-size:12px;color:var(--dim)}
-.chip b{color:var(--fg);font-weight:600}
-.chip.ok b{color:var(--ok)} .chip.fail b{color:var(--fail)} .chip.run b{color:var(--run)}
-.chip.cancel b{color:var(--dim)}
-nav{display:flex;gap:6px;padding:0 24px 16px;flex-wrap:wrap}
-nav a{padding:5px 11px;border:1px solid var(--line);border-radius:999px;
-      background:var(--panel);color:var(--dim);text-decoration:none;font-size:12px}
-nav a.on{border-color:var(--accent);color:var(--fg)}
-nav .who{margin-left:auto;align-self:center;color:var(--dim);font-size:12px}
-.warn{margin:0 24px 16px;padding:10px 14px;border:1px solid var(--run);
-      border-radius:8px;background:#221b0c;color:#f0d58c;font-size:13px}
-table{width:100%;border-collapse:collapse}
-th{position:sticky;top:0;background:var(--panel);text-align:left;font-size:11px;
-   text-transform:uppercase;letter-spacing:.06em;color:var(--dim);
-   padding:10px 12px;border-bottom:1px solid var(--line);font-weight:600}
-td{padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
-tr:hover td{background:#111114}
-a{color:inherit}
-.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:8px}
-.dot.success{background:var(--ok)} .dot.failure{background:var(--fail)}
-.dot.running{background:var(--run);animation:p 1.4s ease-in-out infinite}
-.dot.cancelled{background:#4a4a52}
-@keyframes p{50%{opacity:.35}}
-.repo{font-weight:600}
-.org{color:var(--dim)}
-.title{color:var(--dim);max-width:42ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:var(--dim)}
-.empty{padding:48px 24px;text-align:center;color:var(--dim)}
-footer{padding:16px 24px;color:var(--dim);font-size:12px;border-top:1px solid var(--line)}
-@media(max-width:760px){.hide-sm{display:none}}
-</style></head><body>
+<style>{{css}}</style></head><body>
 
 <header>
   <h1>Hanzo <span>CI</span></h1>
