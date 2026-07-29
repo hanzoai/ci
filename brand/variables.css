@@ -1,0 +1,235 @@
+/**
+ * @hanzo/brand CSS Variables
+ *
+ * Hanzo is monochrome — the brand is ink, paper, and a neutral grayscale.
+ * There is no brand hue; the brand color is the ink (dark) / paper (light).
+ *
+ * Usage:
+ *   @import '@hanzo/brand/styles/variables.css';
+ *   or link: <link rel="stylesheet" href="https://unpkg.com/@hanzo/brand/styles/variables.css">
+ */
+
+:root {
+  /* ===== Hanzo Brand (Monochrome: Hanzo Black ↔ Hanzo White) ===== */
+  --hanzo-black: #0a0a0b;
+  --hanzo-black-rgb: 10, 10, 11;
+  --hanzo-white: #ffffff;
+  --hanzo-white-rgb: 255, 255, 255;
+  --hanzo-mono-50: #fafafa;
+  --hanzo-mono-100: #f5f5f5;
+  --hanzo-mono-200: #e5e5e5;
+  --hanzo-mono-300: #d4d4d4;
+  --hanzo-mono-400: #a3a3a3;
+  --hanzo-mono-500: #737373;
+  --hanzo-mono-600: #525252;
+  --hanzo-mono-700: #404040;
+  --hanzo-mono-800: #262626;
+  --hanzo-mono-900: #171717;
+  --hanzo-mono-950: #0a0a0a;
+
+  /* ===== Accent — the ONE Hanzo accent: PURPLE (palette = White · Gray · Purple).
+     The monochrome base stays (primary action = white, neutrals = gray); purple is
+     the single interactive/brand accent — links, active, focus, selection. NO blue,
+     green, or orange. White-label tenants override --hanzo-accent per host so
+     lux/zoo/pars never inherit Hanzo purple. ===== */
+  --hanzo-accent: #8b5cf6;         /* violet-500 */
+  --hanzo-accent-hover: #7c3aed;   /* violet-600 */
+  --hanzo-accent-muted: #a78bfa;   /* violet-400 — accent text on dark */
+  --hanzo-accent-soft: rgba(139, 92, 246, 0.12); /* subtle fill / selected row */
+  --hanzo-accent-rgb: 139, 92, 246;
+
+  /* ===== Layered surface blacks (Builder v2 — no gray panels; each subtly different) ===== */
+  --surface-0: #080808;  /* app background */
+  --surface-1: #0d0d0d;  /* panels */
+  --surface-2: #111111;  /* raised */
+  --surface-3: #171717;  /* controls / hover */
+
+  /* ===== Hairline border — 1px, almost invisible (no thick outlines) ===== */
+  --border-hairline: rgba(255, 255, 255, 0.06);
+  --border-hairline-strong: rgba(255, 255, 255, 0.1);
+
+  /* ===== Semantic radius (Builder v2): cards 8 · controls/toolbar 10 · preview/panels 12 ===== */
+  --radius-card: 0.5rem;      /* 8px */
+  --radius-control: 0.625rem; /* 10px — buttons, toolbar, inputs */
+  --radius-panel: 0.75rem;    /* 12px — preview, large panels */
+
+  /* ===== Semantic type roles (Builder v2): heading 20 · body 14 · secondary 12 ===== */
+  --text-heading: 1.25rem;    /* 20px @ 600 */
+  --text-body: 0.875rem;      /* 14px @ 400 */
+  --text-secondary: 0.75rem;  /* 12px @ 400/500 */
+
+  /* ===== Semantic Aliases (monochrome; flips with scheme) ===== */
+  --brand: var(--hanzo-black);
+  --brand-light: var(--hanzo-mono-800);
+  --brand-dark: #000000;
+  --brand-hover: var(--hanzo-mono-900);
+  --brand-secondary: var(--hanzo-mono-600);
+
+  /* ===== Dark Theme Backgrounds ===== */
+  --bg-primary: #0a0a0a;
+  --bg-secondary: #141414;
+  --bg-tertiary: #1a1a1a;
+  --bg-card: rgba(23, 23, 23, 0.5);
+
+  /* ===== Light Theme Backgrounds ===== */
+  --bg-light: #ffffff;
+  --bg-light-secondary: #fafafa;
+  --bg-light-tertiary: #f5f5f5;
+
+  /* ===== Borders ===== */
+  --border: #262626;
+  --border-light: #e5e5e5;
+  --border-focus: var(--hanzo-black);
+
+  /* ===== Text Colors (Dark Theme) ===== */
+  --text-primary: #fafafa;
+  --text-secondary: #a3a3a3;
+  --text-muted: #737373;
+  --text-disabled: #525252;
+
+  /* ===== Text Colors (Light Theme) ===== */
+  --text-light-primary: #0a0a0b;
+  --text-light-secondary: #525252;
+  --text-light-muted: #737373;
+
+  /* ===== Neutral Scale ===== */
+  --neutral-0: #ffffff;
+  --neutral-50: #fafafa;
+  --neutral-100: #f5f5f5;
+  --neutral-200: #e5e5e5;
+  --neutral-300: #d4d4d4;
+  --neutral-400: #a3a3a3;
+  --neutral-500: #737373;
+  --neutral-600: #525252;
+  --neutral-700: #404040;
+  --neutral-800: #262626;
+  --neutral-900: #171717;
+  --neutral-950: #0a0a0a;
+  --neutral-1000: #000000;
+
+  /* ===== Semantic Colors ===== */
+  --success: #10b981;
+  --success-light: #34d399;
+  --success-dark: #059669;
+
+  --warning: #f59e0b;
+  --warning-light: #fcd34d;
+  --warning-dark: #d97706;
+
+  --error: #ef4444;
+  --error-light: #f87171;
+  --error-dark: #dc2626;
+
+  --info: #3b82f6;
+  --info-light: #60a5fa;
+  --info-dark: #2563eb;
+
+  /* ===== Gradients ===== */
+  --gradient-brand: linear-gradient(135deg, var(--hanzo-mono-800) 0%, var(--hanzo-black) 100%);
+  --gradient-accent: linear-gradient(135deg, var(--hanzo-black) 0%, #000000 100%);
+  --gradient-dark: linear-gradient(135deg, #0a0a0b 0%, #262626 100%);
+
+  /* ===== Spacing ===== */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+  --space-16: 4rem;
+  --space-20: 5rem;
+  --space-24: 6rem;
+
+  /* ===== Border Radius ===== */
+  --radius-sm: 0.125rem;
+  --radius: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.75rem;
+  --radius-2xl: 1rem;
+  --radius-full: 9999px;
+
+  /* ===== Shadows ===== */
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+  --shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
+
+  /* ===== Transitions ===== */
+  --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition: 200ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-slow: 300ms cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* ===== Typography ===== */
+  --font-sans: 'Geist Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Geist Mono', ui-monospace, Monaco, monospace;
+
+  /* ===== Font Size scale (mirrors typography.ts `fontSize`) =====
+     TIGHT app-first default — the compact developer-app register (linear.app /
+     vercel.com), NOT a roomy marketing scale. Base is 14px, nav 13px, labels 11px.
+     Every surface that imports @hanzo/brand inherits this; a brand/tenant can
+     override any --font-size-* on :root to retune density on demand. */
+  --font-size-xs: 0.6875rem;  /* 11px — eyebrows / section labels */
+  --font-size-sm: 0.8125rem;  /* 13px — nav labels, dense body */
+  --font-size-base: 0.875rem; /* 14px — base app text (was 16px) */
+  --font-size-lg: 0.9375rem;  /* 15px */
+  --font-size-xl: 1.0625rem;  /* 17px */
+  --font-size-2xl: 1.3125rem; /* 21px */
+  --font-size-3xl: 1.625rem;  /* 26px */
+  --font-size-4xl: 2rem;      /* 32px */
+  --font-size-5xl: 2.5rem;    /* 40px */
+  --font-size-6xl: 3.25rem;   /* 52px */
+  --font-size-7xl: 4rem;      /* 64px */
+  --font-size-8xl: 5.25rem;   /* 84px */
+  --font-size-9xl: 7rem;      /* 112px */
+
+  /* ===== Z-index ladder (mirrors tokens.ts `zIndex`) ===== */
+  --z-0: 0;
+  --z-10: 10;
+  --z-20: 20;
+  --z-30: 30;
+  --z-40: 40;
+  --z-50: 50;
+  --z-dropdown: 100;
+  --z-sticky: 200;
+  --z-overlay: 300;
+  --z-modal: 400;
+  --z-popover: 500;
+  --z-tooltip: 600;
+  --z-notification: 700;
+}
+
+/* Dark theme (default for Hanzo) */
+[data-theme="dark"],
+.dark {
+  color-scheme: dark;
+}
+
+/* Light theme */
+[data-theme="light"],
+.light {
+  --bg-primary: var(--bg-light);
+  --bg-secondary: var(--bg-light-secondary);
+  --bg-tertiary: var(--bg-light-tertiary);
+  --bg-card: rgba(255, 255, 255, 0.8);
+  --border: var(--border-light);
+  --text-primary: var(--text-light-primary);
+  --text-secondary: var(--text-light-secondary);
+  --text-muted: var(--text-light-muted);
+  /* purple accent flips a shade deeper for contrast on paper */
+  --hanzo-accent: #7c3aed;
+  --hanzo-accent-hover: #6d28d9;
+  --hanzo-accent-muted: #7c3aed;
+  /* layered "blacks" become layered near-whites in light */
+  --surface-0: #ffffff;
+  --surface-1: #fafafa;
+  --surface-2: #f5f5f5;
+  --surface-3: #ededed;
+  --border-hairline: rgba(0, 0, 0, 0.08);
+  --border-hairline-strong: rgba(0, 0, 0, 0.12);
+  color-scheme: light;
+}
