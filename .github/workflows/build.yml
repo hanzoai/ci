@@ -554,6 +554,18 @@ jobs:
           NOTHING='\[no test files\]|\[no tests to run\]|no tests ran|collected 0 items|No tests found|no test specified|running 0 tests|Tests:[[:space:]]+0 total|(^|[^0-9])0 (passing|passed)'
           SOMETHING='^[[:space:]]*--- (PASS|FAIL|SKIP):|^(ok|FAIL)[[:space:]]+[^[:space:]]+[[:space:]]+([0-9.]+s|\(cached\))([[:space:]]+coverage)?$|[1-9][0-9]* (passed|failed|passing|failing)|test result: (ok|FAILED)\.[[:space:]]+[1-9]|Tests:[[:space:]]+[1-9]'
           log="${RUNNER_TEMP:-/tmp}/test-gate.log"
+          # The assertion below asks each gate whether it ran a test. It cannot ask
+          # a repo that declares no gate at all — the loop just does not run, and
+          # the build goes green having tested nothing, which is the very shape
+          # this step exists to end. 23 repos in the fleet are in that state today,
+          # so failing here would paint the fleet red without fixing one of them.
+          # Say it instead, in the summary the build already writes, so the absence
+          # is a fact on the run rather than something only a reader of hanzo.yml
+          # could ever notice.
+          if [ "$(yq -o=json -I=0 '.test // []' hanzo.yml | jq 'length')" = 0 ]; then
+            echo "::warning::hanzo.yml declares no \`test:\` gate — this build was NOT tested"
+            echo "**Not tested** — \`hanzo.yml\` declares no \`test:\` gate." >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          fi
           yq -o=json -I=0 '.test // []' hanzo.yml | jq -c '.[]' | while read -r t; do
             name=$(echo "$t"|jq -r .name); cmd=$(echo "$t"|jq -r .run)
             echo "::group::test $name"; bash -c "$cmd" 2>&1 | tee "$log"; echo "::endgroup::"
