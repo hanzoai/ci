@@ -530,12 +530,38 @@ jobs:
           echo "runner git authenticated for private Go modules"
 
       - name: Test (per hanzo.yml)
+        # Every gate runs here, and every gate is then asked ONE question: did it
+        # actually run a test?
+        #
+        # A green build over ZERO tests is the worst failure mode a gate has,
+        # because it is indistinguishable from a healthy one. Two ways to reach it
+        # are live in this fleet right now, both silent, both exit 0:
+        #   - `go test ./...` where nothing has a _test.go  → `[no test files]`
+        #   - a build tag that excludes the suite (hanzoai/gateway shipped
+        #     `//go:build legacy` tests and a target that passed no -tags; hanzoai/iam
+        #     runs `-tags skipCi` against files guarded `//go:build !skipCi`)
+        #                                                   → `[no tests to run]`
+        # Per-repo vigilance is not a mechanism, so the assertion lives HERE, once,
+        # and every caller inherits it the moment it re-imports this workflow.
+        #
+        # The rule is the runners' OWN words, not a heuristic: fail when a gate SAYS
+        # it ran nothing AND nothing shows as having run. A gate that is not a test
+        # gate — vet, lint, a build, a codegen-freshness check — says neither and is
+        # untouched. To silence it legitimately, make the gate run a test.
         if: inputs.mode != 'delegate' && inputs.tests
         run: |
           set -euo pipefail
+          NOTHING='\[no test files\]|\[no tests to run\]|no tests ran|collected 0 items|No tests found|no test specified|running 0 tests|Tests:[[:space:]]+0 total|(^|[^0-9])0 (passing|passed)'
+          SOMETHING='^[[:space:]]*--- (PASS|FAIL|SKIP):|^(ok|FAIL)[[:space:]]+[^[:space:]]+[[:space:]]+([0-9.]+s|\(cached\))([[:space:]]+coverage)?$|[1-9][0-9]* (passed|failed|passing|failing)|test result: (ok|FAILED)\.[[:space:]]+[1-9]|Tests:[[:space:]]+[1-9]'
+          log="${RUNNER_TEMP:-/tmp}/test-gate.log"
           yq -o=json -I=0 '.test // []' hanzo.yml | jq -c '.[]' | while read -r t; do
             name=$(echo "$t"|jq -r .name); cmd=$(echo "$t"|jq -r .run)
-            echo "::group::test $name"; bash -c "$cmd"; echo "::endgroup::"
+            echo "::group::test $name"; bash -c "$cmd" 2>&1 | tee "$log"; echo "::endgroup::"
+            if grep -Eq "$NOTHING" "$log" && ! grep -Eq "$SOMETHING" "$log"; then
+              echo "::error::test gate '$name' reported success without running a single test"
+              grep -Eho "$NOTHING" "$log" | sort -u | sed 's/^/  ran nothing: /'
+              exit 1
+            fi
           done
 
       - name: Build & publish binaries (per hanzo.yml)
