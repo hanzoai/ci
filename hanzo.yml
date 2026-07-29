@@ -29,6 +29,12 @@ test:
     # request with no X-Org-Id and that `?org=` can only narrow. This service
     # shipped once with those properties absent and disclosed every org's build
     # metadata to the internet, so a red gate here must block the image.
+    #
+    # render_test.go is the other one that has to stay green: it pins the
+    # vendored @hanzo/brand sheet to the hash of the version it claims to be and
+    # rejects any colour the page names for itself. Both gates are offline —
+    # checking that we use one design system costs this pipeline no npm, no
+    # registry and no network.
     run: |
       set -e
       export GOWORK=off
