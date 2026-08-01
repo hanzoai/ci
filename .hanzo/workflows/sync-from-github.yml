@@ -30,6 +30,24 @@ name: Sync from GitHub
 #
 # Fast-forward ONLY. A divergence fails LOUDLY rather than force-pushing either
 # side and destroying whichever history lost the race.
+#
+# TWO JOBS, NOT TWO STEPS, and that separation is load-bearing. A branch and a
+# tag are independent facts about this repo, and the tag half is what every
+# OTHER repo depends on: `@v1` is a channel meaning "today's pipeline", so the
+# moment it stops moving, every caller in three orgs is frozen on whatever the
+# channel pointed at that day — and the caller cannot tell, because a stale
+# pipeline runs green.
+#
+# That is not hypothetical. The tag mirror used to be the LAST STEP of the
+# fast-forward job, under `set -euo pipefail`, so when main diverged the job
+# exited 1 before it ever ran. Measured while writing this: forge `v1` sat at
+# 522aa9e — a pipeline with no `client:` lane and no Rust toolchain — while
+# GitHub's `v1` had both, so hanzoai/cli's drift gate could not run at all
+# (`cargo: command not found`, exit 127) and no SDK was ever regenerated from a
+# release. A branch nobody could merge froze the fanout for the whole fleet.
+#
+# With no `needs:` between them, a diverged branch is now exactly what it is —
+# one red job about that branch — and the channels keep moving.
 
 on:
   schedule:
@@ -77,14 +95,26 @@ jobs:
             exit 1
           fi
 
+  # THE TAGS. Its own job, deliberately — see the header. It shares the trigger
+  # and the concurrency group with the branch sync and NOTHING else: no `needs:`,
+  # so a branch that cannot fast-forward can never again freeze the channel every
+  # other repo builds through.
+  mirror-tags:
+    runs-on: [hanzo-build-linux-amd64]
+    steps:
+      - name: Checkout (tags only; this job never touches a branch)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
       - name: Mirror release tags from GitHub
         # A git tag is the ONLY trigger for every publish workflow (v* / <pkg>-v*
         # → twine / npm / go release), and until now the sync carried `main` and
         # never tags — so a tag pushed to GitHub never reached the forge that runs
-        # the publish, and every release stalled "tagged but not published". Mirror
-        # them here, right beside the branch sync, so the same job that lands the
-        # commit lands the tag that releases it. Idempotent: existing tags are
-        # skipped; only a genuinely new tag reaches the forge and fires a publish.
+        # the publish, and every release stalled "tagged but not published".
+        # Idempotent: existing tags are skipped; only a genuinely new tag reaches
+        # the forge and fires a publish.
         run: |
           set -euo pipefail
           git fetch --quiet --tags --force https://github.com/${{ github.repository }}.git

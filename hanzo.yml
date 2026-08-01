@@ -39,6 +39,26 @@ test:
       set -e
       export GOWORK=off
       go test -count=1 ./...
+  - name: build-yml-is-one-file
+    # The reusable pipeline is published at TWO paths because two forges read two
+    # directories — github.com only `.github/workflows`, git.hanzo.ai only
+    # `.hanzo/workflows`. That is one artifact spelled twice, and nothing until
+    # now asserted it: the `.hanzo` copy had drifted nine lines (a truncated
+    # second `on:` block and a duplicate `name:` key) and no reader could see it,
+    # because the only consumer of that copy is a forge no push from here reaches.
+    #
+    # The ONLY legitimate difference is the path each names for itself, so
+    # normalise that one spelling and demand byte equality of the rest. A gate
+    # that allowed "the important parts match" would be a gate that cannot say
+    # what important means.
+    run: |
+      set -e
+      norm() { sed 's|\.hanzo/workflows/build\.yml|.github/workflows/build.yml|g' "$1"; }
+      if ! diff -u <(norm .github/workflows/build.yml) <(norm .hanzo/workflows/build.yml); then
+        echo "::error::the two published copies of the reusable have diverged. They are one file at two paths — edit both, or the forge runs a pipeline github.com has never seen."
+        exit 1
+      fi
+      echo "OK: .github and .hanzo copies are one file ($(wc -l < .github/workflows/build.yml) lines)"
   - name: imgver
     # bin/imgver decides the version EVERY image in the fleet publishes — this
     # workflow's build lane calls it, and so does the imgver composite action the
