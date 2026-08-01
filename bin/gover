@@ -52,13 +52,32 @@ ctx=${2:-.}
 # the repo root. Multi-module repos are the reason this walks rather than
 # assuming the root: hanzoai/s3 builds s3-rdma-sidecar/ and telemetry/server/
 # from their own go.mod files, each with a different floor.
+#
+# WHICH go.mod, precisely: the BUILD CONTEXT decides, not where the file sits.
+# A Dockerfile under test/kafka/ built with `context: ../..` compiles the ROOT
+# module, and judging it by test/kafka/go.mod reads the wrong floor — in
+# hanzoai/s3 that difference is 1.25.0 vs 1.26.5, i.e. the difference between
+# "fine" and "cannot build". So when a Dockerfile copies the context's own
+# go.mod (`COPY go.mod ...`, the overwhelmingly common shape), that is the
+# module being compiled and the context's go.mod wins.
+#
+# Otherwise fall back to the nearest go.mod above the Dockerfile, which is the
+# right answer for a subdirectory that is its own module and is built with its
+# own directory as the context — hanzoai/s3's s3-rdma-sidecar/ and
+# telemetry/server/ are both that shape.
 govers=""; gosrc=""
-d=$(dirname "$df")
-while :; do
-  if [ -f "$d/go.mod" ]; then gosrc="$d/go.mod"; break; fi
-  [ "$d" = "." ] || [ "$d" = "/" ] || [ -z "$d" ] && break
-  d=$(dirname "$d")
-done
+if grep -qiE '^[[:space:]]*COPY([[:space:]]+--[^[:space:]]+)*[[:space:]]+([^[:space:]]+[[:space:]]+)*go\.mod([[:space:]]|$)' "$df" 2>/dev/null \
+   && [ -f "$ctx/go.mod" ]; then
+  gosrc="$ctx/go.mod"
+fi
+if [ -z "$gosrc" ]; then
+  d=$(dirname "$df")
+  while :; do
+    if [ -f "$d/go.mod" ]; then gosrc="$d/go.mod"; break; fi
+    [ "$d" = "." ] || [ "$d" = "/" ] || [ -z "$d" ] && break
+    d=$(dirname "$d")
+  done
+fi
 [ -z "$gosrc" ] && [ -f "$ctx/go.mod" ] && gosrc="$ctx/go.mod"
 [ -z "$gosrc" ] && [ -f "go.mod" ] && gosrc="go.mod"
 # No module in play — nothing to compare against, and a non-Go image is not
