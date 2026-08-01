@@ -67,6 +67,22 @@ test:
     # IfNotPresent never picks up and no reader can see. Offline and
     # deterministic: the registry floor is injected, so it needs no network.
     run: bash bin/imgver_test.sh
+  - name: gover
+    # bin/gover is the gate the build lane runs against every Dockerfile before
+    # it builds: it refuses a Go builder image older than the go.mod it
+    # compiles. That failure is not hypothetical — the golang images set
+    # GOTOOLCHAIN=local, so the mismatch is a hard mid-build death, and
+    # hanzoai/visor v1.108.16 shipped it. A sweep of the orgs found 54 more
+    # Dockerfiles already below their own go.mod.
+    #
+    # The gate is only worth having if it is exact in BOTH directions: a false
+    # negative lets the next visor through, and a false positive blocks a build
+    # that would have worked, which is how gates get skipped. So the suite pins
+    # the refusals AND the allowances — a newer image than the floor is fine, an
+    # alpine suffix is not a Go patch, a floating tag warns instead of failing,
+    # and a multi-module repo is judged by its NEAREST go.mod. Offline and
+    # deterministic: temp dirs, no registry, no network.
+    run: bash bin/gover_test.sh
 
 # No `deploy:` ON PURPOSE. Rollout is a reviewed tag pin in hanzoai/universe
 # (infra/k8s/operator/crs/ci.yaml), the same rule cloud and git follow: a
