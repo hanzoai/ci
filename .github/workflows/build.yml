@@ -709,66 +709,18 @@ jobs:
           gen=$(yq -r '.client.generate // ""' hanzo.yml)
           [ -n "$gen" ] && { echo "::group::client generate"; bash -c "$gen"; echo "::endgroup::"; }
 
-          # G3: a client that does not build blocks the release. Compile the
-          # client AND its examples — a regeneration that builds but breaks the
-          # example flows has changed the surface out from under every consumer,
-          # and that is precisely the release that must go red rather than ship.
-          bld=$(yq -r '.client.build // ""' hanzo.yml)
-          [ -n "$bld" ] && { echo "::group::client build"; bash -c "$bld"; echo "::endgroup::"; }
+          # NO `build:` KEY, and that is the point: the repo has already declared
+          # how it proves itself, in `test:`. That block runs BELOW this step and
+          # therefore runs over the regenerated tree — compiling the client and
+          # its examples, which is exactly G3 (a spec change that produces a
+          # client which does not build must block the release). A second
+          # declaration here would be the same assertion written twice, free to
+          # drift, and only one of the two would gate a plain push.
 
           echo "ran=1" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "spec_sha256=$GOT" >> "$GITHUB_OUTPUT"
           { git add -A; git diff --cached --quiet && echo "changed=0" || echo "changed=1"; } >> "$GITHUB_OUTPUT"
-
-      - name: Client — commit the projection and cut the patch
-        # A generated client is not authored code, so there is nothing here for a
-        # human to review that the gates above have not already asked: it
-        # regenerated from a digest the release published, it compiles, and its
-        # examples compile. Holding that behind a pull request is what produced
-        # the state this lane replaces — js-sdk's regeneration fired twice ever,
-        # both red; go-sdk's and rust-sdk's never ran at all.
-        #
-        # PATCH ONLY, and derived rather than typed: read the current version,
-        # add one to its last component. A projection never earns a minor or a
-        # major — the document decides the surface, and this repo only restates
-        # it. (npm `hanzoai` going 0.0.1-alpha.1 -> 2.0.5 is what a hand-typed
-        # version does.) The repo's OWN tag lane publishes to its registry; this
-        # only mints the tag that starts it, so the publish credential stays
-        # where the publish is.
-        if: inputs.mode != 'delegate' && steps.client.outputs.ran == '1' && steps.client.outputs.changed == '1' && github.event_name != 'pull_request'
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
-        run: |
-          set -euo pipefail
-          bump=$(yq -r '.client.version // ""' hanzo.yml)
-          [ -n "$bump" ] || { echo '::error::client: lane needs a version: entry — "<file>:<command printing the current version>"'; exit 1; }
-          FILE=$(printf '%s' "$bump" | cut -d: -f1)
-          CUR=$(bash -c "$(printf '%s' "$bump" | cut -d: -f2-)")
-          case "$CUR" in *.*.*) ;; *) echo "::error::client version '$CUR' is not x.y.z"; exit 1;; esac
-          NEXT="${CUR%.*}.$(( ${CUR##*.} + 1 ))"
-
-          # Rewrite the version in place, then prove it moved. A sed that matched
-          # nothing is a tag that names the previous release's bytes.
-          sed -i "0,/${CUR//./\\.}/s//${NEXT}/" "$FILE"
-          NOW=$(bash -c "$(printf '%s' "$bump" | cut -d: -f2-)")
-          [ "$NOW" = "$NEXT" ] || { echo "::error::version bump did not take in $FILE ($CUR -> $NOW, wanted $NEXT)"; exit 1; }
-
-          # Re-run the build so the lockfile/manifest the bump touched is
-          # regenerated and committed with it, not left for the next run to find.
-          bld=$(yq -r '.client.build // ""' hanzo.yml)
-          [ -n "$bld" ] && bash -c "$bld" >/dev/null 2>&1 || true
-
-          git config user.name hanzo-dev; git config user.email dev@hanzo.ai
-          git add -A
-          SPEC_REPO=$(sed -n 's/^repo=//p' .spec-lock)
-          SPEC_REF=$(sed -n 's/^ref=//p' .spec-lock)
-          git commit -q -m "client: regenerate from ${SPEC_REPO}@${SPEC_REF} (${NEXT})"
-          git tag "v${NEXT}"
-          REPO="${{ github.repository }}"
-          git push "https://x-access-token:${GH_PAT}@github.com/${REPO}" HEAD:${{ github.event.repository.default_branch }} "refs/tags/v${NEXT}"
-          echo "cut v${NEXT} — the repo's tag lane publishes it"
-          echo "### client v${NEXT} from spec \`${{ steps.client.outputs.spec_sha256 }}\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Authenticate runner git for private Go modules (test gates)
         # The Test step runs `go vet`/`go test` ON the runner (not in buildx), so
@@ -826,6 +778,71 @@ jobs:
               exit 1
             fi
           done
+
+      - name: Client — commit the projection and cut the patch
+        # LAST, and after `test:` on purpose: this pushes a tag, the tag starts a
+        # publish, and a published client is the one artifact in this workflow
+        # nobody can take back. Everything that could refuse it has already run.
+        #
+        # A generated client is not authored code, so there is nothing left for a
+        # human to review that the gates above have not asked: it regenerated
+        # from a digest the release published, and the repo's own `test:` block
+        # compiled it and its examples over exactly these bytes. Holding that
+        # behind a pull request is what produced the state this lane replaces —
+        # js-sdk's regeneration fired twice ever, both red; go-sdk's and
+        # rust-sdk's never ran at all.
+        #
+        # PATCH ONLY, and derived rather than typed: read the current version,
+        # add one to its last component. A projection never earns a minor or a
+        # major — the document decides the surface and this repo only restates it.
+        # (npm `hanzoai` going 0.0.1-alpha.1 -> 2.0.5 is what a hand-typed version
+        # does.) The repo's OWN tag lane publishes to its registry; this only
+        # mints the tag that starts it, so the publish credential stays where the
+        # publish is.
+        if: inputs.mode != 'delegate' && steps.client.outputs.ran == '1' && steps.client.outputs.changed == '1' && github.event_name != 'pull_request'
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          git config user.name hanzo-dev; git config user.email dev@hanzo.ai
+
+          # `version:` is "<file>:<command printing the current version>", and it
+          # is OPTIONAL because not every language keeps its version in a file.
+          # A Go module's version IS its tag — there is nothing to rewrite — so
+          # with no `version:` the current one is read from the tags themselves.
+          # Inventing a VERSION file for those repos would be a second place a
+          # version could be wrong.
+          bump=$(yq -r '.client.version // ""' hanzo.yml)
+          if [ -n "$bump" ]; then
+            FILE=${bump%%:*}
+            READ=${bump#*:}
+            CUR=$(bash -c "$READ")
+          else
+            git fetch --quiet --tags origin
+            CUR=$(git tag -l 'v[0-9]*' | sed 's/^v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+            [ -n "$CUR" ] || CUR=0.0.0
+            FILE=""
+          fi
+          case "$CUR" in *.*.*) ;; *) echo "::error::client version '$CUR' is not x.y.z"; exit 1;; esac
+          NEXT="${CUR%.*}.$(( ${CUR##*.} + 1 ))"
+
+          if [ -n "$FILE" ]; then
+            # Rewrite in place, then prove it moved. A sed that matched nothing
+            # is a tag that names the previous release's bytes.
+            sed -i "0,/${CUR//./\\.}/s//${NEXT}/" "$FILE"
+            NOW=$(bash -c "$READ")
+            [ "$NOW" = "$NEXT" ] || { echo "::error::version bump did not take in $FILE ($CUR -> $NOW, wanted $NEXT)"; exit 1; }
+          fi
+
+          SPEC_REPO=$(sed -n 's/^repo=//p' .spec-lock)
+          SPEC_REF=$(sed -n 's/^ref=//p' .spec-lock)
+          git add -A
+          git commit -q -m "client: regenerate from ${SPEC_REPO}@${SPEC_REF} (${NEXT})"
+          git tag "v${NEXT}"
+          git push "https://x-access-token:${GH_PAT}@github.com/${{ github.repository }}" \
+            HEAD:${{ github.event.repository.default_branch }} "refs/tags/v${NEXT}"
+          echo "cut v${NEXT} — the repo's tag lane publishes it"
+          echo "### client v${NEXT} from ${SPEC_REPO}@${SPEC_REF}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build & publish binaries (per hanzo.yml)
         # The plugin lane. `images:` ships an OCI image a CLUSTER runs;
