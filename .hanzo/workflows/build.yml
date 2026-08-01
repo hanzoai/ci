@@ -87,12 +87,19 @@ jobs:
         # workflow was IMPORTED at, so the script and the pipeline calling it are
         # always the same version: a caller on @v1 gets v1's imgver, not main's.
         # Both forges are tried because this same file is served from
-        # github.com/hanzoai/ci and git.hanzo.ai/hanzo/ci, and a caller may run on
+        # github.com/hanzoai/ci and git.hanzo.ai/hanzoai/ci, and a caller may run on
         # either.
+        #
+        # GITHUB_WORKFLOW_REF IS A GITHUB VARIABLE, and the forge runner does not set
+        # it — so under `set -u` the bare expansion aborted the step on line 1 with
+        # "unbound variable", before the clone loop it was written for. Every forge
+        # build died there: the caller's whole pipeline skipped, and the release said
+        # only that the reusable's tools could not be checked out. Defaulting it makes
+        # the fallback below the thing that actually runs off GitHub.
         run: |
           set -euo pipefail
-          ref="${GITHUB_WORKFLOW_REF##*@}"; ref="${ref#refs/heads/}"; ref="${ref:-v1}"
-          for url in https://github.com/hanzoai/ci https://git.hanzo.ai/hanzo/ci; do
+          ref="${GITHUB_WORKFLOW_REF:-}"; ref="${ref##*@}"; ref="${ref#refs/heads/}"; ref="${ref:-v1}"
+          for url in https://github.com/hanzoai/ci https://git.hanzo.ai/hanzoai/ci; do
             git clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/ci" 2>/dev/null && break
           done
           [ -x "$RUNNER_TEMP/ci/bin/imgver" ] \
