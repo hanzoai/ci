@@ -665,14 +665,23 @@ jobs:
         # CREDENTIAL: SPEC_TOKEN, a fine-grained token with contents:read on
         # hanzoai/cloud (private). The three existing generate.yml already
         # declare this exact secret name for the repo this one replaces.
-        # RELEASE-DRIVEN, never push-driven. A projection moves when the document
-        # moves, and the document moving IS a cloud release — so this fires on
-        # `spec-update` (and by hand on workflow_dispatch), and a plain push to a
-        # client repo runs the `test:` gate instead. Two lanes, two questions:
-        # this one moves the projection forward, `test:` refuses a hand edit.
-        # Running both on a push would make the second vacuous — the first would
-        # have already rewritten the tree the second is meant to judge.
-        if: inputs.mode != 'delegate' && hashFiles('hanzo.yml') != '' && (github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch')
+        # TWO MODES, ONE FETCH, decided by the event — because there are two
+        # questions and they need the same document.
+        #
+        #   spec-update / workflow_dispatch  MOVE the projection onto a new
+        #     document, then commit and cut (last step of this job).
+        #   push / pull_request              CHECK that the committed projection
+        #     is still what its OWN document (.spec-lock) produces. Writes
+        #     nothing: a check that repairs what it measures reports success for
+        #     a tree that was wrong when the job started.
+        #
+        # The check half replaces the hand-rolled `codegen-drift-check` /
+        # `spec-drift-check` steps four repos each carried a copy of — and fixes
+        # what those copies could not see, because they regenerated from
+        # whatever hanzoai/openapi's main happened to be rather than from the
+        # document this tree names. A gate whose input moves is a gate two runs
+        # of one commit can disagree about.
+        if: inputs.mode != 'delegate' && hashFiles('hanzo.yml') != ''
         id: client
         env:
           SPEC_TOKEN: ${{ secrets.SPEC_TOKEN }}
@@ -689,9 +698,24 @@ jobs:
           # must never be dragged forward onto an undeployed document by someone
           # pressing "run workflow". main is the last resort, for a repo that has
           # no lock yet.
-          REF=$(printf '%s' "$PAYLOAD" | jq -r '.sha // .version // ""')
-          [ -n "$REF" ] || REF=$(sed -n 's/^ref=//p' .spec-lock 2>/dev/null || true)
-          [ -n "$REF" ] || REF=main
+          case "${{ github.event_name }}" in
+            push|pull_request) MODE=check ;;
+            *)                 MODE=move ;;
+          esac
+          # A CHECK is always about the document this tree already names; only a
+          # MOVE may take one from a dispatch. A manual re-run with no payload
+          # re-asks the document in .spec-lock, so pressing "run workflow" can
+          # never drag a client forward onto an undeployed document. main is the
+          # last resort, for a repo with no lock yet.
+          LOCKED=$(sed -n 's/^ref=//p' .spec-lock 2>/dev/null || true)
+          if [ "$MODE" = check ]; then
+            [ -n "$LOCKED" ] || { echo "no .spec-lock — nothing to check against"; echo "ran=0" >> "$GITHUB_OUTPUT"; exit 0; }
+            REF="$LOCKED"
+          else
+            REF=$(printf '%s' "$PAYLOAD" | jq -r '.sha // .version // ""')
+            [ -n "$REF" ] || REF="$LOCKED"
+            [ -n "$REF" ] || REF=main
+          fi
           WANT=$(printf '%s' "$PAYLOAD" | jq -r '.spec_sha256 // ""')
           VERSION=$(printf '%s' "$PAYLOAD" | jq -r '.version // ""')
 
@@ -711,11 +735,29 @@ jobs:
             exit 1
           fi
 
-          printf 'ref=%s\nsha256=%s\nrepo=%s\npath=%s\n' \
-            "$REF" "$GOT" "$SPEC_REPO" "$SPEC_PATH" > .spec-lock
+          # THE LOCK ITSELF IS A GATE ON A CHECK: the ref is pinned, so the bytes
+          # behind it must be too. A digest that moved under a pinned ref means
+          # someone moved a tag, and no amount of regenerating makes that safe.
+          if [ "$MODE" = check ]; then
+            HAVE=$(sed -n 's/^sha256=//p' .spec-lock)
+            [ "$GOT" = "$HAVE" ] || { echo "::error::${SPEC_REPO}@${REF}:${SPEC_PATH} hashes to ${GOT}, but .spec-lock says ${HAVE} — the ref moved under this projection"; exit 1; }
+          else
+            printf 'ref=%s\nsha256=%s\nrepo=%s\npath=%s\n' \
+              "$REF" "$GOT" "$SPEC_REPO" "$SPEC_PATH" > .spec-lock
+          fi
 
           export SPEC="$RUNNER_TEMP/spec" SPEC_REF="$REF" SPEC_SHA256="$GOT" SPEC_VERSION="$VERSION"
           gen=$(yq -r '.client.generate // ""' hanzo.yml)
+          if [ "$MODE" = check ]; then
+            echo "::group::client check ($SPEC_REPO@$REF)"
+            # `--check` as an ARGUMENT, not an env var: six of the seven call
+            # sites already take it that way, and one spelling of one idea is
+            # the point of this lane existing.
+            bash -c "$gen --check"
+            echo "::endgroup::"
+            echo "ran=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           [ -n "$gen" ] && { echo "::group::client generate"; bash -c "$gen"; echo "::endgroup::"; }
 
           # NO `build:` KEY, and that is the point: the repo has already declared
