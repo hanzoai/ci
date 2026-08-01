@@ -12,6 +12,15 @@ on:
       runner:
         description: >-
           Runner labels as a JSON array. Default = Hanzo cloud arc pool (we run
+# The caller is ~7 lines (triggers + this `uses:`); all real config is hanzo.yml.
+name: Hanzo CI/CD
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: >-
+          Runner labels as a JSON array. Default = Hanzo cloud arc pool (we run
           the build, metered as build minutes). Bring-your-own: pass the labels
           of your own self-hosted arc runners instead.
         type: string
@@ -806,43 +815,62 @@ jobs:
           set -euo pipefail
           git config user.name hanzo-dev; git config user.email dev@hanzo.ai
 
-          # `version:` is "<file>:<command printing the current version>", and it
-          # is OPTIONAL because not every language keeps its version in a file.
-          # A Go module's version IS its tag — there is nothing to rewrite — so
-          # with no `version:` the current one is read from the tags themselves.
-          # Inventing a VERSION file for those repos would be a second place a
-          # version could be wrong.
+          # ONE key, `version:`, saying WHERE this client's version lives —
+          # because that answer is genuinely different per language and pretending
+          # otherwise means inventing a second place a version can be wrong.
+          #
+          #   "<file>:<command printing it>"  it lives in a file; rewrite and tag
+          #   tag                             the tag IS the version (a Go module
+          #                                   has nothing to rewrite)
+          #   absent                          CI cannot derive one — commit the
+          #                                   projection, cut nothing, say so
+          #
+          # The third state is not a gap to fill later. A repo whose version is
+          # not x.y.z (a `-alpha.N` gradle build) has no patch for this lane to
+          # derive, and guessing one would tag bytes under a number nobody chose.
+          # Its projection still lands and is still gated; only the cut waits.
           bump=$(yq -r '.client.version // ""' hanzo.yml)
-          if [ -n "$bump" ]; then
-            FILE=${bump%%:*}
-            READ=${bump#*:}
-            CUR=$(bash -c "$READ")
-          else
-            git fetch --quiet --tags origin
-            CUR=$(git tag -l 'v[0-9]*' | sed 's/^v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
-            [ -n "$CUR" ] || CUR=0.0.0
-            FILE=""
-          fi
-          case "$CUR" in *.*.*) ;; *) echo "::error::client version '$CUR' is not x.y.z"; exit 1;; esac
-          NEXT="${CUR%.*}.$(( ${CUR##*.} + 1 ))"
-
-          if [ -n "$FILE" ]; then
-            # Rewrite in place, then prove it moved. A sed that matched nothing
-            # is a tag that names the previous release's bytes.
-            sed -i "0,/${CUR//./\\.}/s//${NEXT}/" "$FILE"
-            NOW=$(bash -c "$READ")
-            [ "$NOW" = "$NEXT" ] || { echo "::error::version bump did not take in $FILE ($CUR -> $NOW, wanted $NEXT)"; exit 1; }
-          fi
-
           SPEC_REPO=$(sed -n 's/^repo=//p' .spec-lock)
           SPEC_REF=$(sed -n 's/^ref=//p' .spec-lock)
+          MSG="client: regenerate from ${SPEC_REPO}@${SPEC_REF}"
+          FILE=""; READ=""
+          case "$bump" in
+            "")   CUR="" ;;
+            tag)  git fetch --quiet --tags origin
+                  CUR=$(git tag -l 'v[0-9]*' | sed 's/^v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+                  [ -n "$CUR" ] || { echo "::error::client version: tag, but no vX.Y.Z tag exists to succeed"; exit 1; } ;;
+            *)    FILE=${bump%%:*}; READ=${bump#*:}; CUR=$(bash -c "$READ") ;;
+          esac
+
+          NEXT=""
+          if [ -n "$CUR" ]; then
+            case "$CUR" in
+              *.*.*[!0-9.]*|*[!0-9.]*) echo "::error::client version '$CUR' is not x.y.z — declare a version: this lane can derive a patch from, or drop the key and cut by hand"; exit 1 ;;
+            esac
+            NEXT="${CUR%.*}.$(( ${CUR##*.} + 1 ))"
+            MSG="$MSG (${NEXT})"
+            if [ -n "$FILE" ]; then
+              # Rewrite in place, then prove it moved. A sed that matched nothing
+              # is a tag that names the previous release's bytes.
+              sed -i "0,/${CUR//./\\.}/s//${NEXT}/" "$FILE"
+              NOW=$(bash -c "$READ")
+              [ "$NOW" = "$NEXT" ] || { echo "::error::version bump did not take in $FILE ($CUR -> $NOW, wanted $NEXT)"; exit 1; }
+            fi
+          fi
+
           git add -A
-          git commit -q -m "client: regenerate from ${SPEC_REPO}@${SPEC_REF} (${NEXT})"
-          git tag "v${NEXT}"
-          git push "https://x-access-token:${GH_PAT}@github.com/${{ github.repository }}" \
-            HEAD:${{ github.event.repository.default_branch }} "refs/tags/v${NEXT}"
-          echo "cut v${NEXT} — the repo's tag lane publishes it"
-          echo "### client v${NEXT} from ${SPEC_REPO}@${SPEC_REF}" >> "$GITHUB_STEP_SUMMARY"
+          git commit -q -m "$MSG"
+          REMOTE="https://x-access-token:${GH_PAT}@github.com/${{ github.repository }}"
+          if [ -n "$NEXT" ]; then
+            git tag "v${NEXT}"
+            git push "$REMOTE" HEAD:${{ github.event.repository.default_branch }} "refs/tags/v${NEXT}"
+            echo "cut v${NEXT} — the repo's tag lane publishes it"
+            echo "### client v${NEXT} from ${SPEC_REPO}@${SPEC_REF}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            git push "$REMOTE" HEAD:${{ github.event.repository.default_branch }}
+            echo "::warning::projection committed but NOT cut — hanzo.yml declares no client.version:, so this repo publishes when a human tags it"
+            echo "### projection from ${SPEC_REPO}@${SPEC_REF} — not cut (no client.version:)" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Build & publish binaries (per hanzo.yml)
         # The plugin lane. `images:` ships an OCI image a CLUSTER runs;
