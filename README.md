@@ -40,6 +40,53 @@ jobs:
 
 That's it. The build/test/deploy logic lives here, once.
 
+## `client:` — one document, eight generated clients
+
+A generated SDK is a **projection** of one API document at one version. This lane
+is the only place in the fleet that says how a projection is made, so the eight
+client repos (`python-sdk`, `js-sdk`, `go-sdk`, `rust-sdk`, `java-sdk`,
+`kotlin-sdk`, `cpp-sdk`, `cli`) stop carrying eight copies of the same eight
+lines.
+
+```yaml
+client:
+  spec: { repo: hanzoai/cloud, path: openapi.yaml }   # these are the defaults
+  generate: ./scripts/generate.sh        # $SPEC is the fetched document
+  build:    npm ci && npm run build && npm run examples
+  version:  'package.json:jq -r .version package.json'
+```
+
+It fires on `repository_dispatch: spec-update`, which **hanzoai/cloud sends once
+per release**:
+
+```yaml
+on:
+  repository_dispatch: { types: [spec-update] }
+  workflow_dispatch:
+```
+
+The coupler is the document, **passed by value at a pinned ref**. The payload
+carries `(version, sha, spec_sha256)`; the lane fetches `openapi.yaml` at that
+sha and refuses if the bytes hash to anything else — every projection of one
+release is generated from one digest. Reading a live host instead would be a lie
+about which deploy the client describes.
+
+Three gates, in order:
+
+| gate | refuses |
+|---|---|
+| digest | a client generated from a different document than its siblings |
+| `build:` | a spec change that produces a client which does not compile — **including its examples** |
+| `.spec-lock` | is committed beside the code: `ref` + `sha256`, so anyone can ask a client repo *which document are you?* without running a generator |
+
+On a delta the lane commits the projection, bumps the **patch** (derived, never
+typed — a projection never earns a minor or a major) and pushes the tag. The
+repo's own tag lane publishes it, so the registry credential stays where the
+publish is.
+
+Credential: **`SPEC_TOKEN`** — a fine-grained token with `contents:read` on the
+spec repo.
+
 ## `binaries:` — publish a plugin once, install it everywhere
 
 `images:` ships an OCI image a **cluster** runs. `binaries:` ships an

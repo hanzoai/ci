@@ -528,6 +528,162 @@ jobs:
         if: inputs.mode != 'delegate' && hashFiles('package.json') != ''
         run: corepack enable
 
+      - name: Provision Rust toolchain (cargo test gates)
+        # Same hole the Go and Node steps close, for the third language this fleet
+        # actually ships: hanzoai/cli is Rust, and its gate — `genspec --check`,
+        # the one that keeps the CLI's captured command surface from silently
+        # drifting from what cloud serves — is a `cargo run`. On a stock arc
+        # runner that is exit 127, so the gate a repo declares would never run:
+        # the exact failure this workflow refuses everywhere else.
+        # Guarded to Rust callers (Cargo.toml present); a no-op once a runner
+        # image bakes rustup in.
+        if: inputs.mode != 'delegate' && hashFiles('Cargo.toml') != ''
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Provision Java toolchain (client codegen)
+        # openapi-generator is a Java jar, so the `client:` lane below cannot run
+        # without a JDK. Guarded on the lane, not on a file: a repo with a
+        # `client:` block needs it in every language, and a repo without one
+        # never pays for it.
+        if: inputs.mode != 'delegate' && hashFiles('hanzo.yml') != ''
+        run: |
+          set -euo pipefail
+          yq -e '.client' hanzo.yml >/dev/null 2>&1 || { echo "no client: lane — skipping JDK"; exit 0; }
+          command -v javac >/dev/null 2>&1 && { echo "JDK already present"; exit 0; }
+          sudo apt-get update -qq || {
+            sudo find /etc/apt -name '*.list' -o -name '*.sources' | \
+              xargs -r sudo sed -i 's|https\?://archive.ubuntu.com/ubuntu|http://mirrors.digitalocean.com/ubuntu|g'
+            sudo apt-get update -qq
+          }
+          sudo apt-get install -y -qq openjdk-21-jdk-headless
+
+      - name: Client — regenerate from the release document (per hanzo.yml)
+        # THE CLIENT LANE. A generated SDK is a PROJECTION of one document at one
+        # version, and this is the only place in the fleet that says how a
+        # projection is made. Seven repos in seven languages ran seven copies of
+        # these eight lines — three of them (java, kotlin, cpp) as a hand-rolled
+        # `codegen-drift-check`, four with nothing at all — which is why four
+        # SDKs had no regeneration path and the three that did had never fired.
+        #
+        # THE COUPLER IS THE DOCUMENT, PASSED BY VALUE AT A PINNED REF. The
+        # payload of hanzoai/cloud's `spec-update` carries (version, sha,
+        # spec_sha256); this fetches openapi.yaml AT THAT SHA and refuses if the
+        # bytes hash to anything else. That refusal is G2 — every projection of
+        # one release is generated from the same digest, so "we regenerated
+        # python on Tuesday and go on Thursday" cannot happen quietly. Reading
+        # api.hanzo.ai instead would be a lie about which deploy this client
+        # describes: at fanout time the document is a git object, and the host is
+        # whatever it happens to be serving.
+        #
+        # `.spec-lock` is the receipt, committed beside the generated code: the
+        # ref and the digest this tree was generated from. It is what lets anyone
+        # — cloud's next release included — ask a client repo "which document are
+        # you?" without running a generator.
+        #
+        # CREDENTIAL: SPEC_TOKEN, a fine-grained token with contents:read on
+        # hanzoai/cloud (private). The three existing generate.yml already
+        # declare this exact secret name for the repo this one replaces.
+        if: inputs.mode != 'delegate' && hashFiles('hanzo.yml') != ''
+        id: client
+        env:
+          SPEC_TOKEN: ${{ secrets.SPEC_TOKEN }}
+          PAYLOAD: ${{ toJson(github.event.client_payload) }}
+        run: |
+          set -euo pipefail
+          yq -e '.client' hanzo.yml >/dev/null 2>&1 || { echo "no client: lane"; echo "ran=0" >> "$GITHUB_OUTPUT"; exit 0; }
+
+          SPEC_REPO=$(yq -r '.client.spec.repo // "hanzoai/cloud"' hanzo.yml)
+          SPEC_PATH=$(yq -r '.client.spec.path // "openapi.yaml"' hanzo.yml)
+          # The dispatch names the release; a manual run reads the tip of main.
+          # Both are a git ref, never a live host.
+          REF=$(printf '%s' "$PAYLOAD" | jq -r '.sha // .version // "main"')
+          WANT=$(printf '%s' "$PAYLOAD" | jq -r '.spec_sha256 // ""')
+          VERSION=$(printf '%s' "$PAYLOAD" | jq -r '.version // ""')
+
+          [ -n "${SPEC_TOKEN:-}" ] || { echo "::error::the client: lane needs SPEC_TOKEN (contents:read on ${SPEC_REPO})"; exit 1; }
+
+          curl -fsSL -H "Authorization: Bearer ${SPEC_TOKEN}" \
+            -H 'Accept: application/vnd.github.raw' \
+            "https://api.github.com/repos/${SPEC_REPO}/contents/${SPEC_PATH}?ref=${REF}" -o "$RUNNER_TEMP/spec"
+          GOT=$(sha256sum "$RUNNER_TEMP/spec" | cut -d' ' -f1)
+
+          # G2: one release, one document. A digest that does not match the one
+          # the release published means this repo is about to generate against a
+          # different document than its siblings — refuse rather than publish a
+          # client that describes a version nobody shipped.
+          if [ -n "$WANT" ] && [ "$GOT" != "$WANT" ]; then
+            echo "::error::${SPEC_REPO}@${REF}:${SPEC_PATH} hashes to ${GOT}, but the release published ${WANT}"
+            exit 1
+          fi
+
+          printf 'ref=%s\nsha256=%s\nrepo=%s\npath=%s\n' \
+            "$REF" "$GOT" "$SPEC_REPO" "$SPEC_PATH" > .spec-lock
+
+          export SPEC="$RUNNER_TEMP/spec" SPEC_REF="$REF" SPEC_SHA256="$GOT" SPEC_VERSION="$VERSION"
+          gen=$(yq -r '.client.generate // ""' hanzo.yml)
+          [ -n "$gen" ] && { echo "::group::client generate"; bash -c "$gen"; echo "::endgroup::"; }
+
+          # G3: a client that does not build blocks the release. Compile the
+          # client AND its examples — a regeneration that builds but breaks the
+          # example flows has changed the surface out from under every consumer,
+          # and that is precisely the release that must go red rather than ship.
+          bld=$(yq -r '.client.build // ""' hanzo.yml)
+          [ -n "$bld" ] && { echo "::group::client build"; bash -c "$bld"; echo "::endgroup::"; }
+
+          echo "ran=1" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "spec_sha256=$GOT" >> "$GITHUB_OUTPUT"
+          { git add -A; git diff --cached --quiet && echo "changed=0" || echo "changed=1"; } >> "$GITHUB_OUTPUT"
+
+      - name: Client — commit the projection and cut the patch
+        # A generated client is not authored code, so there is nothing here for a
+        # human to review that the gates above have not already asked: it
+        # regenerated from a digest the release published, it compiles, and its
+        # examples compile. Holding that behind a pull request is what produced
+        # the state this lane replaces — js-sdk's regeneration fired twice ever,
+        # both red; go-sdk's and rust-sdk's never ran at all.
+        #
+        # PATCH ONLY, and derived rather than typed: read the current version,
+        # add one to its last component. A projection never earns a minor or a
+        # major — the document decides the surface, and this repo only restates
+        # it. (npm `hanzoai` going 0.0.1-alpha.1 -> 2.0.5 is what a hand-typed
+        # version does.) The repo's OWN tag lane publishes to its registry; this
+        # only mints the tag that starts it, so the publish credential stays
+        # where the publish is.
+        if: inputs.mode != 'delegate' && steps.client.outputs.ran == '1' && steps.client.outputs.changed == '1' && github.event_name != 'pull_request'
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          bump=$(yq -r '.client.version // ""' hanzo.yml)
+          [ -n "$bump" ] || { echo '::error::client: lane needs a version: entry — "<file>:<command printing the current version>"'; exit 1; }
+          FILE=$(printf '%s' "$bump" | cut -d: -f1)
+          CUR=$(bash -c "$(printf '%s' "$bump" | cut -d: -f2-)")
+          case "$CUR" in *.*.*) ;; *) echo "::error::client version '$CUR' is not x.y.z"; exit 1;; esac
+          NEXT="${CUR%.*}.$(( ${CUR##*.} + 1 ))"
+
+          # Rewrite the version in place, then prove it moved. A sed that matched
+          # nothing is a tag that names the previous release's bytes.
+          sed -i "0,/${CUR//./\\.}/s//${NEXT}/" "$FILE"
+          NOW=$(bash -c "$(printf '%s' "$bump" | cut -d: -f2-)")
+          [ "$NOW" = "$NEXT" ] || { echo "::error::version bump did not take in $FILE ($CUR -> $NOW, wanted $NEXT)"; exit 1; }
+
+          # Re-run the build so the lockfile/manifest the bump touched is
+          # regenerated and committed with it, not left for the next run to find.
+          bld=$(yq -r '.client.build // ""' hanzo.yml)
+          [ -n "$bld" ] && bash -c "$bld" >/dev/null 2>&1 || true
+
+          git config user.name hanzo-dev; git config user.email dev@hanzo.ai
+          git add -A
+          SPEC_REPO=$(sed -n 's/^repo=//p' .spec-lock)
+          SPEC_REF=$(sed -n 's/^ref=//p' .spec-lock)
+          git commit -q -m "client: regenerate from ${SPEC_REPO}@${SPEC_REF} (${NEXT})"
+          git tag "v${NEXT}"
+          REPO="${{ github.repository }}"
+          git push "https://x-access-token:${GH_PAT}@github.com/${REPO}" HEAD:${{ github.event.repository.default_branch }} "refs/tags/v${NEXT}"
+          echo "cut v${NEXT} — the repo's tag lane publishes it"
+          echo "### client v${NEXT} from spec \`${{ steps.client.outputs.spec_sha256 }}\`" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Authenticate runner git for private Go modules (test gates)
         # The Test step runs `go vet`/`go test` ON the runner (not in buildx), so
         # `go` fetches private hanzoai/* modules (GOPRIVATE → direct) through the
