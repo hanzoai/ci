@@ -592,7 +592,14 @@ jobs:
         # CREDENTIAL: SPEC_TOKEN, a fine-grained token with contents:read on
         # hanzoai/cloud (private). The three existing generate.yml already
         # declare this exact secret name for the repo this one replaces.
-        if: inputs.mode != 'delegate' && hashFiles('hanzo.yml') != ''
+        # RELEASE-DRIVEN, never push-driven. A projection moves when the document
+        # moves, and the document moving IS a cloud release — so this fires on
+        # `spec-update` (and by hand on workflow_dispatch), and a plain push to a
+        # client repo runs the `test:` gate instead. Two lanes, two questions:
+        # this one moves the projection forward, `test:` refuses a hand edit.
+        # Running both on a push would make the second vacuous — the first would
+        # have already rewritten the tree the second is meant to judge.
+        if: inputs.mode != 'delegate' && hashFiles('hanzo.yml') != '' && (github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch')
         id: client
         env:
           SPEC_TOKEN: ${{ secrets.SPEC_TOKEN }}
@@ -603,9 +610,15 @@ jobs:
 
           SPEC_REPO=$(yq -r '.client.spec.repo // "hanzoai/cloud"' hanzo.yml)
           SPEC_PATH=$(yq -r '.client.spec.path // "openapi.yaml"' hanzo.yml)
-          # The dispatch names the release; a manual run reads the tip of main.
-          # Both are a git ref, never a live host.
-          REF=$(printf '%s' "$PAYLOAD" | jq -r '.sha // .version // "main"')
+          # The dispatch names the release. A manual re-run with no payload
+          # re-asks the document this tree ALREADY names (.spec-lock), so it is a
+          # no-op rather than a jump to whatever main happens to be — a client
+          # must never be dragged forward onto an undeployed document by someone
+          # pressing "run workflow". main is the last resort, for a repo that has
+          # no lock yet.
+          REF=$(printf '%s' "$PAYLOAD" | jq -r '.sha // .version // ""')
+          [ -n "$REF" ] || REF=$(sed -n 's/^ref=//p' .spec-lock 2>/dev/null || true)
+          [ -n "$REF" ] || REF=main
           WANT=$(printf '%s' "$PAYLOAD" | jq -r '.spec_sha256 // ""')
           VERSION=$(printf '%s' "$PAYLOAD" | jq -r '.version // ""')
 
