@@ -52,9 +52,12 @@ lines.
 client:
   spec: { repo: hanzoai/cloud, path: openapi.yaml }   # these are the defaults
   generate: ./scripts/generate.sh        # $SPEC is the fetched document
-  build:    npm ci && npm run build && npm run examples
-  version:  'package.json:jq -r .version package.json'
+  version:  'package.json:jq -r .version package.json'   # optional; see below
 ```
+
+There is deliberately **no `build:`**. The repo already declared how it proves
+itself, in `test:`, and that block runs over the regenerated tree — which is
+exactly the gate. A second declaration would be one assertion written twice.
 
 It fires on `repository_dispatch: spec-update`, which **hanzoai/cloud sends once
 per release**:
@@ -76,13 +79,18 @@ Three gates, in order:
 | gate | refuses |
 |---|---|
 | digest | a client generated from a different document than its siblings |
-| `build:` | a spec change that produces a client which does not compile — **including its examples** |
+| `test:` | a spec change that produces a client which does not compile — **including its examples** |
 | `.spec-lock` | is committed beside the code: `ref` + `sha256`, so anyone can ask a client repo *which document are you?* without running a generator |
 
-On a delta the lane commits the projection, bumps the **patch** (derived, never
-typed — a projection never earns a minor or a major) and pushes the tag. The
-repo's own tag lane publishes it, so the registry credential stays where the
-publish is.
+On a delta — and only after `test:` has passed over exactly those bytes — the
+lane commits the projection, bumps the **patch** (derived, never typed: a
+projection never earns a minor or a major) and pushes the tag. The repo's own tag
+lane publishes it, so the registry credential stays where the publish is.
+
+`version:` is optional. A Go module's version *is* its tag, so with no `version:`
+the current one is read from the tags themselves and nothing is rewritten —
+inventing a VERSION file for those repos would be a second place a version could
+be wrong.
 
 Credential: **`SPEC_TOKEN`** — a fine-grained token with `contents:read` on the
 spec repo.
