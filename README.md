@@ -87,10 +87,18 @@ lane commits the projection, bumps the **patch** (derived, never typed: a
 projection never earns a minor or a major) and pushes the tag. The repo's own tag
 lane publishes it, so the registry credential stays where the publish is.
 
-`version:` is optional. A Go module's version *is* its tag, so with no `version:`
-the current one is read from the tags themselves and nothing is rewritten —
-inventing a VERSION file for those repos would be a second place a version could
-be wrong.
+`version:` says **where this client's version lives**, because that answer is
+genuinely different per language:
+
+| value | meaning |
+|---|---|
+| `"<file>:<command printing it>"` | it lives in a file — rewrite it, commit, tag |
+| `tag` | the tag **is** the version (a Go module has nothing to rewrite) |
+| absent | CI cannot derive one — the projection is committed and gated, nothing is cut |
+
+The third state is not a gap to fill later. A repo whose version is not `x.y.z`
+(a `-alpha.N` gradle build) has no patch for this lane to derive, and guessing
+one would tag bytes under a number nobody chose.
 
 Credential: **`SPEC_TOKEN`** — a fine-grained token with `contents:read` on the
 spec repo.
