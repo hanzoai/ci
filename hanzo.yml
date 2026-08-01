@@ -39,6 +39,14 @@ test:
       set -e
       export GOWORK=off
       go test -count=1 ./...
+  - name: imgver
+    # bin/imgver decides the version EVERY image in the fleet publishes — this
+    # workflow's build lane calls it, and so does the imgver composite action the
+    # repos that hand-roll their own deploy.yml use. A wrong number here is one
+    # tag covering two digests, which a node running imagePullPolicy:
+    # IfNotPresent never picks up and no reader can see. Offline and
+    # deterministic: the registry floor is injected, so it needs no network.
+    run: bash bin/imgver_test.sh
 
 # No `deploy:` ON PURPOSE. Rollout is a reviewed tag pin in hanzoai/universe
 # (infra/k8s/operator/crs/ci.yaml), the same rule cloud and git follow: a

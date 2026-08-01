@@ -1,0 +1,59 @@
+name: imgver
+description: The semver an image build publishes. We don't ship shas.
+# For the repos that build images from a hand-rolled .hanzo/workflows/deploy.yml
+# instead of importing hanzoai/ci's build.yml. Those workflows each carry their
+# own `tag=sha-$(echo $GITHUB_SHA | cut -c1-7)` line, which is why 14 of the
+# fleet's 117 pins named a commit rather than a release. Replace that line with:
+#
+#   - id: ver
+#     uses: hanzoai/ci/.github/actions/imgver@v1
+#     with: { repo: ghcr.io/hanzoai/<name> }
+#     env:  { GH_PAT: '${{ secrets.GH_PAT }}' }
+#   ...
+#   tags: ghcr.io/hanzoai/<name>:${{ steps.ver.outputs.version }}
+#
+# and keep the sha tag alongside if you want the forensics. The version is the
+# one universe PINS. Same bin/imgver build.yml runs — one implementation.
+inputs:
+  repo:
+    description: Image repository, e.g. ghcr.io/hanzoai/iam
+    required: true
+  context:
+    description: Build context, where the version manifest is looked for first
+    required: false
+    default: .
+  version:
+    description: >-
+      Override the declared version: a literal x.y.z, or "<file>:<command
+      printing it>". Defaults to the repo's package.json / Cargo.toml / VERSION
+      / pyproject.toml.
+    required: false
+    default: ''
+outputs:
+  version:
+    description: The semver to publish and to pin
+    value: ${{ steps.run.outputs.version }}
+runs:
+  using: composite
+  steps:
+    - name: Fetch imgver
+      shell: bash
+      # The action ref is the script ref: an action pinned to @v1 runs v1's
+      # imgver. Both forges, because this repo is served from each.
+      run: |
+        set -euo pipefail
+        ref="${GITHUB_ACTION_REF:-v1}"
+        for url in https://github.com/hanzoai/ci https://git.hanzo.ai/hanzo/ci; do
+          git clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/imgver-ci" 2>/dev/null && break
+        done
+        [ -x "$RUNNER_TEMP/imgver-ci/bin/imgver" ] \
+          || { echo "::error::could not fetch hanzoai/ci@$ref (bin/imgver)"; exit 1; }
+    - id: run
+      shell: bash
+      env:
+        IMGVER_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        v=$("$RUNNER_TEMP/imgver-ci/bin/imgver" '${{ inputs.repo }}' '${{ inputs.context }}')
+        echo "version=$v" >> "$GITHUB_OUTPUT"
+        echo "$v"

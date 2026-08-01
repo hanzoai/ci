@@ -72,6 +72,24 @@ jobs:
         with:
           submodules: ${{ inputs.submodules }}
 
+      - name: Check out this reusable's own tools
+        # A reusable workflow's `run:` steps execute in the CALLER's workspace, so
+        # bin/imgver is not on disk unless we fetch it. Pinned to the ref this
+        # workflow was IMPORTED at, so the script and the pipeline calling it are
+        # always the same version: a caller on @v1 gets v1's imgver, not main's.
+        # Both forges are tried because this same file is served from
+        # github.com/hanzoai/ci and git.hanzo.ai/hanzo/ci, and a caller may run on
+        # either.
+        run: |
+          set -euo pipefail
+          ref="${GITHUB_WORKFLOW_REF##*@}"; ref="${ref#refs/heads/}"; ref="${ref:-v1}"
+          for url in https://github.com/hanzoai/ci https://git.hanzo.ai/hanzo/ci; do
+            git clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/ci" 2>/dev/null && break
+          done
+          [ -x "$RUNNER_TEMP/ci/bin/imgver" ] \
+            || { echo "::error::could not fetch hanzoai/ci@$ref (bin/imgver)"; exit 1; }
+          echo "CI_HOME=$RUNNER_TEMP/ci" >> "$GITHUB_ENV"
+
       - name: Provision parse toolchain (jq + PyYAML)
         # This reusable parses the caller's hanzo.yml with python3 + PyYAML and
         # slices JSON with jq. The stock arc runner image
@@ -421,6 +439,34 @@ jobs:
             # native-speed arm64, register a bare-metal arm64 host (spark/GB10) as
             # the hanzo-build-linux-arm64 self-hosted runner (values-build-arm64.yaml).
             plats=$(echo "$img"|jq -r '(.platforms // ["linux/amd64"]) | join(",")')
+            # ---- The semver this build publishes ----------------------------
+            # A branch build used to publish sha-<short7> and nothing else, so an
+            # image only earned a version when a human remembered to cut a git
+            # tag. That is the whole reason 14 of the fleet's 117 pins named a
+            # commit instead of a release: not drift, just the only tag CI ever
+            # offered them. Every build now publishes a version too, and the
+            # sha- tag stays beside it for forensics.
+            #
+            # The number is DERIVED, never typed, by bin/imgver — the ONE
+            # implementation, shared with the hand-rolled
+            # .hanzo/workflows/deploy.yml that 11 repos carry instead of importing
+            # this workflow (see .github/actions/imgver). Written twice it would be
+            # right twice and then wrong once, which is exactly how `sha-<short>`
+            # became the only tag those repos ever published. Read that script for
+            # the rule; it is monotonic against the repo's manifest AND the
+            # registry, so one tag can never cover two digests.
+            ver=""
+            if [ "$IS_TAG" = 1 ]; then
+              # Release build: the git tag IS the version. Identity in, identity
+              # out — deriving here would publish a number nobody asked for.
+              :
+            else
+              # An explicit `version:` on the image entry wins over the repo-wide
+              # one; both are optional, and imgver falls back to the manifest.
+              iv=$(echo "$img"|jq -r '.version // ""')
+              [ -z "$iv" ] && iv=$(yq -r '.version // ""' hanzo.yml)
+              ver=$(IMGVER_VERSION="$iv" "$CI_HOME/bin/imgver" "$repo" "$ctx")
+            fi
             if [ "$plats" = "linux/amd64" ]; then
               # single-arch: keep the exact legacy tag shape (-amd64) deploys expect.
               TAGS="-t $repo:sha-${SHORT}-amd64${sfx:+-$sfx} -t $repo:${sfx:+$sfx-}latest"
@@ -439,6 +485,10 @@ jobs:
             if [ "$IS_TAG" = 1 ]; then
               TAGS="$TAGS -t $repo:${REL}${sfx:+-$sfx}"
               [ "$REL" != "$VER" ] && TAGS="$TAGS -t $repo:${VER}${sfx:+-$sfx}"
+            else
+              # The tag universe is meant to PIN. It goes on every build, not
+              # only the ones somebody remembered to tag by hand.
+              TAGS="$TAGS -t $repo:${ver}${sfx:+-$sfx}"
             fi
             echo "::group::build $name → $repo (${sfx}) [$plats]"
             # --build-arg assembly: static hanzo.yml `args` (a fixed value, e.g. a
@@ -455,6 +505,21 @@ jobs:
             # BuildKit secret so Dockerfiles can clone private Go modules; omitted
             # cleanly when absent (public-only builds unaffected).
             docker buildx build --platform "$plats" $BUILD_ARGS ${GIT_TOKEN:+--secret id=gh_token,env=GIT_TOKEN} --push $TAGS -f "$df" "$ctx"
+            # The semver is the tag the fleet PINS, so prove it exists before the
+            # run goes green — buildx can exit 0 while the manifest is not yet
+            # resolvable, and a pin onto a phantom tag is an ImagePullBackOff.
+            # The digest is printed with it because universe pins repo:tag@digest
+            # and the kubelet honours the DIGEST: publishing both here is what
+            # lets the two move together instead of being looked up separately
+            # and drifting apart.
+            pin="$repo:${ver:-$REL}${sfx:+-$sfx}"
+            for i in 1 2 3 4 5 6; do
+              dig=$(docker buildx imagetools inspect "$pin" --format '{{.Manifest.Digest}}' 2>/dev/null || true)
+              [ -n "$dig" ] && break
+              sleep 5
+            done
+            [ -n "$dig" ] || { echo "::error::$pin not resolvable after push"; exit 1; }
+            echo "| \`$pin\` | \`$dig\` |" >> "$RUNNER_TEMP/pins.md"
             # Dual-host: mirror the exact tag set to registry.hanzo.ai (server-
             # side manifest copy — no rebuild). ghcr.io/<org>/<name> →
             # oci.hanzo.ai/<org>/<name>; public consumers keep ghcr, the fleet
@@ -479,6 +544,14 @@ jobs:
             fi
             echo "::endgroup::"
           done
+          # The pins this run earned, ready to paste into universe. Tag and
+          # digest are printed TOGETHER because they are one fact: the failure
+          # this prevents is a new tag landing beside an old digest, which
+          # reports the new version on the pod and serves the old bytes.
+          if [ -s "$RUNNER_TEMP/pins.md" ]; then
+            { echo "### Pins"; echo; echo "| image | digest |"; echo "|---|---|";
+              cat "$RUNNER_TEMP/pins.md"; } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Provision Go toolchain (go test gates on bare runners)
         # hanzo.yml `test:` gates (e.g. `go vet ./...`, `go test ...`) run
