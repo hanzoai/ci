@@ -40,6 +40,25 @@ on:
           of twice; passing it anywhere else runs it zero times.
         type: boolean
         default: true
+      submodules:
+        description: >-
+          Passed straight to actions/checkout. Default '' is checkout's own
+          default — submodules are NOT fetched — so every existing caller keeps
+          the checkout it has today. A repo whose source includes submodules
+          passes 'recursive'.
+
+          Why this is an input and not simply always-on: a build that omits part
+          of its own source is wrong, but a submodule the job's token cannot read
+          turns a build that succeeds today into one that fails at checkout. The
+          repo knows which of those it has; this workflow does not.
+
+          It matters more than it looks. A missing submodule does not announce
+          itself — the directory is empty, every other file builds, and the
+          artifact ships with a hole in it. hanzo-docs/docs is the case in hand:
+          whole doc sections live in submodules, so it passes 'recursive' and
+          gates the result (see that repo's scripts/check-export.sh).
+        type: string
+        default: ''
 
 permissions:
   contents: write # release assets for `binaries:`; read is enough without it
@@ -50,6 +69,8 @@ jobs:
     runs-on: ${{ fromJson(inputs.runner) }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: ${{ inputs.submodules }}
 
       - name: Provision parse toolchain (jq + PyYAML)
         # This reusable parses the caller's hanzo.yml with python3 + PyYAML and
