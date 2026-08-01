@@ -92,6 +92,37 @@ else printf 'FAIL  %-56s rc=%s\n      %s\n' "no go.mod: nothing to compare, stay
 tmsg "error names the fix (pin + GOTOOLCHAIN=auto)" 'GOTOOLCHAIN=auto' 1.26.5 'FROM golang:1.26.4-alpine'
 tmsg "error quotes the runtime failure it prevents" 'go.mod requires go >=' 1.26.5 'FROM golang:1.26.4-alpine'
 
+# --- build context decides the module, not file location -------------------
+# hanzoai/s3's live shape: a Dockerfile under test/kafka/ built with
+# `context: ../..` that does `COPY go.mod go.sum ./` compiles the ROOT module.
+# Judging it by test/kafka/go.mod reads 1.25.0 where the truth is 1.26.5 — the
+# difference between "fine" and "cannot build".
+d3="$tmp/ctxwins"; mkdir -p "$d3/test/kafka"
+printf 'module root\n\ngo 1.26.5\n' > "$d3/go.mod"
+printf 'module sub\n\ngo 1.25.0\n' > "$d3/test/kafka/go.mod"
+printf 'FROM golang:1.25-alpine\nCOPY go.mod go.sum ./\nRUN go build ./...\n' > "$d3/test/kafka/Dockerfile.s3"
+out=$(cd "$d3" && bash "$GOVER" test/kafka/Dockerfile.s3 . 2>&1); rc=$?
+if [ "$rc" = 1 ]; then printf 'ok    %-56s rc=1\n' "context go.mod wins when Dockerfile COPYs it"
+else printf 'FAIL  %-56s rc=%s\n      %s\n' "context go.mod wins when Dockerfile COPYs it" "$rc" "$out"; fail=1; fi
+# ...and the converse: a subdir module built from its OWN directory as context,
+# copying its OWN go.mod, is still judged by its own floor.
+d4="$tmp/subctx"; mkdir -p "$d4/sidecar"
+printf 'module root\n\ngo 1.26.5\n' > "$d4/go.mod"
+printf 'module sidecar\n\ngo 1.24.0\n' > "$d4/sidecar/go.mod"
+printf 'FROM golang:1.24-alpine\nCOPY go.mod go.sum ./\n' > "$d4/sidecar/Dockerfile"
+out=$(cd "$d4/sidecar" && bash "$GOVER" Dockerfile . 2>&1); rc=$?
+if [ "$rc" = 0 ]; then printf 'ok    %-56s rc=0\n' "own-directory context keeps its own floor"
+else printf 'FAIL  %-56s rc=%s\n      %s\n' "own-directory context keeps its own floor" "$rc" "$out"; fail=1; fi
+# A Dockerfile that copies a SUBDIRECTORY's go.mod is judged by the nearest one,
+# not the context root — otherwise every multi-module repo reports false alarms.
+d5="$tmp/nocopy"; mkdir -p "$d5/svc"
+printf 'module root\n\ngo 1.26.5\n' > "$d5/go.mod"
+printf 'module svc\n\ngo 1.24.0\n' > "$d5/svc/go.mod"
+printf 'FROM golang:1.24-alpine\nCOPY svc/go.mod ./\n' > "$d5/svc/Dockerfile"
+out=$(cd "$d5" && bash "$GOVER" svc/Dockerfile . 2>&1); rc=$?
+if [ "$rc" = 0 ]; then printf 'ok    %-56s rc=0\n' "subdir go.mod copy is not the context root"
+else printf 'FAIL  %-56s rc=%s\n      %s\n' "subdir go.mod copy is not the context root" "$rc" "$out"; fail=1; fi
+
 echo
 [ $fail = 0 ] && echo "all gover tests passed" || echo "gover tests FAILED"
 exit $fail
