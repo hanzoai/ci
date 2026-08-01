@@ -168,6 +168,13 @@ jobs:
             name=$(echo "$img"|jq -r .name); repo=$(echo "$img"|jq -r .repo)
             ctx=$(echo "$img"|jq -r .context); df=$(echo "$img"|jq -r '.dockerfile // (.context+"/Dockerfile")')
             sfx=$(echo "$img"|jq -r '."tag-suffix" // ""')
+            # Same Go-builder check the buildx lane runs. It belongs here too:
+            # delegating the build moves WHERE it runs, not whether the image
+            # can compile the module, and a mismatch enqueued to platform fails
+            # on a machine whose logs this run never shows. Cheap to check on
+            # the runner that already has the checkout; expensive to discover
+            # from an arcd pool.
+            "$CI_HOME/bin/gover" "$df" "$ctx"
             echo "$img" | jq -r '(.platforms // ["linux/amd64"])[]' | while read -r plat; do
               arch="${plat##*/}"
               image="${repo}:sha-${SHORT}-${arch}${sfx:+-$sfx}"
