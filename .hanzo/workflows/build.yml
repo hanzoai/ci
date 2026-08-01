@@ -1,17 +1,17 @@
 # Hanzo CI/CD — reusable build + test + deploy, driven by the caller repo's root
 # hanzo.yml. Runs on our self-hosted arc runners; pulls registry + kubeconfig
 # creds from KMS via Universal Auth at run time. Public so any org can import it
-# with `uses: hanzoai/ci/.github/workflows/build.yml@v1` + `secrets: inherit`.
+# with `uses: hanzoai/ci/.hanzo/workflows/build.yml@v1` + `secrets: inherit`.
 #
-# The caller is ~7 lines (triggers + this `uses:`); all real config is hanzo.yml.
-name: Hanzo CI/CD
-
-on:
-  workflow_call:
-    inputs:
-      runner:
-        description: >-
-          Runner labels as a JSON array. Default = Hanzo cloud arc pool (we run
+# TWO PATHS, ONE FILE. git.hanzo.ai resolves only `.hanzo/workflows`, github.com
+# only `.github/workflows`, so this pipeline is published at both paths and a
+# caller pins whichever its forge can see. They are not two files that must be
+# kept in step — they are one artifact spelled twice, and hanzo.yml's
+# `build-yml-is-one-file` gate refuses any difference beyond the path each names
+# for itself. Nine stray lines had already drifted into the `.hanzo` copy — a
+# truncated second `on:` block and a second `name:` key — and no gate could see
+# it, because the only reader of that copy is a forge no push ever reaches.
+#
 # The caller is ~7 lines (triggers + this `uses:`); all real config is hanzo.yml.
 name: Hanzo CI/CD
 
