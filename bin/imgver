@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# imgver — the version an image build publishes. One implementation, every caller.
+#
+#   imgver <image-repo> [context-dir]        # e.g. imgver ghcr.io/hanzoai/iam .
+#
+# We don't ship shas. A build that cannot name a version is a broken build, so
+# this exits non-zero rather than letting a caller fall back to sha-<short>.
+#
+# WHY THIS IS A SCRIPT AND NOT INLINE SHELL: the fleet has two build front doors
+# — hanzoai/ci's build.yml (imported by repos with a hanzo.yml) and the
+# hand-rolled .hanzo/workflows/deploy.yml that 11 repos carry instead. Both need
+# the identical number. Written twice it would be right twice and then wrong
+# once, which is how `sha-<short>` became the only tag those 11 repos ever
+# published.
+#
+# THE NUMBER IS DERIVED, NEVER TYPED, and monotonic against two floors:
+#   declared  — the repo's own manifest (package.json / Cargo.toml / VERSION /
+#               pyproject.toml, or $IMGVER_VERSION to name it outright). The
+#               human's say: bump the minor there and the series jumps there.
+#   published — the highest semver already at the registry for THIS image.
+# max(declared, published) + a patch is what stops one name from ever covering
+# two digests. Deriving from the manifest alone re-publishes the same number on
+# every push until someone edits the file, and a node running
+# imagePullPolicy: IfNotPresent never picks up the second one. universe's
+# images.yml learned that on iam-secret-sync; this is that rule, everywhere.
+#
+# ENV: GH_PAT (or GITHUB_TOKEN) to read the registry floor; IMGVER_PUBLISHED to
+#      supply it directly (a registry this cannot read, and the test seam).
+#      Without either, only the manifest carries the series.
+set -euo pipefail
+
+repo="${1:?usage: imgver <image-repo> [context-dir]}"
+ctx="${2:-.}"
+
+semver='^[0-9]+\.[0-9]+\.[0-9]+$'
+
+# ---- declared ---------------------------------------------------------------
+declared="${IMGVER_VERSION:-}"
+case "$declared" in
+  # The "<file>:<command printing it>" shape hanzo.yml's client lane already uses.
+  *:*) declared=$(bash -c "${declared#*:}" 2>/dev/null || true) ;;
+esac
+if [ -z "$declared" ]; then
+  # The image's own context first, then the repo root: a monorepo's web/ or api/
+  # carries the version of the thing being built, not the workspace stub.
+  for d in "$ctx" .; do
+    [ -d "$d" ] || continue
+    if [ -f "$d/package.json" ]; then
+      declared=$(jq -r '.version // ""' "$d/package.json" 2>/dev/null || true)
+    elif [ -f "$d/Cargo.toml" ]; then
+      declared=$(sed -n '/^\[\(workspace\.\)\?package\]/,/^\[/p' "$d/Cargo.toml" \
+                 | sed -n 's/^version *= *"\([^"]*\)".*/\1/p' | head -1)
+    elif [ -f "$d/VERSION" ]; then
+      declared=$(tr -d ' \n' < "$d/VERSION")
+    elif [ -f "$d/pyproject.toml" ]; then
+      declared=$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' "$d/pyproject.toml" | head -1)
+    fi
+    [ -n "$declared" ] && break
+  done
+fi
+declared="${declared#v}"
+# A workspace stub (0.0.0) or a placeholder is not a version anyone declared.
+[ "$declared" = "0.0.0" ] && declared=""
+echo "$declared" | grep -qE "$semver" || declared=""
+
+# ---- published --------------------------------------------------------------
+# The GitHub Packages API, not the registry v2 tags list: an anonymous ghcr pull
+# token can fetch a manifest by name but returns an EMPTY tag list, so a v2 read
+# would silently report "nothing published" and restart the series at 0.
+published="${IMGVER_PUBLISHED:-}"
+tok="${GH_PAT:-${GITHUB_TOKEN:-}}"
+if [ -z "$published" ] && [ -n "$tok" ] && [ "${repo#ghcr.io/}" != "$repo" ]; then
+  org="${repo#ghcr.io/}"; pkg="${org#*/}"; org="${org%%/*}"
+  published=$(curl -fsSL -H "Authorization: Bearer $tok" \
+        -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/orgs/${org}/packages/container/${pkg}/versions?per_page=100" 2>/dev/null \
+      | jq -r '.[].metadata.container.tags[]?' 2>/dev/null \
+      | sed 's/^v//' | grep -E "$semver" | sort -V | tail -1 || true)
+fi
+
+# ---- the number -------------------------------------------------------------
+max=$(printf '%s\n%s\n' "$declared" "$published" | grep -E "$semver" | sort -V | tail -1 || true)
+if [ -z "$max" ]; then
+  echo "imgver: no version for $repo. Declare one — a package.json/Cargo.toml/VERSION/pyproject.toml under '$ctx', or IMGVER_VERSION. We don't ship shas." >&2
+  exit 1
+elif [ "$max" = "$declared" ] && [ "$declared" != "$published" ]; then
+  ver="$declared"                        # the human bumped it — publish exactly that
+else
+  ver="${max%.*}.$(( ${max##*.} + 1 ))"  # already out there — next patch
+fi
+
+echo "imgver $repo: declared=${declared:-none} published=${published:-none} -> $ver" >&2
+echo "$ver"
