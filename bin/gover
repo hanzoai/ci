@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# gover — refuse a Dockerfile whose Go builder image is older than the module
+# it compiles. One implementation, every caller.
+#
+#   gover <dockerfile> [context-dir]     # e.g. gover Dockerfile .
+#
+# WHAT THIS CATCHES, AND WHY IT IS A GATE AND NOT A CONVENTION
+#
+# The official `golang` images set GOTOOLCHAIN=local. That is deliberate on
+# their part — the image promises the Go it ships and refuses to silently
+# fetch another. The consequence is that a go.mod requiring a NEWER Go than
+# the base image does not degrade, it dies:
+#
+#   go: go.mod requires go >= 1.26.5 (running go 1.26.4; GOTOOLCHAIN=local)
+#
+# hanzoai/visor v1.108.16 is the shipped instance. The failure is invisible
+# until the image build runs, because every local `go build` succeeds: a
+# developer box runs GOTOOLCHAIN=auto and simply downloads what the module
+# asks for. So the mismatch is introduced by editing go.mod — a file that has
+# nothing to do with Docker — and is discovered by a red release build.
+#
+# It is also not one repo's problem. A sweep of every Dockerfile across the
+# orgs found 58 FROM lines in 23 repos already below their own go.mod, and
+# only 7 of 223 Go builder stages set GOTOOLCHAIN=auto. Fixing those 58 fixes
+# today; this gate is what makes the 59th impossible, which is the part worth
+# having.
+#
+# WHAT IT DELIBERATELY DOES NOT DO
+#
+# It does not require the newest Go, and it does not care that an image is
+# behind `latest`. A newer toolchain compiling an older `go` directive is
+# always valid, so pinning ahead of go.mod is fine and stays silent. The only
+# thing refused is an image BELOW the module's floor, because that is the only
+# arrangement that cannot build.
+#
+# A floating tag (`golang:1.26-alpine`, no patch) resolves to the newest patch
+# of that minor when the image is pulled. Against a patch-pinned go.mod that
+# is correct today and fragile tomorrow — a stale registry mirror serves an
+# older patch and the build dies with the message above. That earns a warning,
+# never a failure: it builds, and a gate that fails what builds trains people
+# to skip gates.
+#
+# EXIT: 0 clean (warnings still print), 1 when a stage cannot build.
+set -uo pipefail
+
+df=${1:?usage: gover <dockerfile> [context-dir]}
+ctx=${2:-.}
+[ -f "$df" ] || { echo "gover: no such Dockerfile: $df" >&2; exit 1; }
+
+# --- the module floor -------------------------------------------------------
+# Nearest go.mod walking up from the Dockerfile, then the build context, then
+# the repo root. Multi-module repos are the reason this walks rather than
+# assuming the root: hanzoai/s3 builds s3-rdma-sidecar/ and telemetry/server/
+# from their own go.mod files, each with a different floor.
+govers=""; gosrc=""
+d=$(dirname "$df")
+while :; do
+  if [ -f "$d/go.mod" ]; then gosrc="$d/go.mod"; break; fi
+  [ "$d" = "." ] || [ "$d" = "/" ] || [ -z "$d" ] && break
+  d=$(dirname "$d")
+done
+[ -z "$gosrc" ] && [ -f "$ctx/go.mod" ] && gosrc="$ctx/go.mod"
+[ -z "$gosrc" ] && [ -f "go.mod" ] && gosrc="go.mod"
+# No module in play — nothing to compare against, and a non-Go image is not
+# this gate's business.
+[ -z "$gosrc" ] && exit 0
+govers=$(grep -m1 -E '^go[[:space:]]+[0-9]' "$gosrc" 2>/dev/null | awk '{print $2}')
+[ -z "$govers" ] && exit 0
+
+# --- ARG defaults -----------------------------------------------------------
+# `FROM golang:${GO_VERSION}-bookworm` is only as good as its default, and the
+# default is the value CI builds with unless hanzo.yml passes `args:`. Read
+# them so the parameterised Dockerfiles are checked too, not skipped.
+declare -A args=()
+while IFS= read -r line; do
+  if [[ $line =~ ^[[:space:]]*[Aa][Rr][Gg][[:space:]]+([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+    v="${BASH_REMATCH[2]}"
+    v="${v%%#*}"                       # strip trailing comment
+    v="${v//\"/}"; v="${v//\'/}"       # strip quotes
+    v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+    args[${BASH_REMATCH[1]}]="$v"
+  fi
+done < "$df"
+
+# semver -> comparable integer; missing patch becomes -1 so a floating tag is
+# distinguishable from an explicit .0 rather than silently equal to it.
+num() { # num <major> <minor> <patch|-1>
+  printf '%d' $(( $1 * 1000000 + $2 * 1000 + ($3 < 0 ? 999 : $3) ))
+}
+parse() { # parse <version-ish> -> "major minor patch"; empty when unparseable
+  local v=$1
+  [[ $v =~ ^([0-9]+)\.([0-9]+)\.([0-9]+) ]] && { echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]} ${BASH_REMATCH[3]}"; return; }
+  [[ $v =~ ^([0-9]+)\.([0-9]+) ]] && { echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]} -1"; return; }
+  echo ""
+}
+
+read -r mM mm mp <<<"$(parse "$govers")"
+[ -z "${mM:-}" ] && exit 0   # go.mod says something we cannot read; not our call
+
+rc=0; n=0
+while IFS= read -r line; do
+  # FROM [--flag ...] [registry/]golang:<tag> [AS stage]
+  [[ $line =~ ^[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]]+(--[^[:space:]]+[[:space:]]+)*([^[:space:]]*golang:[^[:space:]]+) ]] || continue
+  ref="${BASH_REMATCH[2]}"
+  tag="${ref##*golang:}"
+  # resolve ${VAR} / $VAR against the ARG defaults
+  while [[ $tag =~ \$\{?([A-Za-z_][A-Za-z0-9_]*)\}? ]]; do
+    name="${BASH_REMATCH[1]}"; sub="${args[$name]:-}"
+    [ -z "$sub" ] && { tag=""; break; }
+    tag="${tag//\$\{$name\}/$sub}"; tag="${tag//\$$name/$sub}"
+  done
+  [ -z "$tag" ] && continue
+  n=$((n+1))
+  read -r iM im ip <<<"$(parse "$tag")"
+  # `golang:alpine`, `golang:1-alpine`, `ARG GO_VERSION=INVALID` — no version to
+  # compare. Say so once; do not guess and do not fail.
+  [ -z "${iM:-}" ] && { echo "gover: $df: '$ref' names no Go version — cannot check it against $gosrc ($govers)"; continue; }
+  if [ "$(num "$iM" "$im" "$ip")" -lt "$(num "$mM" "$mm" "$mp")" ]; then
+    echo "::error file=$df::Go builder image is older than the module it builds: '$ref' provides Go $iM.$im${ip:+.$ip} but $gosrc requires go $govers. The golang images set GOTOOLCHAIN=local, so this build fails with 'go.mod requires go >= $govers'. Fix: pin the base to golang:$govers-<variant>, and add 'ENV GOTOOLCHAIN=auto' to the builder stage so a future go.mod bump downloads the toolchain instead of failing."
+    rc=1
+  elif [ "$ip" -lt 0 ] && [ "$mp" -ge 0 ]; then
+    echo "::warning file=$df::'$ref' floats to the newest patch of $iM.$im, while $gosrc pins go $govers. It builds today and fails the moment a registry mirror serves an older patch. Pin golang:$govers-<variant> to make it hermetic."
+  fi
+done < "$df"
+
+[ "$n" = 0 ] && exit 0
+[ "$rc" = 0 ] && echo "gover: OK — $df ($n Go stage$([ "$n" = 1 ] || echo s)) satisfies $gosrc (go $govers)"
+exit $rc
