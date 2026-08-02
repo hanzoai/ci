@@ -729,7 +729,17 @@ jobs:
         if: inputs.mode != 'delegate' && hashFiles('hanzo.yml') != ''
         id: client
         env:
+          # SPEC_TOKEN first, GH_PAT second, and the step SAYS which it used.
+          # SPEC_TOKEN is the least-privilege choice and stays the preferred one --
+          # but it is provisioned on no org and no repo on this forge, so the lane
+          # has never run. A missing org secret is "", not an error, so the guard
+          # below reported "needs SPEC_TOKEN" on every build with nothing to fix it.
+          # GH_PAT is provisioned on orgs/hanzoai and already reads private hanzoai
+          # repos, so it can serve until a fine-grained token is minted. Naming both
+          # and reporting the choice is the difference between a fallback and a
+          # silent credential swap.
           SPEC_TOKEN: ${{ secrets.SPEC_TOKEN }}
+          GH_PAT: ${{ secrets.GH_PAT }}
           PAYLOAD: ${{ toJson(github.event.client_payload) }}
         run: |
           set -euo pipefail
@@ -764,9 +774,12 @@ jobs:
           WANT=$(printf '%s' "$PAYLOAD" | jq -r '.spec_sha256 // ""')
           VERSION=$(printf '%s' "$PAYLOAD" | jq -r '.version // ""')
 
-          [ -n "${SPEC_TOKEN:-}" ] || { echo "::error::the client: lane needs SPEC_TOKEN (contents:read on ${SPEC_REPO})"; exit 1; }
+          spec_tok="${SPEC_TOKEN:-}"; spec_src=SPEC_TOKEN
+          if [ -z "$spec_tok" ]; then spec_tok="${GH_PAT:-}"; spec_src=GH_PAT; fi
+          [ -n "$spec_tok" ] || { echo "::error::the client: lane needs SPEC_TOKEN (contents:read on ${SPEC_REPO}) or GH_PAT; neither is set"; exit 1; }
+          echo "spec credential: ${spec_src}"
 
-          curl -fsSL -H "Authorization: Bearer ${SPEC_TOKEN}" \
+          curl -fsSL -H "Authorization: Bearer ${spec_tok}" \
             -H 'Accept: application/vnd.github.raw' \
             "https://api.github.com/repos/${SPEC_REPO}/contents/${SPEC_PATH}?ref=${REF}" -o "$RUNNER_TEMP/spec"
           GOT=$(sha256sum "$RUNNER_TEMP/spec" | cut -d' ' -f1)
