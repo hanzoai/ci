@@ -91,7 +91,13 @@ jobs:
         # either.
         run: |
           set -euo pipefail
-          ref="${GITHUB_WORKFLOW_REF##*@}"; ref="${ref#refs/heads/}"; ref="${ref:-v1}"
+          # Strip refs/tags/ as well as refs/heads/. A caller pinned to a TAG
+          # (`@v1`, which is how all five callers pin) makes GITHUB_WORKFLOW_REF
+          # end in `@refs/tags/v1`, and `git clone --branch refs/tags/v1` is not a
+          # valid branch name -- both clones failed and the step exited 1 with
+          # "could not fetch hanzoai/ci@refs/tags/v1". Only refs/heads/ was
+          # stripped, so this worked for a branch caller and never for a tag one.
+          ref="${GITHUB_WORKFLOW_REF##*@}"; ref="${ref#refs/heads/}"; ref="${ref#refs/tags/}"; ref="${ref:-v1}"
           for url in https://github.com/hanzoai/ci https://git.hanzo.ai/hanzo/ci; do
             git clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/ci" 2>/dev/null && break
           done
