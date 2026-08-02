@@ -804,6 +804,12 @@ jobs:
               "$REF" "$GOT" "$SPEC_REPO" "$SPEC_PATH" > .spec-lock
           fi
 
+          # SPEC_TOKEN carries the RESOLVED credential, not the raw secret. The
+          # generator does its own fetch when the spec repo is not already checked
+          # out ("no hanzoai/openapi checkout and no SPEC_TOKEN to clone one"), and
+          # it reads this name — so resolving the fallback only in the guard above
+          # left the script with nothing and moved the failure one line down.
+          export SPEC_TOKEN="$spec_tok"
           export SPEC="$RUNNER_TEMP/spec" SPEC_REF="$REF" SPEC_SHA256="$GOT" SPEC_VERSION="$VERSION"
           gen=$(yq -r '.client.generate // ""' hanzo.yml)
           if [ "$MODE" = check ]; then
