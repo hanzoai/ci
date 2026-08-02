@@ -171,10 +171,13 @@ Builds are `CGO_ENABLED=0 -trimpath`: the host that installs this runs it on
 whatever base image the host is, and the digest must be a function of the
 source, not of the checkout path.
 
-## Runners — our cloud or your own
+## Runners — our fleet or your own
 
-By default the build runs on the **Hanzo cloud** arc pool (we run it; metered as
-build minutes). To run on **your own** self-hosted arc runners, pass their labels:
+By default the build runs on the **Hanzo `git-runner` fleet** on git.hanzo.ai
+(we run it; metered as build minutes) — the only pool that serves the default
+`hanzo-build-linux-amd64` label. There is no arc pool: arc (arcd) was retired
+2026-08-01 and never served any label in this default. To run on **your own**
+self-hosted runners, pass their labels:
 
 ```yaml
     uses: hanzoai/ci/.github/workflows/build.yml@v1
@@ -185,7 +188,7 @@ build minutes). To run on **your own** self-hosted arc runners, pass their label
 
 ## Delegate to platform (skip runner buildx)
 
-By default the build runs buildx **on** the arc runner. To instead hand the build
+By default the build runs buildx **on** the runner. To instead hand the build
 to **platform.hanzo.ai** — which builds in-cluster with BuildKit and rolls the
 service itself — pass `mode: delegate`:
 
@@ -197,7 +200,7 @@ service itself — pass `mode: delegate`:
 ```
 
 The GitHub job then just POSTs each image in `hanzo.yml` to platform's direct
-build webhook (`/v1/arcd/enqueue`) and exits in **seconds** — no runner buildx,
+build webhook (`/v1/runner`) and exits in **seconds** — no runner buildx,
 no KMS, no runner-side deploy. Platform creates the build job, launches an
 in-cluster BuildKit Job on its own pool, pushes to the registry, and patches the
 operator `Service` CR to roll it. It's the same build path as the platform
@@ -205,10 +208,10 @@ GitHub-App webhook — one build path, two front doors.
 
 Requires one extra secret, `PLATFORM_BUILD_CALLBACK_TOKEN` (org- or repo-level,
 picked up via `secrets: inherit`). Override the endpoint with the
-`PLATFORM_ENQUEUE_URL` repo/org variable (default `https://platform.hanzo.ai/v1/arcd/enqueue`).
+`PLATFORM_ENQUEUE_URL` repo/org variable (default `https://platform.hanzo.ai/v1/runner`).
 
 `mode: buildx` (the default) is unchanged — existing repos keep running buildx on
-arc, so delegation is strictly opt-in.
+the fleet runner, so delegation is strictly opt-in.
 
 ## Credentials
 
@@ -220,6 +223,6 @@ run time. No long-lived registry or cluster credentials live in GitHub.
 ## Platform-native
 
 `hanzo.yml` is also read by platform.hanzo.ai: a repo on the platform webhook
-needs **only** `hanzo.yml` — the platform builds it on arc and rolls it out, no
+needs **only** `hanzo.yml` — the platform builds it in-cluster and rolls it out, no
 workflow file at all. This reusable is the GitHub-Actions path for repos that
 trigger through GitHub instead of the platform.

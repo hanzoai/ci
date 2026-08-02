@@ -1,5 +1,5 @@
 # Hanzo CI/CD — reusable build + test + deploy, driven by the caller repo's root
-# hanzo.yml. Runs on our self-hosted arc runners; pulls registry + kubeconfig
+# hanzo.yml. Runs on the git.hanzo.ai `git-runner` fleet; pulls registry + kubeconfig
 # creds from KMS via Universal Auth at run time. Public so any org can import it
 # with `uses: hanzoai/ci/.github/workflows/build.yml@v1` + `secrets: inherit`.
 #
@@ -20,16 +20,18 @@ on:
     inputs:
       runner:
         description: >-
-          Runner labels as a JSON array. Default = Hanzo cloud arc pool (we run
+          Runner labels as a JSON array. Default = the Hanzo `git-runner` fleet
+          on git.hanzo.ai, which is the ONLY pool serving these labels (we run
           the build, metered as build minutes). Bring-your-own: pass the labels
-          of your own self-hosted arc runners instead.
+          of your own self-hosted runners instead. There is no arc pool: arc
+          (arcd) was retired 2026-08-01 and no label here was ever served by it.
         type: string
         default: '["hanzo-build-linux-amd64"]'
       mode:
         description: >-
           Build execution mode. `buildx` (default) runs the full buildx →
-          test → deploy pipeline ON the arc runner. `delegate` instead POSTs the
-          build to platform.hanzo.ai (`/v1/arcd/enqueue`) — platform builds
+          test → deploy pipeline ON the runner. `delegate` instead POSTs the
+          build to platform.hanzo.ai (`/v1/runner`) — platform builds
           in-cluster with BuildKit and rolls the operator Service CR itself, so
           the GitHub job finishes in seconds with no runner buildx. A repo opts
           in by passing `with: { mode: delegate }`; everything else is unchanged.
@@ -120,14 +122,14 @@ jobs:
 
       - name: Provision parse toolchain (jq + PyYAML)
         # This reusable parses the caller's hanzo.yml with python3 + PyYAML and
-        # slices JSON with jq. The stock arc runner image
-        # (ghcr.io/actions/actions-runner:latest) is minimal and ships NEITHER,
+        # slices JSON with jq. A minimal runner image
+        # may ship NEITHER (the fleet default, catthehacker/ubuntu:act-24.04, does),
         # so provision them here. Guarded (a no-op the moment a runner image bakes
         # them in) — this keeps the reusable self-contained: any org can import it
         # onto a bare runner and it just works.
         run: |
           set -e
-          # Sudo-free FIRST (bare arc nodes often lack passwordless sudo / apt
+          # Sudo-free FIRST (bare runner nodes often lack passwordless sudo / apt
           # network — `sudo apt-get` then dies with no captured logs). Install jq
           # as a static binary and PyYAML via pip --user into ~/.local/bin; fall
           # back to apt only if those are unavailable. Works on bare AND baked nodes.
@@ -141,7 +143,7 @@ jobs:
           fi
           # yq (mikefarah) — static Go binary, curl-installed like jq. Replaces the
           # PyYAML/python3 YAML parse that could not be provisioned on locked-down
-          # arc nodes (sudo blocked by no_new_privs, pip/PyPI unavailable).
+          # locked-down nodes (sudo blocked by no_new_privs, pip/PyPI unavailable).
           if ! command -v yq >/dev/null 2>&1; then
             curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64 \
               -o "$HOME/.local/bin/yq" && chmod +x "$HOME/.local/bin/yq"
@@ -152,7 +154,7 @@ jobs:
       - name: Delegate build to platform (mode=delegate)
         # The GHA-escape fast path: instead of running buildx on this runner, POST
         # each image in hanzo.yml to platform.hanzo.ai's direct-enqueue webhook
-        # (`/v1/arcd/enqueue`). Platform creates a build_job row, launches an
+        # (`/v1/runner`). Platform creates a build_job row, launches an
         # in-cluster BuildKit Job on its own pool, pushes to the registry, and —
         # for a system service — patches the operator Service CR to roll it. The
         # downstream is IDENTICAL to the platform GitHub-App webhook path (one
@@ -161,7 +163,7 @@ jobs:
         # KMS, no runner-side deploy.
         if: inputs.mode == 'delegate'
         env:
-          ENQUEUE_URL: ${{ vars.PLATFORM_ENQUEUE_URL || 'https://platform.hanzo.ai/v1/arcd/enqueue' }}
+          ENQUEUE_URL: ${{ vars.PLATFORM_ENQUEUE_URL || 'https://platform.hanzo.ai/v1/runner' }}
           ENQUEUE_TOKEN: ${{ secrets.PLATFORM_BUILD_CALLBACK_TOKEN }}
         run: |
           set -euo pipefail
@@ -185,7 +187,7 @@ jobs:
             # can compile the module, and a mismatch enqueued to platform fails
             # on a machine whose logs this run never shows. Cheap to check on
             # the runner that already has the checkout; expensive to discover
-            # from an arcd pool.
+            # from the in-cluster builder.
             "$CI_HOME/bin/gover" "$df" "$ctx"
             echo "$img" | jq -r '(.platforms // ["linux/amd64"])[]' | while read -r plat; do
               arch="${plat##*/}"
@@ -218,7 +220,7 @@ jobs:
         # limit. No-op when GH_PAT is absent.
         #
         # Robustness (learned the hard way in hanzoai/iam): a plain
-        # `git config --global` is defeated on shared self-hosted arc runners by
+        # `git config --global` is defeated on shared self-hosted runners by
         # (a) a stale insteadOf/credential left in ~/.gitconfig by a prior run and
         # (b) actions/checkout's persisted http.<github>.extraheader (the repo-
         # scoped GITHUB_TOKEN) in the checked-out repo's local config. So use a
@@ -410,7 +412,7 @@ jobs:
             exit 0
           fi
           [ -z "${KUBECONFIG:-}" ] && { echo "::warning::no registry credential and no kubeconfig — image will NOT reach oci.hanzo.ai (ghcr only)"; exit 0; }
-          # Bare arc runners ship no kubectl — same static provision the deploy
+          # Bare runners ship no kubectl — same static provision the deploy
           # step uses.
           command -v kubectl >/dev/null 2>&1 || {
             KVER=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
@@ -610,7 +612,7 @@ jobs:
       - name: Provision Go toolchain (go test gates on bare runners)
         # hanzo.yml `test:` gates (e.g. `go vet ./...`, `go test ...`) run
         # DIRECTLY on the runner, NOT inside a build container — but the stock
-        # arc runner image (ghcr.io/actions/actions-runner) ships no Go, so a Go
+        # runner image may ship no Go, so a Go
         # gate dies with `go: command not found` (exit 127). Provision the repo's
         # OWN Go version from go.mod so the toolchain matches the module exactly.
         # Guarded to Go repos (go.mod present) so pure-JS/TS callers are
@@ -623,10 +625,10 @@ jobs:
 
       - name: Provision C toolchain (cgo test gates)
         # CGO_ENABLED=1 gates (e.g. go-sqlite3, which bundles the sqlite
-        # amalgamation) need a C compiler; the minimal arc runner ships none
+        # amalgamation) need a C compiler; a minimal runner ships none
         # (`cgo: gcc not found`). Same guarded provision the parse-toolchain step
         # above uses — a no-op when gcc is already present. If apt-get update
-        # fails (arc snapshot mirror rot: "no longer has a Release file"),
+        # fails (snapshot mirror rot: "no longer has a Release file"),
         # repoint archive.ubuntu.com at the DO mirror — both sources.list and
         # noble's deb822 ubuntu.sources — and retry once.
         if: inputs.mode != 'delegate' && hashFiles('go.mod') != ''
@@ -641,7 +643,7 @@ jobs:
 
       - name: Provision Node toolchain (JS test gates)
         # JS/TS `test:` gates (e.g. `pnpm install --frozen-lockfile && pnpm lint`)
-        # also run DIRECTLY on the runner, and the stock arc runner image ships
+        # also run DIRECTLY on the runner, and a minimal runner image ships
         # no Node — so the gate dies at `corepack: command not found` (exit 127)
         # before it ever reads package.json. Same guarded provision as the Go
         # step above: only for JS callers (package.json present), harmless if a
@@ -659,7 +661,7 @@ jobs:
         # Same hole the Go and Node steps close, for the third language this fleet
         # actually ships: hanzoai/cli is Rust, and its gate — `genspec --check`,
         # the one that keeps the CLI's captured command surface from silently
-        # drifting from what cloud serves — is a `cargo run`. On a stock arc
+        # drifting from what cloud serves — is a `cargo run`. On a bare
         # runner that is exit 127, so the gate a repo declares would never run:
         # the exact failure this workflow refuses everywhere else.
         # Guarded to Rust callers (Cargo.toml present); a no-op once a runner
@@ -1016,7 +1018,7 @@ jobs:
           TAG="${{ github.ref_name }}"; REPO="${{ github.repository }}"
           IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo 1 || echo 0)
           # The runner tells us which forge it is talking to — github.com on the
-          # arc pool, a GHES/forge front door elsewhere. Reading it instead of
+          # GitHub side, a GHES/forge front door elsewhere. Reading it instead of
           # hardcoding the hostname is what keeps ONE lane serving both.
           SERVER="${GITHUB_SERVER_URL:-https://github.com}"
           API="${GITHUB_API_URL:-https://api.github.com}"
@@ -1181,7 +1183,7 @@ jobs:
           if [ "$IS_TAG" != 1 ] && ! echo "$ON" | jq -e --arg b "$REF" 'index($b)' >/dev/null; then
             echo "branch $REF not in deploy.on — skipping deploy"; exit 0
           fi
-          # Bare arc runners ship no kubectl — provision the static binary
+          # Bare runners ship no kubectl — provision the static binary
           # (same sudo-free pattern as jq/yq above).
           command -v kubectl >/dev/null 2>&1 || {
             mkdir -p "$HOME/.local/bin"; export PATH="$HOME/.local/bin:$PATH"
