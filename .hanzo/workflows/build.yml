@@ -646,15 +646,22 @@ jobs:
         # also run DIRECTLY on the runner, and a minimal runner image ships
         # no Node — so the gate dies at `corepack: command not found` (exit 127)
         # before it ever reads package.json. Same guarded provision as the Go
-        # step above: only for JS callers (package.json present), harmless if a
-        # future runner image bakes Node in. `corepack enable` shims the repo's
-        # own packageManager (pnpm/yarn) at its pinned version.
-        if: inputs.mode != 'delegate' && hashFiles('package.json') != ''
+        # step above: only for JS callers, harmless if a future runner image
+        # bakes Node in. `corepack enable` shims the repo's own packageManager
+        # (pnpm/yarn) at its pinned version.
+        #
+        # The glob is NESTED, not root-only. A Go repo whose JS lives in a
+        # subtree is still a JS caller: hanzoai/commerce keeps its front ends in
+        # app/ and declares `cd app && pnpm install ...` as a test gate, so a
+        # root-only hashFiles SKIPPED this step and the gate died at
+        #     bash: line 3: pnpm: command not found   (exit 127)
+        # after 49 ginkgo suites had already passed.
+        if: inputs.mode != 'delegate' && hashFiles('package.json', '**/package.json') != ''
         uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Enable corepack (pnpm/yarn shims for JS test gates)
-        if: inputs.mode != 'delegate' && hashFiles('package.json') != ''
+        if: inputs.mode != 'delegate' && hashFiles('package.json', '**/package.json') != ''
         run: corepack enable
 
       - name: Provision Rust toolchain (cargo test gates)
