@@ -96,7 +96,15 @@ jobs:
         run: |
           set -euo pipefail
           echo "GITHUB_WORKFLOW_REF=${GITHUB_WORKFLOW_REF:-<unset>}"
-          ref="${GITHUB_WORKFLOW_REF##*@}"; ref="${ref#refs/heads/}"; ref="${ref#refs/tags/}"; ref="${ref:-v1}"
+          # `:-` on the FIRST expansion. GITHUB_WORKFLOW_REF is unset on this forge
+          # (proven: the step printed `GITHUB_WORKFLOW_REF=<unset>`), and under
+          # `set -u` a bare ${GITHUB_WORKFLOW_REF##*@} is an unbound-variable error
+          # that killed the step on this line -- before any clone was attempted, so
+          # the "could not fetch" message never even ran and every host looked
+          # blameless. The default was already there on the last expansion; it was
+          # unreachable.
+          raw="${GITHUB_WORKFLOW_REF:-}"
+          ref="${raw##*@}"; ref="${ref#refs/heads/}"; ref="${ref#refs/tags/}"; ref="${ref:-v1}"
           echo "derived ref=${ref}"
           for url in https://github.com/hanzoai/ci https://git.hanzo.ai/hanzo/ci https://git.hanzo.ai/hanzoai/ci; do
             echo "::group::clone ${url}@${ref}"
