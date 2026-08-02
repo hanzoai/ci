@@ -89,20 +89,25 @@ jobs:
         # Both forges are tried because this same file is served from
         # github.com/hanzoai/ci and git.hanzo.ai/hanzo/ci, and a caller may run on
         # either.
+        #
+        # Every clone attempt REPORTS. This step used to send both to /dev/null and
+        # print only "could not fetch", which named neither the ref it derived nor
+        # which host refused — so the failure could only be guessed at from source.
         run: |
           set -euo pipefail
-          # Strip refs/tags/ as well as refs/heads/. A caller pinned to a TAG
-          # (`@v1`, which is how all five callers pin) makes GITHUB_WORKFLOW_REF
-          # end in `@refs/tags/v1`, and `git clone --branch refs/tags/v1` is not a
-          # valid branch name -- both clones failed and the step exited 1 with
-          # "could not fetch hanzoai/ci@refs/tags/v1". Only refs/heads/ was
-          # stripped, so this worked for a branch caller and never for a tag one.
+          echo "GITHUB_WORKFLOW_REF=${GITHUB_WORKFLOW_REF:-<unset>}"
           ref="${GITHUB_WORKFLOW_REF##*@}"; ref="${ref#refs/heads/}"; ref="${ref#refs/tags/}"; ref="${ref:-v1}"
-          for url in https://github.com/hanzoai/ci https://git.hanzo.ai/hanzo/ci; do
-            git clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/ci" 2>/dev/null && break
+          echo "derived ref=${ref}"
+          for url in https://github.com/hanzoai/ci https://git.hanzo.ai/hanzo/ci https://git.hanzo.ai/hanzoai/ci; do
+            echo "::group::clone ${url}@${ref}"
+            if git clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/ci"; then
+              echo "cloned ${url}@${ref}"; echo "::endgroup::"; break
+            fi
+            echo "failed ${url}@${ref}"; echo "::endgroup::"
+            rm -rf "$RUNNER_TEMP/ci"
           done
           [ -x "$RUNNER_TEMP/ci/bin/imgver" ] \
-            || { echo "::error::could not fetch hanzoai/ci@$ref (bin/imgver)"; exit 1; }
+            || { echo "::error::could not fetch hanzoai/ci@${ref} (bin/imgver) from any host"; exit 1; }
           echo "CI_HOME=$RUNNER_TEMP/ci" >> "$GITHUB_ENV"
 
       - name: Provision parse toolchain (jq + PyYAML)
