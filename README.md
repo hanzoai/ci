@@ -40,6 +40,37 @@ jobs:
 
 That's it. The build/test/deploy logic lives here, once.
 
+### Which directory the caller goes in
+
+Put it where the forge **your repo lives on** looks, and nowhere else:
+
+| repo is on | caller path | `uses:` path |
+|---|---|---|
+| git.hanzo.ai (the fleet default — the `hanzo-build-linux-amd64` runners are there) | `.hanzo/workflows/cicd.yml` | `hanzoai/ci/.hanzo/workflows/build.yml@v1` |
+| github.com only | `.github/workflows/cicd.yml` | `hanzoai/ci/.github/workflows/build.yml@v1` |
+
+The two forges read two directories and neither reads the other's. github.com
+reads `.github/workflows`, full stop. git.hanzo.ai reads the **first** of its
+`WORKFLOW_DIRS` that exists and stops there, so `.hanzo/workflows` *masks*
+`.github/workflows` rather than merging with it. Two consequences worth stating
+outright:
+
+- A caller in `.hanzo/workflows` on a repo that is **not** on git.hanzo.ai is
+  collected by nobody. Nothing fails — the repo goes quiet. hanzoai/openapi did
+  this on 2026-07-30 and ran nothing for five days while its published API
+  document went 81 commits stale.
+- On a mirrored repo, anything left in `.github/workflows` is invisible to the
+  forge. Move it, don't duplicate it.
+
+`bin/lane` is the gate. Every build runs `lane check` against a **public** forge
+endpoint — no credential, so it cannot quietly pass on the empty string an org
+secret becomes inside a private repo on the Free plan. To find repos already in
+that state, run it across an org (this half needs `gh`, to see private repos):
+
+```
+bin/lane sweep hanzoai luxfi zooai
+```
+
 ## `client:` — one document, eight generated clients
 
 A generated SDK is a **projection** of one API document at one version. This lane

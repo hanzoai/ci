@@ -59,6 +59,18 @@ test:
         exit 1
       fi
       echo "OK: .github and .hanzo copies are one file ($(wc -l < .github/workflows/build.yml) lines)"
+  - name: lane
+    # bin/lane is the gate the build lane runs against every caller before it
+    # builds: it refuses a repo whose workflows sit in a directory no host it
+    # lives on collects. That failure is not hypothetical either — hanzoai/openapi
+    # moved both callers into .hanzo/workflows while git.hanzo.ai/hanzoai/openapi
+    # was a 404, and ran nothing at all for five days; a sweep found 26 repos in
+    # that state. The gate is worth having only if it is exact in BOTH directions,
+    # so the suite pins the refusals AND the allowances — .github-only is fine on
+    # either forge, .hanzo-only is fine when the forge has the repo with actions
+    # on, and an unnameable checkout says so instead of guessing a slug. Offline
+    # and deterministic: the forge is a file:// tree, no network.
+    run: bash bin/lane_test.sh
   - name: imgver
     # bin/imgver decides the version EVERY image in the fleet publishes — this
     # workflow's build lane calls it, and so does the imgver composite action the
