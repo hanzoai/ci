@@ -354,11 +354,16 @@ jobs:
           if [ -n "$GIT_TOKEN" ]; then echo "::add-mask::$GIT_TOKEN"; echo "GIT_TOKEN=$GIT_TOKEN" >> "$GITHUB_ENV"; fi
           KUBECONFIG_B64=$(get KUBECONFIG)
           if [ -n "$KUBECONFIG_B64" ]; then echo "$KUBECONFIG_B64" | base64 -d > "$RUNNER_TEMP/kubeconfig"; echo "kubeconfig=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_OUTPUT"; fi
-          # Object-store credential for a repo that publishes `binaries:` to a
-          # bucket:. Same four names the services read at run time, from the same
-          # org/path/env — a CI-only copy of a credential is a second thing to
-          # rotate and the one nobody remembers.
-          if [ -n "$(yq -r '.bucket // ""' hanzo.yml 2>/dev/null || true)" ]; then
+          # Object-store credential, for the two lanes that write bytes to
+          # hanzoai/s3: a repo publishing `binaries:` to a bucket:, and a repo
+          # publishing a `site:` (whose build output has to land in the org's own
+          # storage space before /v1/sites can promote it). Same four names the
+          # services read at run time, from the same org/path/env — a CI-only copy
+          # of a credential is a second thing to rotate and the one nobody
+          # remembers. One fetch serves both lanes; a repo declaring both does not
+          # ask KMS twice.
+          SITE_DECL="$(yq -r '.site | type' hanzo.yml 2>/dev/null || echo '!!null')"
+          if [ -n "$(yq -r '.bucket // ""' hanzo.yml 2>/dev/null || true)" ] || [ "$SITE_DECL" = '!!map' ]; then
             for k in S3_ADMIN_ACCESS_KEY S3_ADMIN_SECRET_KEY; do
               v=$(get "$k")
               if [ -n "$v" ]; then echo "::add-mask::$v"; echo "$k=$v" >> "$GITHUB_ENV"; fi
@@ -369,6 +374,39 @@ jobs:
               v=$(get "$k")
               if [ -n "$v" ]; then echo "$k=$v" >> "$GITHUB_ENV"; fi
             done
+          fi
+          # `site:` needs two things beyond the S3 credential above, and BOTH come
+          # from this step — there is one KMS login in this workflow and the site
+          # lane does not add a second.
+          #
+          #   CLOUD_PROJECTS_BUCKET — the bucket /v1/sites lists the build output
+          #     in. The SERVER owns it (it is never in a publish request, which is
+          #     what makes the org prefix unforgeable), so CI cannot be told it by
+          #     hanzo.yml; it reads the same KMS name the cloud binary reads, and
+          #     falls back to the same default. One name, one place.
+          #   HANZO_API_TOKEN — the bearer for /v1/sites. It is the token THIS STEP
+          #     ALREADY MINTED: cloud's /v1/kms/auth/login is a broker that
+          #     exchanges clientId/clientSecret at IAM's client_credentials
+          #     endpoint and "returns IAM's own JWT verbatim" (cloud
+          #     apps/kms/login.go), scoped by its `owner` claim to exactly this
+          #     org. api.hanzo.ai validates that same issuer and mints X-Org-Id
+          #     from it. So the credential that reads this org's secrets and the
+          #     credential that publishes this org's site are ONE machine identity,
+          #     with one lifetime and one thing to rotate. It is masked here,
+          #     before GITHUB_ENV is the first place it could surface.
+          #
+          # HANZO_ORG is exported with them because the S3 upload has to name the
+          # org segment the server will prepend to `source`. That it AGREES with
+          # the publish identity is not an assumption: every `get` above read
+          # /v1/kms/orgs/$ORG/..., and cloud re-checks the token's `owner` against
+          # that :org on each read — so an ORG that disagreed would have fetched no
+          # credential at all, and this lane fails closed below rather than
+          # uploading into a prefix nobody will look in.
+          if [ "$SITE_DECL" = '!!map' ]; then
+            v=$(get CLOUD_PROJECTS_BUCKET)
+            if [ -n "$v" ]; then echo "CLOUD_PROJECTS_BUCKET=$v" >> "$GITHUB_ENV"; fi
+            echo "::add-mask::$TOKEN"
+            { echo "HANZO_API_TOKEN=$TOKEN"; echo "HANZO_ORG=$ORG"; } >> "$GITHUB_ENV"
           fi
           # Build-time secrets → --build-arg. A repo declares per-image
           # `build_secrets: [NAME, ...]` in hanzo.yml; each NAME is fetched from
@@ -594,10 +632,30 @@ jobs:
               [ -z "$v" ] && { echo "::error::build_secret $bs is unset at build time — refusing to bake an empty value"; exit 1; }
               BUILD_ARGS="$BUILD_ARGS --build-arg $bs=$v"
             done
+            # PROVENANCE: which commit are these bytes. Passed BOTH ways on
+            # purpose. The --label sets it from outside for any Dockerfile; the
+            # --build-arg feeds `ARG REVISION` for the Dockerfiles that stamp the
+            # label themselves (hanzoai/cloud declares `ARG REVISION=unknown`,
+            # and `unknown` is exactly what every image built without this said).
+            #
+            # An unlabelled image cannot be traced to source, and that stops being
+            # cosmetic the moment two builders race for one tag: with one image
+            # labelled and the other reading `unknown`, "which of these is the
+            # release" had no answer short of diffing layers — while the wrong one
+            # was already pinned. A version is a receipt only if the image can
+            # name its own commit, so every image this fleet publishes now can.
+            #
+            # A Dockerfile with no `ARG REVISION` ignores the build-arg (buildkit
+            # warns, never fails), so this is a no-op for every repo that has not
+            # asked for it.
+            PROV="--build-arg REVISION=$GITHUB_SHA"
+            PROV="$PROV --label org.opencontainers.image.revision=$GITHUB_SHA"
+            PROV="$PROV --label org.opencontainers.image.version=${ver:-$REL}"
+            PROV="$PROV --label org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY"
             # GIT_TOKEN (from KMS, via GITHUB_ENV) is passed as the `gh_token`
             # BuildKit secret so Dockerfiles can clone private Go modules; omitted
             # cleanly when absent (public-only builds unaffected).
-            docker buildx build --platform "$plats" $BUILD_ARGS ${GIT_TOKEN:+--secret id=gh_token,env=GIT_TOKEN} --push $TAGS -f "$df" "$ctx"
+            docker buildx build --platform "$plats" $BUILD_ARGS $PROV ${GIT_TOKEN:+--secret id=gh_token,env=GIT_TOKEN} --push $TAGS -f "$df" "$ctx"
             # The semver is the tag the fleet PINS, so prove it exists before the
             # run goes green — buildx can exit 0 while the manifest is not yet
             # resolvable, and a pin onto a phantom tag is an ImagePullBackOff.
@@ -1376,3 +1434,165 @@ jobs:
             # per-repo with deploy.rollout-timeout.
             kc -n "$NS" rollout status "deployment/$svc" --timeout="$RTO"
           done
+
+      - name: Publish site (per hanzo.yml)
+        # The site lane. `images:` ships an OCI image a CLUSTER runs; `binaries:`
+        # ships an executable a HOST installs; neither describes a static export
+        # that an EDGE serves, which is why this is a third verb and not a flag on
+        # one of those two.
+        #
+        # The plane it publishes onto is hanzoai/cloud's Projects/sites API
+        # (`/v1/sites`), whose model is VALUES PLUS A POINTER: a build output is
+        # promoted into an immutable Release whose id is a digest of its object
+        # manifest, and the site's pointer is flipped to it. `publish` is
+        # promote+activate in one call — the 99% path — and rollback is the same
+        # pointer aimed at an older release. Every first-party Hanzo site is moving
+        # onto this, so the publish step belongs here ONCE rather than as a
+        # hand-rolled sync in each site repo.
+        #
+        # HOW THE BYTES GET THERE. Not through the API. cloud's own artifact path
+        # says so in as many words — a tar(.gz) through `/v1/projects/:slug/deploy`
+        # is the small builder-one-click case, and "large sites use the git/CI path
+        # that syncs to S3 directly and never streams bytes through this handler"
+        # (apps/projects/blob.go). A first-party site is ~125 MiB across ~8,400
+        # files; streaming that through a gateway body limit is not a path. So CI
+        # syncs the export into the org's OWN storage space and then asks the
+        # server to promote it, which is also why no object body ever crosses the
+        # API and no browser ever holds an S3 credential.
+        #
+        # The sync client is `mc`, provisioned the way this file provisions every
+        # other tool it needs on a bare runner (jq, yq, kubectl, crane): ONE curl
+        # of ONE pinned static binary into ~/.local/bin, no sudo, no archive, no
+        # package manager. It is also the CLI of the SAME client family the server
+        # uses — hanzoai/s3-go is built on the MinIO Go client — so CI and cloud
+        # talk to hanzoai/s3 through one lineage instead of two. `mirror
+        # --overwrite --remove` makes the staging prefix EXACTLY the export: a file
+        # deleted from the build cannot linger into a release, and unchanged
+        # objects are not re-sent.
+        #
+        # IDEMPOTENCY IS BY CONSTRUCTION, not by a remembered request key. The
+        # release id is a SHA-256 over the sorted manifest of (key, size, etag), so
+        # the same bytes produce the same id; cloud finds that release row already
+        # present and short-circuits — no copy, no new release, no second billable
+        # deploy. Re-running this job on an unchanged export is therefore a no-op
+        # that still ends green and still prints the release it left live. Nothing
+        # in this step needs to remember that it ran.
+        #
+        # The staging prefix is ONE per site (`<org>/.ci/<slug>`), a sibling of the
+        # live site prefix and of the server's own `<org>/.releases` space — a
+        # project slug can never be ".ci" because slugs forbid '.', and neither a
+        # deploy purge nor a project delete reaches it. Bounded, not per-commit:
+        # the org's storage holds the last export, not every export ever made. Two
+        # publishes racing on one site is the one thing that costs: cloud copies
+        # each object conditional on the exact ETag it digested, so a source that
+        # moves mid-publish is a 409 and the release is abandoned rather than
+        # half-made. That fails this step loudly; the next push converges.
+        if: inputs.mode != 'delegate' && github.event_name != 'pull_request'
+        env:
+          API: ${{ vars.API_ENDPOINT || 'https://api.hanzo.ai' }}
+        run: |
+          set -euo pipefail
+          REF="${{ github.ref_name }}"
+          # Same guard shape the deploy step uses for a missing `deploy:`: a caller
+          # with no `site:` ships no static export, and reading .site.slug off null
+          # would abort the step instead of skipping it.
+          if [ "$(yq -r '.site | type' hanzo.yml 2>/dev/null || echo '!!null')" != '!!map' ]; then
+            echo "::notice::no site: in hanzo.yml — nothing to publish"; exit 0
+          fi
+          # Same branch gate as deploy.on, including the tag case: a tagged release
+          # publishes, a branch publishes only if it is named.
+          ON=$(yq -o=json -I=0 '.site.on // []' hanzo.yml)
+          IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo 1 || echo 0)
+          if [ "$IS_TAG" != 1 ] && ! echo "$ON" | jq -e --arg b "$REF" 'index($b)' >/dev/null; then
+            echo "branch $REF not in site.on — skipping publish"; exit 0
+          fi
+          SLUG=$(yq -r '.site.slug // ""' hanzo.yml)
+          DIR=$(yq -r '.site.dir // ""' hanzo.yml)
+          BUILD=$(yq -r '.site.build // ""' hanzo.yml)
+          if [ -z "$SLUG" ] || [ -z "$DIR" ]; then
+            echo "::error::site: needs both slug: (the /v1/sites project) and dir: (the built export)"; exit 1
+          fi
+          # The slug is a URL path segment AND an S3 key segment here, so it is held
+          # to the SAME grammar cloud validates project slugs with. Checked before
+          # anything is uploaded: a bad slug is a typo to fix, not a 404 to read.
+          echo "$SLUG" | grep -qE '^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$' \
+            || { echo "::error::site.slug '$SLUG' is not a project slug (^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?\$)"; exit 1; }
+          if [ -n "$BUILD" ]; then
+            echo "::group::build $SLUG ($BUILD)"
+            sh -c "$BUILD"
+            echo "::endgroup::"
+          fi
+          # A site is a thing with an index — the one contract cloud enforces
+          # however content arrives. Checked HERE, before the mirror, because
+          # `--remove` on a failed build would otherwise empty the staging prefix
+          # and turn a broken build into a broken publish.
+          [ -f "$DIR/index.html" ] \
+            || { echo "::error::site.dir '$DIR' has no index.html at its root — /v1/sites refuses a source without one"; exit 1; }
+          # Fail closed. Publishing with no credential is not a warning: it would
+          # leave the site on its previous release with a green run claiming
+          # otherwise. (All three come from the KMS step above — never from git.)
+          if [ -z "${S3_ADMIN_ACCESS_KEY:-}" ] || [ -z "${S3_ADMIN_SECRET_KEY:-}" ] \
+             || [ -z "${HANZO_API_TOKEN:-}" ] || [ -z "${HANZO_ORG:-}" ]; then
+            echo "::error::hanzo.yml declares site: but KMS supplied no publish credential (S3_ADMIN_ACCESS_KEY/SECRET_KEY + an IAM token for $API) — refusing to publish"; exit 1
+          fi
+          command -v mc >/dev/null 2>&1 || {
+            mkdir -p "$HOME/.local/bin"; export PATH="$HOME/.local/bin:$PATH"
+            curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/archive/mc.RELEASE.2025-08-13T08-35-41Z \
+              -o "$HOME/.local/bin/mc" && chmod +x "$HOME/.local/bin/mc"
+          }
+          # Same public endpoint + scheme the binaries lane publishes through, from
+          # the same KMS names, so CI reaches hanzoai/s3 by ONE address.
+          SCHEME=https
+          if [ "${S3_PUBLIC_SECURE:-true}" = "false" ]; then SCHEME=http; fi
+          HOST="${S3_PUBLIC_ENDPOINT:-s3.hanzo.ai}"
+          BUCKET="${CLOUD_PROJECTS_BUCKET:-hanzo-sites}"
+          # The credential reaches mc through MC_HOST_<alias> — never `mc alias set`,
+          # whose key and secret would sit in argv for anything reading /proc, and
+          # never a config file on the runner. URL-encoded with jq so a secret
+          # containing '/' or '+' cannot re-parse the alias URL, and masked as a
+          # whole because the composed string carries the secret verbatim.
+          MC_HOST_hanzosite="$SCHEME://$(jq -rn --arg v "$S3_ADMIN_ACCESS_KEY" '$v|@uri'):$(jq -rn --arg v "$S3_ADMIN_SECRET_KEY" '$v|@uri')@$HOST"
+          echo "::add-mask::$MC_HOST_hanzosite"
+          export MC_HOST_hanzosite
+          # `source` is RELATIVE to the org's own storage root. The org segment is
+          # prepended SERVER-side from the validated principal and the bucket never
+          # appears in the request at all (cloud apps/projects/release.go,
+          # sourcePrefix) — an absolute path or a URL is refused — so the worst a
+          # source can address is something this org already owns. CI names the
+          # same prefix on the S3 side, org included, because there it IS writing a
+          # key.
+          SRC=".ci/$SLUG"
+          echo "::group::sync $DIR → $BUCKET/$HANZO_ORG/$SRC"
+          mc --no-color mirror --overwrite --remove --summary "$DIR" "hanzosite/$BUCKET/$HANZO_ORG/$SRC"
+          echo "::endgroup::"
+          # Promote + activate. Content types and cache policy are NOT our problem:
+          # copyRelease replaces the metadata on every object it promotes, so a
+          # release serves identically however its bytes were staged.
+          code=$(curl -sS -o "$RUNNER_TEMP/publish.json" -w '%{http_code}' \
+            -X POST "$API/v1/sites/$SLUG/publish" \
+            -H "Authorization: Bearer $HANZO_API_TOKEN" \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -nc --arg s "$SRC" '{source:$s}')") \
+            || { echo "::error::POST $API/v1/sites/$SLUG/publish did not complete"; exit 1; }
+          # Non-2xx is fatal and PRINTS ITS BODY. cloud answers this route with a
+          # specific status per cause — 402 hosting gate, 403 wrong org, 404 no such
+          # site for this tenant, 409 the source moved mid-publish, 413 past the
+          # object/byte caps, 503 storage unconfigured — and every one of them is a
+          # different fix, so swallowing the body would be discarding the answer.
+          case "$code" in
+            2??) ;;
+            *) echo "::error::publish $SLUG → HTTP $code"; cat "$RUNNER_TEMP/publish.json"; echo; exit 1 ;;
+          esac
+          rid=$(jq -r '.releaseId // empty' "$RUNNER_TEMP/publish.json")
+          url=$(jq -r '.url // empty' "$RUNNER_TEMP/publish.json")
+          objs=$(jq -r '.objects // 0' "$RUNNER_TEMP/publish.json")
+          [ -n "$rid" ] \
+            || { echo "::error::publish answered $code with no releaseId:"; cat "$RUNNER_TEMP/publish.json"; echo; exit 1; }
+          # An empty url is a real answer, not a failure: the bare <slug> host is
+          # first-come across every org, so a site whose slug is already claimed is
+          # live at its own prefix with no public subdomain and is told to rename.
+          echo "published $rid ($objs objects) → ${url:-no public host — that slug is claimed; rename the site or bind a domain}"
+          { echo "### Site — \`$SLUG\`"; echo
+            echo "| release | objects | url |"; echo "|---|---|---|"
+            echo "| \`$rid\` | $objs | ${url:-—} |"
+          } >> "$GITHUB_STEP_SUMMARY"
