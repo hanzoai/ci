@@ -268,7 +268,7 @@ jobs:
         env:
           KMS_CLIENT_ID: ${{ secrets.KMS_CLIENT_ID }}
           KMS_CLIENT_SECRET: ${{ secrets.KMS_CLIENT_SECRET }}
-          KMS_ENDPOINT: ${{ vars.KMS_ENDPOINT || 'https://kms.hanzo.ai' }}
+          KMS_ENDPOINT: ${{ vars.KMS_ENDPOINT || 'https://api.hanzo.ai' }}
           KMS_ORG: ${{ vars.KMS_ORG }}
         run: |
           # This step is BEST-EFFORT (see below): GHCR push already works via the
@@ -318,7 +318,18 @@ jobs:
             -H 'Content-Type: application/json' \
             -d "{\"clientId\":\"$KMS_CLIENT_ID\",\"clientSecret\":\"$KMS_CLIENT_SECRET\"}" | jq -r '.accessToken // empty')
           if [ -z "$TOKEN" ]; then echo "::warning::KMS login failed (org=$ORG client=$KMS_CLIENT_ID) — cross-org private deps & deploy unavailable"; exit 0; fi
-          get() { curl -sf "$KMS_ENDPOINT/v1/kms/orgs/$ORG/secrets/$PATHQ/$1?env=$ENV" -H "Authorization: Bearer $TOKEN" | jq -r '.secret.value // empty'; }
+          # Embedded KMS (HIP-0106): org from the token, flat {"value"}. The old
+          # /v1/kms/orgs/<org>/... + .secret.value pair 404s and selects nothing,
+          # which `curl -sf` turns into "" — the same value every caller below
+          # reads as "not in KMS". Fall back so a repo still pointed at the
+          # standalone host by vars.KMS_ENDPOINT keeps working.
+          get() {
+            v=$(curl -sf "$KMS_ENDPOINT/v1/kms/secrets/$PATHQ/$1?env=$ENV" -H "Authorization: Bearer $TOKEN" | jq -r '.value // empty')
+            if [ -z "$v" ]; then
+              v=$(curl -sf "$KMS_ENDPOINT/v1/kms/orgs/$ORG/secrets/$PATHQ/$1?env=$ENV" -H "Authorization: Bearer $TOKEN" | jq -r '.secret.value // empty')
+            fi
+            printf '%s' "$v"
+          }
           # Cross-org private Go module read token → buildx `gh_token` secret.
           # GIT_TOKEN is not a reserved name, so it's safe in GITHUB_ENV.
           GIT_TOKEN=$(get GITHUB_TOKEN)
