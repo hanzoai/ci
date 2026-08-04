@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# ignoretracked — refuse a repo that ships bulk content its own .gitignore
+# claims to be ignoring. One implementation, every caller.
+#
+#   ignoretracked [dir]
+#
+# WHAT THIS CATCHES
+#
+# An ignore rule does not untrack what is already tracked. `.gitignore` is
+# consulted when git decides whether to ADD an untracked path; a path already
+# in the index is never reconsidered. So this arrangement is stable and silent:
+#
+#   .gitignore says   native/flags/target/
+#   the index says    855 files under native/flags/target/
+#   git status says   nothing
+#
+# hanzoai/cloud lived there for 6 days and 16 hours. 362 MB of orphaned cargo
+# output — three near-identical 37.8 MB staticlibs and a pile of .rlib — went
+# into every release, took the module past Go's 500 MiB ceiling (see
+# bin/modsize) and made it UNFETCHABLE for nine consecutive releases. The
+# `git archive` of that commit is 202 MB against 12.5 MB today: 16x.
+#
+# The causal story is worth knowing because it is not carelessness, it is a
+# race nobody could see. The ignore rule was REMOVED at 12:22 (the Rust
+# staticlib was being dropped for a Go evaluator), the 855 files were added at
+# 12:51 inside that 4.5-hour window when nothing was ignoring them, and the
+# rule was RE-ADDED at 16:48. Every individual step was reasonable. The state
+# they combined into is the defect, and no tool in the pipeline had an opinion
+# about it.
+#
+# WHY THIS GATES ON BYTES AND NOT ON PRESENCE
+#
+# The obvious gate — "any tracked path matched by .gitignore fails" — is
+# correct in principle and unshippable in fact. Measured across all 845 git
+# repos in the three orgs: 155 of them (18%) carry at least one tracked file
+# their .gitignore matches, and hanzoai/cloud's own origin/main is one of them
+# (a bare, unanchored `tools` pattern on .gitignore:62 catches 27 legitimately
+# tracked Go source files under apps/tools/). `CLAUDE.md` alone is ignored-and-
+# tracked in 40 repos and is the ONLY hit in 29 of them. Turning that on as a
+# hard fail breaks a fifth of the estate on day one, and a gate that fails what
+# ought to pass is a gate that gets switched off — after which we are worse off
+# than before it existed.
+#
+# So the gate is on the quantity that actually caused the outage. The byte
+# distribution separates cleanly, which is why this threshold can be a refusal
+# rather than a warning:
+#
+#     worst legitimate repo in the estate   61.5 MB   (hanzo/docs, vendored)
+#     ... next                              48.8 MB, 45.8, 45.2, 43.8, 39.8
+#     repos over 100 MB                     ZERO
+#     the defect this gate exists for      362.0 MB
+#
+# Default ceiling 100 MB: green on all 845 repos today with 62% headroom over
+# the worst honest case, and red on the real defect by 3.6x. Nothing to
+# baseline, no allowlist, no per-repo exemptions — the tail is REPORTED (so the
+# hygiene problem stays visible and shrinkable) and only the bulk is REFUSED.
+#
+# As repos are cleaned up, lower IGNORETRACKED_MAX_MB. It is a ratchet, and the
+# end state is 0 — at which point this becomes the pure presence gate that was
+# right all along. Do not start there.
+#
+# WHY core.excludesFile IS PINNED OFF
+#
+# `--exclude-standard` reads THREE sources: the repo's committed .gitignore
+# files, .git/info/exclude, and the user's global core.excludesFile. The last
+# is per-machine, so the same commit gets different verdicts on a laptop and a
+# runner — on this workstation a global bare `tags` pattern matched 1,271
+# Elixir source files in lux/explorer-v1 that CI would never flag. A gate whose
+# answer depends on whose machine asked is not a gate. Only committed
+# .gitignore is in scope, so the global file is pinned to /dev/null.
+# (.git/info/exclude is per-clone and is the stock all-comments template on a
+# fresh CI checkout; it cannot be overridden by -c, and is left alone.)
+#
+# EXIT: 0 clean or under the ceiling (findings still reported), 1 over it.
+set -uo pipefail
+
+MAX_MB=${IGNORETRACKED_MAX_MB:-100}
+root=${1:-.}
+cd "$root" 2>/dev/null || { echo "ignoretracked: no such directory: $root" >&2; exit 1; }
+git rev-parse --git-dir >/dev/null 2>&1 || exit 0   # not a repo: nothing to check
+
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+
+# -s gives "<mode> <sha> <stage>\t<path>", which carries the blob id — so the
+# size comes from cat-file and needs no working-tree stat (correct on a bare or
+# sparse checkout, and unaffected by anything a build has written).
+git -c core.excludesFile=/dev/null ls-files -s --cached --ignored --exclude-standard \
+  > "$tmp/ls" 2>/dev/null || exit 0
+[ -s "$tmp/ls" ] || { echo "ignoretracked: OK — nothing tracked that .gitignore ignores"; exit 0; }
+
+files=$(wc -l < "$tmp/ls")
+bytes=$(awk '{print $2}' "$tmp/ls" \
+  | git cat-file --batch-check='%(objectsize)' --buffer 2>/dev/null \
+  | awk '/^[0-9]+$/{s+=$1} END{print s+0}')
+mb=$(awk -v b="${bytes:-0}" 'BEGIN{printf "%.1f", b/1048576}')
+
+# WHICH .gitignore LINE is doing this. Plain `check-ignore` prints nothing for a
+# tracked path (it answers "would git ignore this if it were untracked", and a
+# tracked path short-circuits) — --no-index is what makes it answer for the
+# files we actually have. The output names source:line:pattern, so the report
+# points at the line to edit instead of at 855 paths to read.
+cut -f2- "$tmp/ls" | git -c core.excludesFile=/dev/null check-ignore --no-index -v --stdin \
+  > "$tmp/why" 2>/dev/null || true
+
+echo "ignoretracked: ${files} tracked file(s), ${mb} MB, matched by this repo's own .gitignore"
+if [ -s "$tmp/why" ]; then
+  echo "  by rule (top 10):"
+  awk -F'\t' '{n[$1]++} END{for (k in n) printf "%8d  %s\n", n[k], k}' "$tmp/why" \
+    | sort -rn | head -10
+fi
+
+limit=$(( MAX_MB * 1048576 ))
+if [ "${bytes:-0}" -ge "$limit" ]; then
+  echo "::error::${mb} MB of tracked content is matched by this repo's own .gitignore — over the ${MAX_MB} MB ceiling. An ignore rule does not untrack what is already tracked, so this ships in every release and every module zip while \`git status\` stays clean. Fix: \`git rm -r --cached <path>\` and commit (the working tree is untouched). If the content is meant to be tracked, un-ignore it instead — negate the rule with \`!<path>\` — so the two stop disagreeing."
+  exit 1
+fi
+echo "ignoretracked: OK — ${mb} MB is under the ${MAX_MB} MB ceiling (reported, not blocking)"
+exit 0
