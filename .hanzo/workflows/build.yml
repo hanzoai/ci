@@ -120,6 +120,23 @@ jobs:
             || { echo "::error::could not fetch hanzoai/ci@${ref} (bin/imgver) from any host"; exit 1; }
           echo "CI_HOME=$RUNNER_TEMP/ci" >> "$GITHUB_ENV"
 
+      - name: Workflow directory is one a host actually collects
+        # THE CALLER IS RUNNING, SO ITS OWN PLACEMENT IS ALREADY PROVEN. What is
+        # not proven is the OTHER directory it carries. github.com reads only
+        # `.github/workflows`; git.hanzo.ai reads the first of its WORKFLOW_DIRS
+        # that exists and BREAKS THERE, so `.hanzo/workflows` masks `.github`
+        # rather than merging with it. A caller with `.hanzo/workflows` and no
+        # repo on git.hanzo.ai therefore has files no host will ever collect —
+        # and deleting the `.github` copy, which looks like removing a duplicate,
+        # silently ends its CI. hanzoai/openapi did exactly that on 2026-07-30 and
+        # ran nothing for five days; 26 repos across the orgs are in that state.
+        #
+        # bin/lane asks the one question that settles it, against a PUBLIC forge
+        # endpoint: no credential, so it cannot be no-opped by the empty string an
+        # org secret becomes inside a private repo on the Free plan.
+        run: |
+          "$CI_HOME/bin/lane" check .
+
       - name: Provision parse toolchain (jq + PyYAML)
         # This reusable parses the caller's hanzo.yml with python3 + PyYAML and
         # slices JSON with jq. A minimal runner image

@@ -120,6 +120,23 @@ jobs:
             || { echo "::error::could not fetch hanzoai/ci@${ref} (bin/imgver) from any host"; exit 1; }
           echo "CI_HOME=$RUNNER_TEMP/ci" >> "$GITHUB_ENV"
 
+      - name: Workflow directory is one a host actually collects
+        # THE CALLER IS RUNNING, SO ITS OWN PLACEMENT IS ALREADY PROVEN. What is
+        # not proven is the OTHER directory it carries. github.com reads only
+        # `.github/workflows`; git.hanzo.ai reads the first of its WORKFLOW_DIRS
+        # that exists and BREAKS THERE, so `.hanzo/workflows` masks `.github`
+        # rather than merging with it. A caller with `.hanzo/workflows` and no
+        # repo on git.hanzo.ai therefore has files no host will ever collect —
+        # and deleting the `.github` copy, which looks like removing a duplicate,
+        # silently ends its CI. hanzoai/openapi did exactly that on 2026-07-30 and
+        # ran nothing for five days; 26 repos across the orgs are in that state.
+        #
+        # bin/lane asks the one question that settles it, against a PUBLIC forge
+        # endpoint: no credential, so it cannot be no-opped by the empty string an
+        # org secret becomes inside a private repo on the Free plan.
+        run: |
+          "$CI_HOME/bin/lane" check .
+
       - name: Provision parse toolchain (jq + PyYAML)
         # This reusable parses the caller's hanzo.yml with python3 + PyYAML and
         # slices JSON with jq. A minimal runner image
@@ -336,11 +353,23 @@ jobs:
             fi
             echo "::warning::KMS login failed (org=$ORG client=$KMS_CLIENT_ID) — cross-org private deps & deploy unavailable"; exit 0
           fi
-          # Embedded KMS (HIP-0106): org from the token, flat {"value"}. The old
-          # /v1/kms/orgs/<org>/... + .secret.value pair 404s and `curl -sf` turns
-          # that into "" — which every caller reads as "not in KMS". The standalone
-          # host also holds a STALE key cloud 403s, so reading it ships a dead one.
-          # Embedded first, standalone as fallback.
+          # KMS is embedded in hanzoai/cloud now (HIP-0106, cloud/apps/kms), and its
+          # contract differs from the standalone service in two ways that BOTH fail
+          # silently — you get an empty string, which every caller below already
+          # treats as "not in KMS":
+          #
+          #   url   /v1/kms/secrets/<path>/<name>  — the org comes from the TOKEN,
+          #         not the url. The old /v1/kms/orgs/<org>/... form 404s, and -sf
+          #         turns that into empty output.
+          #   body  {"name","env","value"} — flat. `.secret.value` selects nothing.
+          #
+          # Reading the OLD host is worse than reading nothing: the two instances
+          # hold DIFFERENT values under the same name, and the standalone copy of
+          # deploy/EVENT_INGEST_KEY is stale — cloud rejects it at ingest with 403,
+          # so a build that "found" a key still ships one that cannot write.
+          #
+          # Try the embedded shape first and fall back to the standalone one, so a
+          # repo still pointed at the old host keeps working while the fleet moves.
           get() {
             v=$(curl -sf "$KMS_ENDPOINT/v1/kms/secrets/$PATHQ/$1?env=$ENV" -H "Authorization: Bearer $TOKEN" | jq -r '.value // empty')
             if [ -z "$v" ]; then

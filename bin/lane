@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# lane — refuse a repo whose workflows sit in a directory no host it lives on
+# collects. One implementation, two entry points.
+#
+#   lane check [dir]              # inside a checkout: are its workflows collected?
+#   lane sweep <org> [<org>...]   # across an org: which repos are not?
+#
+# A WORKFLOW DIRECTORY IS AN ADDRESS, NOT A PREFERENCE
+#
+# The two forges read two different directories, and neither reads the other's:
+#
+#   github.com      .github/workflows, and nothing else.
+#   git.hanzo.ai    the first of WORKFLOW_DIRS that EXISTS in the pushed commit
+#                   — [.hanzo/workflows, .github/workflows], and it breaks on
+#                   the first hit (modules/actions/workflows.go,
+#                   listWorkflowsInDirs). So .hanzo/workflows does not merely
+#                   win, it MASKS .github/workflows entirely.
+#
+# Move a caller into `.hanzo/workflows` and one of two things is true. If the
+# repo is on git.hanzo.ai, the forge collects it and the fleet's runners build
+# it — this is the fleet default and where the `hanzo-build-linux-amd64` pool
+# actually lives. If the repo is NOT on git.hanzo.ai, the file is collected by
+# nobody: github.com never looks in that directory, and there is no other
+# reader. The repo does not fail. It goes quiet.
+#
+# THAT IS NOT HYPOTHETICAL. hanzoai/openapi moved both callers to
+# `.hanzo/workflows` on 2026-07-30 while git.hanzo.ai/hanzoai/openapi was — and
+# is — a 404. No run of any kind executed for the five days that followed; the
+# published API document went 81 hanzoai/cloud commits stale, took a hand edit,
+# and shipped 19 operations nothing serves to every SDK, with no gate saying a
+# word. `gh workflow list` returned nothing, which is indistinguishable at a
+# glance from a repo that simply has no CI.
+#
+# A sweep of the orgs found 26 repos in exactly that state.
+#
+# WHY THE PROBE IS ANONYMOUS, AND WHY THAT MATTERS
+#
+# The question "is this repo on git.hanzo.ai" is answered by a public endpoint
+# that needs no credential and no checkout. That is deliberate: the hanzoai org
+# is on the GitHub Free plan, where an ORG secret resolves to the empty string
+# inside a PRIVATE repo, so a gate built on an org secret does not fail there —
+# it silently passes, which is the same shape of quiet this gate exists to
+# refuse. A gate that cannot be no-opped by a missing credential is worth more
+# than a thorough one that can.
+#
+# WHAT THIS DELIBERATELY DOES NOT DO
+#
+# It does not require `.hanzo/workflows`. A repo with only `.github/workflows`
+# is correct on either host — github.com reads it, and git.hanzo.ai falls
+# through to it. The only arrangement refused is the one that is collected by
+# nobody.
+#
+# It also cannot catch a repo whose CI is ALREADY fully dead: a gate inside a
+# pipeline cannot run when no pipeline runs. `lane sweep` is the answer to that
+# half, and it is a command a person runs, not a build step pretending to.
+set -uo pipefail
+
+usage() { sed -n '3,5p' "$0" | sed 's/^# \?//'; exit 2; }
+
+FORGE=${LANE_FORGE:-https://git.hanzo.ai}
+
+# has_actions on the forge, or empty if the repo is not there. One GET, no
+# credential. `mirror` is not consulted: a pushed repo and a pulled mirror both
+# collect workflows, and only has_actions decides whether they run.
+forge_actions() {
+  curl -fsS --max-time 20 "$FORGE/v1/repos/$1" 2>/dev/null \
+    | tr ',{}' '\n\n\n' | sed -n 's/.*"has_actions"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p' | head -1
+}
+
+# The slug this checkout is. $GITHUB_REPOSITORY when a pipeline is asking,
+# origin otherwise — a person running this by hand gets the same answer.
+slug_of() {
+  local url
+  [ -n "${GITHUB_REPOSITORY:-}" ] && { printf '%s' "$GITHUB_REPOSITORY"; return; }
+  url=$(git -C "$1" config --get remote.origin.url 2>/dev/null) || return 1
+  printf '%s' "$url" | sed -E 's#(\.git)?/?$##; s#^.*[:/]([^/:]+/[^/]+)$#\1#'
+}
+
+has_workflows() { compgen -G "$1"/*.yml >/dev/null 2>&1 || compgen -G "$1"/*.yaml >/dev/null 2>&1; }
+
+check() {
+  local dir=${1:-.} slug acts
+  has_workflows "$dir/.hanzo/workflows" || {
+    echo "lane: OK — $dir has no .hanzo/workflows, so .github/workflows is read by every host"
+    return 0
+  }
+  slug=$(slug_of "$dir") || { echo "lane: no origin remote in $dir — cannot name the repo to probe"; return 0; }
+  acts=$(forge_actions "$slug")
+  case "$acts" in
+    true) echo "lane: OK — $slug is on ${FORGE#https://} with actions enabled, which collects .hanzo/workflows"; return 0 ;;
+    false)
+      echo "::error::$slug carries .hanzo/workflows and IS on ${FORGE#https://}, but actions are DISABLED there — the forge collects those files and runs none of them, and github.com never reads that directory at all. Fix: enable actions on ${FORGE#https://}/$slug, or move the workflows to .github/workflows."
+      return 1 ;;
+    *)
+      echo "::error::$slug carries .hanzo/workflows and is NOT on ${FORGE#https://} (404). github.com reads only .github/workflows, so those files are collected by nobody and this repo has no CI — it will not fail, it will go quiet. Fix: mirror $slug to ${FORGE#https://}, or move the workflows to .github/workflows."
+      return 1 ;;
+  esac
+}
+
+# The fleet question. Needs `gh` because listing an org's PRIVATE repos needs a
+# person's credential; the forge half stays anonymous.
+sweep() {
+  local org repo slug acts dirs bad=0 n=0
+  command -v gh >/dev/null || { echo "lane: sweep needs the gh CLI (it lists private repos); 'lane check' does not"; return 2; }
+  for org in "$@"; do
+    while read -r repo; do
+      [ -z "$repo" ] && continue
+      dirs=$(gh api "repos/$repo/contents/.hanzo/workflows" --jq '[.[]|select(.name|test("\\.ya?ml$"))]|length' 2>/dev/null) || dirs=0
+      [ "${dirs:-0}" -gt 0 ] || continue
+      n=$((n+1))
+      acts=$(forge_actions "$repo")
+      [ "$acts" = true ] && continue
+      printf '%-32s .hanzo/workflows=%-3s forge=%s\n' "$repo" "$dirs" "${acts:-absent}"
+      bad=$((bad+1))
+    done < <(gh repo list "$org" --limit 1000 --json nameWithOwner --jq '.[].nameWithOwner' 2>/dev/null)
+  done
+  echo "lane: $n repo(s) carry .hanzo/workflows; $bad collected by nobody"
+  [ "$bad" = 0 ]
+}
+
+case "${1:-}" in
+  check) shift; check "${1:-.}" ;;
+  sweep) shift; [ $# -gt 0 ] || usage; sweep "$@" ;;
+  *) usage ;;
+esac
