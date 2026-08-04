@@ -268,7 +268,7 @@ jobs:
         env:
           KMS_CLIENT_ID: ${{ secrets.KMS_CLIENT_ID }}
           KMS_CLIENT_SECRET: ${{ secrets.KMS_CLIENT_SECRET }}
-          KMS_ENDPOINT: ${{ vars.KMS_ENDPOINT || 'https://kms.hanzo.ai' }}
+          KMS_ENDPOINT: ${{ vars.KMS_ENDPOINT || 'https://api.hanzo.ai' }}
           KMS_ORG: ${{ vars.KMS_ORG }}
         run: |
           # This step is BEST-EFFORT (see below): GHCR push already works via the
@@ -311,14 +311,55 @@ jobs:
           fi
           ENV="$(yq -r '.kms.environment // "prod"' hanzo.yml 2>/dev/null || echo prod)"
           PATHQ="$(yq -r '.kms.path // "/deploy"' hanzo.yml | sed 's#^/##; s#/$##' 2>/dev/null || echo deploy)"
+          # A repo that DECLARES `build_secrets` has asserted its image is not
+          # valid without them, so for that repo KMS is REQUIRED, not best-effort.
+          # Read the declaration BEFORE the two short-circuits below: otherwise an
+          # unconfigured or unreachable KMS returns "no secrets" and the build
+          # proceeds to bake an EMPTY credential — green run, broken artifact. That
+          # is exactly how docs/chat/app shipped bundles that could not write, and
+          # how a stale key survived: every failure looked like "not in KMS", and
+          # "not in KMS" was survivable.
+          DECLARED="$(yq -r '[(.images // [])[] | (.build_secrets // [])[]] | unique | .[]' hanzo.yml 2>/dev/null || true)"
+          required() { [ -n "$DECLARED" ]; }
           if [ -z "${KMS_CLIENT_ID:-}" ] || [ -z "$ORG" ]; then
+            if required; then
+              echo "::error::KMS not configured (no KMS_CLIENT_ID or org) but hanzo.yml declares build_secrets:$(echo " $DECLARED" | tr '\n' ' ')— refusing to build an image with empty credentials"; exit 1
+            fi
             echo "::notice::KMS not configured (no KMS_CLIENT_ID or org) — skipping; GHCR push uses the workflow token"; exit 0
           fi
           TOKEN=$(curl -sf "$KMS_ENDPOINT/v1/kms/auth/login" \
             -H 'Content-Type: application/json' \
             -d "{\"clientId\":\"$KMS_CLIENT_ID\",\"clientSecret\":\"$KMS_CLIENT_SECRET\"}" | jq -r '.accessToken // empty')
-          if [ -z "$TOKEN" ]; then echo "::warning::KMS login failed (org=$ORG client=$KMS_CLIENT_ID) — cross-org private deps & deploy unavailable"; exit 0; fi
-          get() { curl -sf "$KMS_ENDPOINT/v1/kms/orgs/$ORG/secrets/$PATHQ/$1?env=$ENV" -H "Authorization: Bearer $TOKEN" | jq -r '.secret.value // empty'; }
+          if [ -z "$TOKEN" ]; then
+            if required; then
+              echo "::error::KMS login failed (endpoint=$KMS_ENDPOINT org=$ORG client=$KMS_CLIENT_ID) but hanzo.yml declares build_secrets — refusing to build an image with empty credentials"; exit 1
+            fi
+            echo "::warning::KMS login failed (org=$ORG client=$KMS_CLIENT_ID) — cross-org private deps & deploy unavailable"; exit 0
+          fi
+          # KMS is embedded in hanzoai/cloud now (HIP-0106, cloud/apps/kms), and its
+          # contract differs from the standalone service in two ways that BOTH fail
+          # silently — you get an empty string, which every caller below already
+          # treats as "not in KMS":
+          #
+          #   url   /v1/kms/secrets/<path>/<name>  — the org comes from the TOKEN,
+          #         not the url. The old /v1/kms/orgs/<org>/... form 404s, and -sf
+          #         turns that into empty output.
+          #   body  {"name","env","value"} — flat. `.secret.value` selects nothing.
+          #
+          # Reading the OLD host is worse than reading nothing: the two instances
+          # hold DIFFERENT values under the same name, and the standalone copy of
+          # deploy/EVENT_INGEST_KEY is stale — cloud rejects it at ingest with 403,
+          # so a build that "found" a key still ships one that cannot write.
+          #
+          # Try the embedded shape first and fall back to the standalone one, so a
+          # repo still pointed at the old host keeps working while the fleet moves.
+          get() {
+            v=$(curl -sf "$KMS_ENDPOINT/v1/kms/secrets/$PATHQ/$1?env=$ENV" -H "Authorization: Bearer $TOKEN" | jq -r '.value // empty')
+            if [ -z "$v" ]; then
+              v=$(curl -sf "$KMS_ENDPOINT/v1/kms/orgs/$ORG/secrets/$PATHQ/$1?env=$ENV" -H "Authorization: Bearer $TOKEN" | jq -r '.secret.value // empty')
+            fi
+            printf '%s' "$v"
+          }
           # Cross-org private Go module read token → buildx `gh_token` secret.
           # GIT_TOKEN is not a reserved name, so it's safe in GITHUB_ENV.
           GIT_TOKEN=$(get GITHUB_TOKEN)
@@ -348,13 +389,16 @@ jobs:
           # name — one name, one place. For publishable client tokens a Vite SPA
           # must embed at build (e.g. VITE_MAPBOX_TOKEN). Undeclared → no-op, so
           # every existing repo is byte-for-byte unchanged.
-          for bs in $(yq -r '[(.images // [])[] | (.build_secrets // [])[]] | unique | .[]' hanzo.yml 2>/dev/null || true); do
-            case "$bs" in ''|*[!A-Za-z0-9_]*) echo "::warning::skipping invalid build_secret name '$bs'"; continue;; esac
+          for bs in $DECLARED; do
+            case "$bs" in ''|*[!A-Za-z0-9_]*) echo "::error::invalid build_secret name '$bs'"; exit 1;; esac
             v=$(get "$bs" || true)
-            if [ -n "$v" ]; then
-              echo "::add-mask::$v"
-              { echo "$bs<<__KMS_BUILDARG_EOF__"; echo "$v"; echo "__KMS_BUILDARG_EOF__"; } >> "$GITHUB_ENV"
-            else echo "::warning::build_secret $bs not in KMS ($ORG/$PATHQ env=$ENV) — build-arg will be empty"; fi
+            if [ -z "$v" ]; then
+              # Fail CLOSED. An empty build-arg is indistinguishable from a missing
+              # one at build time and only shows up as silence in production.
+              echo "::error::build_secret $bs is not readable at $KMS_ENDPOINT ($ORG/$PATHQ env=$ENV) — refusing to bake an empty value. Seal it, or drop it from hanzo.yml build_secrets."; exit 1
+            fi
+            echo "::add-mask::$v"
+            { echo "$bs<<__KMS_BUILDARG_EOF__"; echo "$v"; echo "__KMS_BUILDARG_EOF__"; } >> "$GITHUB_ENV"
           done
 
       - name: GHCR push credential (KMS write:packages token)
@@ -555,7 +599,12 @@ jobs:
             while IFS= read -r kv; do [ -n "$kv" ] && BUILD_ARGS="$BUILD_ARGS --build-arg $kv"; done \
               < <(echo "$img" | jq -r '(.args // {}) | to_entries[] | "\(.key)=\(.value)"')
             for bs in $(echo "$img" | jq -r '(.build_secrets // [])[]'); do
-              v=$(printenv "$bs" 2>/dev/null || true); [ -n "$v" ] && BUILD_ARGS="$BUILD_ARGS --build-arg $bs=$v"
+              v=$(printenv "$bs" 2>/dev/null || true)
+              # Defense in depth: the KMS step above already refuses to continue
+              # with an unresolved build_secret, so reaching here empty means the
+              # two steps disagree. Stop rather than bake a blank credential.
+              [ -z "$v" ] && { echo "::error::build_secret $bs is unset at build time — refusing to bake an empty value"; exit 1; }
+              BUILD_ARGS="$BUILD_ARGS --build-arg $bs=$v"
             done
             # GIT_TOKEN (from KMS, via GITHUB_ENV) is passed as the `gh_token`
             # BuildKit secret so Dockerfiles can clone private Go modules; omitted
