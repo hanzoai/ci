@@ -994,7 +994,26 @@ jobs:
         # it ran nothing AND nothing shows as having run. A gate that is not a test
         # gate — vet, lint, a build, a codegen-freshness check — says neither and is
         # untouched. To silence it legitimately, make the gate run a test.
-        if: inputs.mode != 'delegate' && inputs.tests
+        #
+        # AN INPUT THIS FORGE DOES NOT DELIVER MUST NOT READ AS "RUN NOTHING".
+        # `tests` is declared `type: boolean, default: true`, and on github.com it
+        # arrives that way. On git.hanzo.ai it does not arrive at all, so bare
+        # `inputs.tests` is falsy and this step is skipped — in a job that then
+        # reports SUCCESS. Measured on the forge, five of five repos with a cicd
+        # run: hanzoai/cloud (passes `tests:` outright), hanzoai/ci (its own bare
+        # 7-line caller), hanzoai/openapi (passed a literal `true`), gateway and
+        # commerce. All green, all with this step skipped, none having run one
+        # test. The step above exists to refuse a gate that runs no tests; it
+        # cannot, because it is the step not running.
+        #
+        # An absent value is a caller who said NOTHING, and a caller who says
+        # nothing is asking for the default — which is true. Only an explicit
+        # `false` means skip, so compare the FORMATTED value to it: absent, true,
+        # or anything this forge mangles all run; `false` still skips, which is
+        # the one shape that legitimately uses it (hanzoai/cloud's tag build,
+        # already gated on main). The failure direction becomes "tested when it
+        # need not have" instead of "shipped untested".
+        if: inputs.mode != 'delegate' && format('{0}', inputs.tests) != 'false'
         run: |
           set -euo pipefail
           NOTHING='\[no test files\]|\[no tests to run\]|no tests ran|collected 0 items|No tests found|no test specified|running 0 tests|Tests:[[:space:]]+0 total|(^|[^0-9])0 (passing|passed)'
