@@ -120,6 +120,32 @@ jobs:
             || { echo "::error::could not fetch hanzoai/ci@${ref} (bin/imgver) from any host"; exit 1; }
           echo "CI_HOME=$RUNNER_TEMP/ci" >> "$GITHUB_ENV"
 
+      - name: Structural invariants (the repo agrees with itself)
+        # Two cheap refusals, run before anything is built or pushed, for a
+        # defect class no later stage can see: a declaration and the reality it
+        # describes disagreeing in silence.
+        #
+        #   ignoretracked — content the repo's OWN .gitignore matches but the
+        #     index still tracks. An ignore rule does not untrack what is
+        #     already tracked, so the bulk ships in every release while
+        #     `git status` stays clean. hanzoai/cloud carried 361 MB this way
+        #     for 6 days — past Go's 500 MiB module-zip ceiling, making nine
+        #     consecutive releases unfetchable by every consumer.
+        #   modsize — each Go module tree measured against that same ceiling,
+        #     nested modules separately. Past it, `go get` fails everywhere
+        #     with 'module source tree too large'; near it, this is the only
+        #     warning anyone gets before the first consumer breaks.
+        #
+        # Both proven RED against cloud@v1.801.424 (the real outage) and GREEN
+        # against the repaired tree before landing here. They read the checkout
+        # only — no network, subsecond on a healthy repo — and they FAIL the
+        # run rather than annotate it, because a warning nobody reads is the
+        # same silence one level up.
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/ci/bin/ignoretracked" .
+          "$RUNNER_TEMP/ci/bin/modsize" .
+
       - name: Provision parse toolchain (jq + PyYAML)
         # This reusable parses the caller's hanzo.yml with python3 + PyYAML and
         # slices JSON with jq. A minimal runner image

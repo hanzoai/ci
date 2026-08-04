@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# modsize — refuse a Go module that is approaching the size at which Go can no
+# longer fetch it. One implementation, every caller.
+#
+#   modsize [dir]        # default: every module in the repo, from the root
+#
+# WHAT THIS CATCHES
+#
+# Go's module ceiling is not a soft limit and not a warning. From
+# golang.org/x/mod/zip (and, identically, cmd/go/internal/modfetch/codehost):
+#
+#   MaxZipFile = 500 << 20     // 524288000 bytes, 500 MiB
+#
+# and it is enforced THREE ways on the same number — the zip file itself, the
+# total uncompressed size of the files inside it, and (in CheckDir) the running
+# sum of the source tree's file sizes:
+#
+#   "module source tree too large (max size is 524288000 bytes)"
+#   "total uncompressed size of module contents too large (...)"
+#
+# hanzoai/cloud crossed it and became UNFETCHABLE for nine consecutive
+# releases. Nothing said so. The module publishes fine — the ceiling is
+# enforced on the CONSUMER, at `go get`, so the failure surfaces in someone
+# else's repo, at a version they did not choose, long after the release that
+# caused it. There is no signal at the publishing end at all, which is why nine
+# releases went out before anybody knew.
+#
+# WHY THIS SUMS RAW BYTES AND WHY THAT IS EXACT, NOT AN APPROXIMATION
+#
+# It would be reasonable to assume the limit is on the compressed zip and that
+# summing uncompressed bytes over-counts. It does not: zip.CheckDir accumulates
+# `info.Size()` — the raw, uncompressed size of each regular file — and fails
+# when that running total exceeds MaxZipFile. So the sum of file sizes IS one
+# of the three quantities Go bounds, and a git blob's size is exactly that
+# file's uncompressed size. This gate therefore measures the same number Go
+# measures, not a proxy for it.
+#
+# WHAT IT EXCLUDES, AND WHY EACH EXCLUSION IS REQUIRED FOR CORRECTNESS
+#
+#   • Nested modules. A subdirectory with its own go.mod is a DIFFERENT module
+#     and its bytes are not in the parent's zip. Counting them would fail a
+#     repo that is nowhere near the limit — hanzoai/s3 is this shape (it builds
+#     s3-rdma-sidecar/ and telemetry/server/ from their own go.mod files), and
+#     a gate that fails a repo that would have worked is a gate people learn to
+#     skip. Each nested module is instead checked on its own terms.
+#   • Symlinks and gitlinks (submodules). zip.CheckDir skips both — symlinks
+#     explicitly (golang.org/issue/27093), submodules because they are not
+#     files. Counting a gitlink's 20-byte entry would be harmless; counting a
+#     symlink's target as content would not.
+#
+# It reads tracked content only (git ls-tree), because that is what a module
+# zip is built from: the proxy serves what the VCS has at that tag, not what a
+# working tree happens to contain.
+#
+# THE THRESHOLD IS BELOW THE CEILING ON PURPOSE
+#
+# Failing AT 500 MiB would be useless — at that point the module is already
+# unfetchable and the only question left is how many releases shipped broken.
+# The gate refuses at MODSIZE_MAX_PCT (default 80%, ~419 MiB), which is the
+# "warn well before" — spelled as a refusal, because a warning about a cliff
+# nobody is watching is the same defect one level up. 105 MiB of headroom is
+# several releases' worth of honest growth, so this fires with room to fix it
+# calmly and never fires the release it would have broken.
+#
+# EXIT: 0 clean, 1 when a module is at or past the threshold.
+set -uo pipefail
+
+# 500 << 20, from golang.org/x/mod/zip. Not a guess and not rounded: the
+# constant is quoted so a reader can check it against the source.
+CEILING=$((500 << 20))
+PCT=${MODSIZE_MAX_PCT:-80}
+REF=${MODSIZE_REF:-HEAD}
+
+root=${1:-.}
+cd "$root" 2>/dev/null || { echo "modsize: no such directory: $root" >&2; exit 1; }
+git rev-parse --git-dir >/dev/null 2>&1 || exit 0   # not a repo: nothing to measure
+
+# Every go.mod in the tree, at REF. The root module is "go.mod"; anything else
+# is a nested module and marks a prefix the parent must not count.
+mods=$(git ls-tree -r --name-only "$REF" 2>/dev/null | grep -E '(^|/)go\.mod$' | sort) || exit 0
+[ -z "$mods" ] && exit 0
+
+# path<TAB>size for every regular tracked file. Mode 100644/100755 only:
+# 120000 is a symlink and 160000 a gitlink, both of which zip.CheckDir omits.
+# `git ls-tree -l` separates the path with a TAB, so split on that rather than
+# on whitespace: a path with spaces in it must survive intact.
+sizes=$(git ls-tree -r -l "$REF" 2>/dev/null \
+  | sed -n 's/^\([0-9]\{6\}\) blob \([0-9a-f]*\) *\([0-9-]*\)\t\(.*\)$/\1\t\3\t\4/p' \
+  | awk -F'\t' '$1=="100644"||$1=="100755"{print $3 "\t" $2}')
+
+human() { awk -v b="$1" 'BEGIN{ printf "%.1f MiB", b/1048576 }'; }
+
+rc=0
+for gm in $mods; do
+  if [ "$gm" = "go.mod" ]; then mdir=""; else mdir="${gm%/go.mod}/"; fi
+  # The prefixes this module must NOT count: every OTHER module nested under it.
+  nested=$(printf '%s\n' "$mods" | while read -r o; do
+    [ "$o" = "$gm" ] && continue
+    od="${o%go.mod}"
+    case "$od" in "$mdir"?*) printf '%s\n' "$od";; esac
+  done)
+  total=$(printf '%s\n' "$sizes" | awk -F'\t' -v m="$mdir" -v nl="$nested" '
+    BEGIN{ n=split(nl, arr, "\n") }
+    {
+      p=$1
+      if (m != "" && index(p, m) != 1) next          # not in this module
+      for (i=1; i<=n; i++) if (arr[i] != "" && index(p, arr[i]) == 1) next  # nested module
+      s += $2
+    }
+    END{ print s+0 }')
+  limit=$(( CEILING * PCT / 100 ))
+  name=${mdir:-./}
+  if [ "$total" -ge "$CEILING" ]; then
+    echo "::error file=${gm}::module ${name} is $(human "$total") of tracked content — PAST Go's $(human $CEILING) module ceiling. It is already unfetchable: \`go get\` fails with 'module source tree too large (max size is ${CEILING} bytes)' in every consumer, at every version that carries it. Find the bulk with: git ls-tree -r -l ${REF} | sort -k4 -n | tail -20"
+    rc=1
+  elif [ "$total" -ge "$limit" ]; then
+    echo "::error file=${gm}::module ${name} is $(human "$total") of tracked content — ${PCT}% of Go's $(human $CEILING) ceiling, $(human $((CEILING-total))) of headroom left. Past the ceiling the module stops being fetchable AT THE CONSUMER, so the break shows up in someone else's build and not in this one. Find the bulk with: git ls-tree -r -l ${REF} | sort -k4 -n | tail -20"
+    rc=1
+  else
+    echo "modsize: OK — ${name} $(human "$total") ($(( total * 100 / CEILING ))% of $(human $CEILING))"
+  fi
+done
+exit $rc
