@@ -49,8 +49,18 @@ on:
           tag build would re-test a commit already proven, at the cost of a
           3108-package link storm. Passing false there runs the gate once instead
           of twice; passing it anywhere else runs it zero times.
-        type: boolean
-        default: true
+        # `string`, NOT `boolean`, and that is the fix. git.hanzo.ai's runner
+        # substitutes a workflow_call input's declared TYPE ZERO VALUE, so a
+        # boolean arrives as `false` whatever the caller passed — measured:
+        # hanzoai/openapi passed a literal `true` and the run still evaluated
+        # `format('{0}', inputs.tests)` to 'false' and skipped the step. NO
+        # expression over a boolean input can be true on that forge. A string's
+        # zero value is '', which is not 'false', so the test step below runs;
+        # github.com fills in 'true' and it runs there too. Only a caller that
+        # says the word false gets the skip, which is the one behaviour that
+        # ever needed to be expressible.
+        type: string
+        default: 'true'
       submodules:
         description: >-
           Passed straight to actions/checkout. Default '' is checkout's own
@@ -1013,7 +1023,7 @@ jobs:
         # the one shape that legitimately uses it (hanzoai/cloud's tag build,
         # already gated on main). The failure direction becomes "tested when it
         # need not have" instead of "shipped untested".
-        if: inputs.mode != 'delegate' && format('{0}', inputs.tests) != 'false'
+        if: inputs.mode != 'delegate' && inputs.tests != 'false'
         run: |
           set -euo pipefail
           NOTHING='\[no test files\]|\[no tests to run\]|no tests ran|collected 0 items|No tests found|no test specified|running 0 tests|Tests:[[:space:]]+0 total|(^|[^0-9])0 (passing|passed)'
