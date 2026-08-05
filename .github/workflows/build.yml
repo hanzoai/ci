@@ -42,15 +42,41 @@ on:
       tests:
         description: >-
           Run the `test:` block. Default true, and a caller should leave it that
-          way. false asserts that THIS EXACT COMMIT was already gated before this
+          way. 'false' asserts that THIS EXACT COMMIT was already gated before this
           run — it does not mean "ship untested". The one shape that holds today
           is hanzoai/cloud's release: clients/platform/release.go mints the v* tag
           only after that SHA passed the gate on main AND built AND smoked, so the
           tag build would re-test a commit already proven, at the cost of a
-          3108-package link storm. Passing false there runs the gate once instead
+          3108-package link storm. Passing 'false' there runs the gate once instead
           of twice; passing it anywhere else runs it zero times.
-        type: boolean
-        default: true
+
+          STRING, NOT BOOLEAN, AND THAT IS LOAD-BEARING. git.hanzo.ai resolves
+          EVERY `type: boolean` workflow_call input to false — not just an omitted
+          one carrying a default, but an explicitly passed `true` as well. Measured
+          in isolation (z/inputprobe, runs 27365 and 27382): with `type: boolean,
+          default: true` and a caller that omits it, `inputs.tests` printed
+          `false`; a caller passing `with: {tests: true}` printed `false` too;
+          inverting the polarity to a `skip_tests` boolean printed `false` when
+          `true` was passed. String inputs in the SAME probe resolved correctly —
+          `mode` printed `buildx` and `runner` printed its full JSON array from
+          their declared defaults.
+
+          So for as long as this input was a boolean, `if: ... && inputs.tests` was
+          false on EVERY run, and the step below never executed. That is not a
+          hypothetical: on 2026-08-04 the last two `cicd.yml` runs of hanzoai/cloud,
+          commerce, console, gateway, hanzo.ai AND hanzoai/ci itself all reported
+          completed/success with `Test (per hanzo.yml)` = skipped. Every `test:`
+          block in the fleet was declared, was read, and had never once run — a
+          green over zero tests, which the step below exists specifically to refuse
+          when a SUITE is empty, and which had swallowed the whole gate.
+
+          A string sidesteps it on both planes with identical meaning, and the
+          comparison is against 'false' rather than a truthiness test so that the
+          expression callers already write — hanzoai/cloud's
+          `tests: ${{ github.ref_type != 'tag' }}`, which renders the strings
+          "true"/"false" — keeps working unchanged.
+        type: string
+        default: 'true'
       submodules:
         description: >-
           Passed straight to actions/checkout. Default '' is checkout's own
@@ -135,6 +161,16 @@ jobs:
         #     nested modules separately. Past it, `go get` fails everywhere
         #     with 'module source tree too large'; near it, this is the only
         #     warning anyone gets before the first consumer breaks.
+        #   conflictmarkers — a merge that was committed unresolved. `git add`
+        #     accepts a file that still carries git's own markers, and from then
+        #     on they are ordinary content: status clean, diff empty, both sides
+        #     of the merge shipping. It hides in generated and vendored files,
+        #     which are large, rarely opened and effectively unreviewed —
+        #     hanzoai/base carried `<<<<<<< HEAD` / `>>>>>>> upstream/master` at
+        #     lines 23807 and 23850 of a committed .d.ts. No compiler catches it
+        #     there: a .d.ts nothing imports is never parsed, and in YAML, JSON,
+        #     Markdown and every config format we ship the markers are silently
+        #     VALID content.
         #
         # Both proven RED against cloud@v1.801.424 (the real outage) and GREEN
         # against the repaired tree before landing here. They read the checkout
@@ -145,6 +181,7 @@ jobs:
           set -euo pipefail
           "$RUNNER_TEMP/ci/bin/ignoretracked" .
           "$RUNNER_TEMP/ci/bin/modsize" .
+          "$RUNNER_TEMP/ci/bin/conflictmarkers" .
 
       - name: Provision parse toolchain (jq + PyYAML)
         # This reusable parses the caller's hanzo.yml with python3 + PyYAML and
@@ -1008,7 +1045,7 @@ jobs:
         # it ran nothing AND nothing shows as having run. A gate that is not a test
         # gate — vet, lint, a build, a codegen-freshness check — says neither and is
         # untouched. To silence it legitimately, make the gate run a test.
-        if: inputs.mode != 'delegate' && inputs.tests
+        if: inputs.mode != 'delegate' && inputs.tests != 'false'
         run: |
           set -euo pipefail
           NOTHING='\[no test files\]|\[no tests to run\]|no tests ran|collected 0 items|No tests found|no test specified|running 0 tests|Tests:[[:space:]]+0 total|(^|[^0-9])0 (passing|passed)'
