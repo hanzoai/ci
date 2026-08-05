@@ -73,7 +73,7 @@ on:
           A string sidesteps it on both planes with identical meaning, and the
           comparison is against 'false' rather than a truthiness test so that the
           expression callers already write — hanzoai/cloud's
-          `tests: ${{ github.ref_type != 'tag' }}`, which renders the strings
+          `tests:` set from `github.ref_type != 'tag'`, which renders the strings
           "true"/"false" — keeps working unchanged.
         type: string
         default: 'true'
