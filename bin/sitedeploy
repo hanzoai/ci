@@ -133,6 +133,25 @@ fi
 
 : "${HANZO_DEPLOY_TOKEN:?HANZO_DEPLOY_TOKEN is unset. It is the ONE credential this needs; set it on the forge (git.hanzo.ai), which is what reads .hanzo/workflows — not on GitHub. Mint: POST /v1/keys {\"type\":\"secret\"}}"
 
+# ---- 0. ensure the project exists (self-provision) --------------------------
+# A brand-new slug has no project, and the enqueue below 404s on a missing one —
+# which is why every never-before-deployed site failed its first run. Create it
+# idempotently here instead: 200/201 the first time, 409 every time after, both
+# success. So a new site needs no out-of-band `POST /v1/projects`; committing the
+# workflow is enough. The repo is linked because the git-source enqueue requires
+# a linked project (deployGit rejects an unlinked one); SITEDEPLOY_REPO overrides
+# the origin for a forge checkout whose remote is not the canonical repo.
+repo="${SITEDEPLOY_REPO:-$(git remote get-url origin 2>/dev/null || true)}"
+pcode=$(curl -sS -o /tmp/sd-proj.json -w '%{http_code}' \
+  -X POST "$api/v1/projects" \
+  -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN" -H 'Content-Type: application/json' \
+  -d "$(jq -nc --arg s "$slug" --arg u "$repo" --arg b "${SITEDEPLOY_BRANCH:-main}" \
+        '{slug:$s, name:$s} + (if $u=="" then {} else {repo:{url:$u, branch:$b}} end)')")
+case "$pcode" in
+  200|201|409) : ;;  # created now, or already there — either is the state we need
+  *) echo "::error::ensure project $slug returned HTTP $pcode"; head -c 400 /tmp/sd-proj.json; echo; exit 1 ;;
+esac
+
 # ---- 1. enqueue -------------------------------------------------------------
 # 202 Accepted is the success code: the deployment is queued, not live. bucket
 # and prefix come FROM cloud (sitePrefix(org, slug) is server-side) — never guess
