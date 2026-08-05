@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# conflictmarkers — refuse a repo that has committed an unresolved merge.
+# One implementation, every caller.
+#
+#   conflictmarkers [dir]
+#
+# WHAT THIS CATCHES
+#
+# `git merge` writes its disagreement INTO the file and stops. Resolving means
+# editing those lines out; nothing forces you to. `git add` on a file that still
+# contains them is accepted without complaint, and from that moment the markers
+# are ordinary committed content — `git status` is clean, `git diff` is empty,
+# and the conflict is now a permanent feature of the branch.
+#
+# It survives because of WHERE it lands. The file is usually generated or
+# vendored — large, rarely opened, excluded from review by its own size. Nobody
+# reads line 23,807 of a .d.ts. hanzoai/base carried exactly this on main:
+#
+#   plugins/jsvm/internal/types/generated/types.d.ts:23807   <<<<<<< HEAD
+#   plugins/jsvm/internal/types/generated/types.d.ts:23850   >>>>>>> upstream/master
+#
+# from an upstream merge nobody finished, sitting in the shipped package.
+#
+# The compilers are no help, which is the whole problem. In TypeScript the
+# markers are a syntax error — but a .d.ts nothing imports is never parsed, so
+# there is no error to see. In Go they are a parse error only in a file the
+# build reaches. In YAML, JSON, Markdown, SQL, HTML and every config format we
+# ship, they are silently VALID content: a marker in a values file is a key
+# nobody notices, and a marker in a Markdown doc renders as text.
+#
+# So the defect class is "both sides of a merge shipped, and nothing in the
+# pipeline had an opinion". That is the same shape as its two siblings in this
+# step — a declaration and reality disagreeing, with no reader positioned to
+# notice — which is why it belongs here rather than in any one repo's gate.
+#
+# WHAT IT LOOKS FOR, AND WHY NOT MORE
+#
+# Only the two LABELLED markers git actually writes:
+#
+#   ^<<<<<<< <label>     the start marker, seven '<' then a space
+#   ^>>>>>>> <label>     the end marker, seven '>' then a space
+#
+# The middle `=======` divider is deliberately NOT matched. It is seven bare
+# equals signs at the start of a line, which is also how reStructuredText and
+# Setext-style Markdown underline a heading — a real and common shape in our
+# docs. Matching it would fail repos that have nothing wrong with them, and a
+# gate that fails what ought to pass is a gate that gets switched off. The two
+# angle-bracket forms carry a label and have no such collision.
+#
+# Exactly seven, anchored at column 1, followed by a space: `<<<<<<<<` (eight,
+# a heredoc or a C++ stream) does not match, and neither does an indented
+# mention inside a comment explaining conflict markers — which is what lets this
+# file describe them without flagging itself.
+#
+# Tracked files only, via `git grep`, so a stray marker in an untracked scratch
+# file or in node_modules cannot fail a build. `-I` skips binaries.
+set -euo pipefail
+
+cd "${1:-.}"
+
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+  echo "conflictmarkers: not a git work tree ($(pwd)) — skipping"; exit 0; }
+
+# Built from a variable rather than written literally, so this script is not its
+# own first finding when it scans the repo that carries it.
+L=$(printf '<%.0s' $(seq 7))
+R=$(printf '>%.0s' $(seq 7))
+
+hits=$(git grep -I -n -E "^(${L}|${R}) " -- . || true)
+
+if [ -n "$hits" ]; then
+  echo "::error::committed merge-conflict markers — an unresolved merge is in the tree"
+  echo "$hits" | while IFS= read -r line; do
+    echo "  $line"
+    echo "::error file=${line%%:*}::committed conflict marker"
+  done
+  echo
+  echo "Resolve the merge and commit the result. If the file is GENERATED, do not"
+  echo "hand-edit it — re-run its generator and commit that."
+  exit 1
+fi
+
+echo "OK: no committed conflict markers ($(git ls-files | wc -l) tracked files)"

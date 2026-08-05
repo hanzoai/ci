@@ -42,15 +42,41 @@ on:
       tests:
         description: >-
           Run the `test:` block. Default true, and a caller should leave it that
-          way. false asserts that THIS EXACT COMMIT was already gated before this
+          way. 'false' asserts that THIS EXACT COMMIT was already gated before this
           run — it does not mean "ship untested". The one shape that holds today
           is hanzoai/cloud's release: clients/platform/release.go mints the v* tag
           only after that SHA passed the gate on main AND built AND smoked, so the
           tag build would re-test a commit already proven, at the cost of a
-          3108-package link storm. Passing false there runs the gate once instead
+          3108-package link storm. Passing 'false' there runs the gate once instead
           of twice; passing it anywhere else runs it zero times.
-        type: boolean
-        default: true
+
+          STRING, NOT BOOLEAN, AND THAT IS LOAD-BEARING. git.hanzo.ai resolves
+          EVERY `type: boolean` workflow_call input to false — not just an omitted
+          one carrying a default, but an explicitly passed `true` as well. Measured
+          in isolation (z/inputprobe, runs 27365 and 27382): with `type: boolean,
+          default: true` and a caller that omits it, `inputs.tests` printed
+          `false`; a caller passing `with: {tests: true}` printed `false` too;
+          inverting the polarity to a `skip_tests` boolean printed `false` when
+          `true` was passed. String inputs in the SAME probe resolved correctly —
+          `mode` printed `buildx` and `runner` printed its full JSON array from
+          their declared defaults.
+
+          So for as long as this input was a boolean, `if: ... && inputs.tests` was
+          false on EVERY run, and the step below never executed. That is not a
+          hypothetical: on 2026-08-04 the last two `cicd.yml` runs of hanzoai/cloud,
+          commerce, console, gateway, hanzo.ai AND hanzoai/ci itself all reported
+          completed/success with `Test (per hanzo.yml)` = skipped. Every `test:`
+          block in the fleet was declared, was read, and had never once run — a
+          green over zero tests, which the step below exists specifically to refuse
+          when a SUITE is empty, and which had swallowed the whole gate.
+
+          A string sidesteps it on both planes with identical meaning, and the
+          comparison is against 'false' rather than a truthiness test so that the
+          expression callers already write — hanzoai/cloud's
+          `tests: ${{ github.ref_type != 'tag' }}`, which renders the strings
+          "true"/"false" — keeps working unchanged.
+        type: string
+        default: 'true'
       submodules:
         description: >-
           Passed straight to actions/checkout. Default '' is checkout's own
@@ -119,6 +145,43 @@ jobs:
           [ -x "$RUNNER_TEMP/ci/bin/imgver" ] \
             || { echo "::error::could not fetch hanzoai/ci@${ref} (bin/imgver) from any host"; exit 1; }
           echo "CI_HOME=$RUNNER_TEMP/ci" >> "$GITHUB_ENV"
+
+      - name: Structural invariants (the repo agrees with itself)
+        # Two cheap refusals, run before anything is built or pushed, for a
+        # defect class no later stage can see: a declaration and the reality it
+        # describes disagreeing in silence.
+        #
+        #   ignoretracked — content the repo's OWN .gitignore matches but the
+        #     index still tracks. An ignore rule does not untrack what is
+        #     already tracked, so the bulk ships in every release while
+        #     `git status` stays clean. hanzoai/cloud carried 361 MB this way
+        #     for 6 days — past Go's 500 MiB module-zip ceiling, making nine
+        #     consecutive releases unfetchable by every consumer.
+        #   modsize — each Go module tree measured against that same ceiling,
+        #     nested modules separately. Past it, `go get` fails everywhere
+        #     with 'module source tree too large'; near it, this is the only
+        #     warning anyone gets before the first consumer breaks.
+        #   conflictmarkers — a merge that was committed unresolved. `git add`
+        #     accepts a file that still carries git's own markers, and from then
+        #     on they are ordinary content: status clean, diff empty, both sides
+        #     of the merge shipping. It hides in generated and vendored files,
+        #     which are large, rarely opened and effectively unreviewed —
+        #     hanzoai/base carried `<<<<<<< HEAD` / `>>>>>>> upstream/master` at
+        #     lines 23807 and 23850 of a committed .d.ts. No compiler catches it
+        #     there: a .d.ts nothing imports is never parsed, and in YAML, JSON,
+        #     Markdown and every config format we ship the markers are silently
+        #     VALID content.
+        #
+        # Both proven RED against cloud@v1.801.424 (the real outage) and GREEN
+        # against the repaired tree before landing here. They read the checkout
+        # only — no network, subsecond on a healthy repo — and they FAIL the
+        # run rather than annotate it, because a warning nobody reads is the
+        # same silence one level up.
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/ci/bin/ignoretracked" .
+          "$RUNNER_TEMP/ci/bin/modsize" .
+          "$RUNNER_TEMP/ci/bin/conflictmarkers" .
 
       - name: Provision parse toolchain (jq + PyYAML)
         # This reusable parses the caller's hanzo.yml with python3 + PyYAML and
@@ -336,23 +399,11 @@ jobs:
             fi
             echo "::warning::KMS login failed (org=$ORG client=$KMS_CLIENT_ID) — cross-org private deps & deploy unavailable"; exit 0
           fi
-          # KMS is embedded in hanzoai/cloud now (HIP-0106, cloud/apps/kms), and its
-          # contract differs from the standalone service in two ways that BOTH fail
-          # silently — you get an empty string, which every caller below already
-          # treats as "not in KMS":
-          #
-          #   url   /v1/kms/secrets/<path>/<name>  — the org comes from the TOKEN,
-          #         not the url. The old /v1/kms/orgs/<org>/... form 404s, and -sf
-          #         turns that into empty output.
-          #   body  {"name","env","value"} — flat. `.secret.value` selects nothing.
-          #
-          # Reading the OLD host is worse than reading nothing: the two instances
-          # hold DIFFERENT values under the same name, and the standalone copy of
-          # deploy/EVENT_INGEST_KEY is stale — cloud rejects it at ingest with 403,
-          # so a build that "found" a key still ships one that cannot write.
-          #
-          # Try the embedded shape first and fall back to the standalone one, so a
-          # repo still pointed at the old host keeps working while the fleet moves.
+          # Embedded KMS (HIP-0106): org from the token, flat {"value"}. The old
+          # /v1/kms/orgs/<org>/... + .secret.value pair 404s and `curl -sf` turns
+          # that into "" — which every caller reads as "not in KMS". The standalone
+          # host also holds a STALE key cloud 403s, so reading it ships a dead one.
+          # Embedded first, standalone as fallback.
           get() {
             v=$(curl -sf "$KMS_ENDPOINT/v1/kms/secrets/$PATHQ/$1?env=$ENV" -H "Authorization: Bearer $TOKEN" | jq -r '.value // empty')
             if [ -z "$v" ]; then
@@ -994,7 +1045,7 @@ jobs:
         # it ran nothing AND nothing shows as having run. A gate that is not a test
         # gate — vet, lint, a build, a codegen-freshness check — says neither and is
         # untouched. To silence it legitimately, make the gate run a test.
-        if: inputs.mode != 'delegate' && inputs.tests
+        if: inputs.mode != 'delegate' && inputs.tests != 'false'
         run: |
           set -euo pipefail
           NOTHING='\[no test files\]|\[no tests to run\]|no tests ran|collected 0 items|No tests found|no test specified|running 0 tests|Tests:[[:space:]]+0 total|(^|[^0-9])0 (passing|passed)'
