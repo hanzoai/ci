@@ -67,6 +67,24 @@ test:
     # IfNotPresent never picks up and no reader can see. Offline and
     # deterministic: the registry floor is injected, so it needs no network.
     run: bash bin/imgver_test.sh
+  - name: vendormark
+    # bin/vendormark is the gate the build lane runs against every checkout: it
+    # refuses a site-generator vendor's branding in a tracked path, in tracked
+    # content, in a commit message, in an author identity or in a Co-authored-by
+    # trailer. Five shipped sites carried it — one serving the vendor's upload
+    # folder as its favicon — and clearing them took a history rewrite and a
+    # force-push of every branch.
+    #
+    # The suite pins the refusals AND the allowances, and the allowances are the
+    # larger half on purpose. The vendor's name is also an ordinary English
+    # adjective: across the 1,065 repos swept it appears innocently in tokenizer
+    # vocabularies, word lists, ML corpora, packed public-suffix data and an
+    # upstream Clerk bundle's list of other people's dev hosts. A gate that reds
+    # a fifth of the estate is a gate someone switches off, so the content rules
+    # are only strings that cannot occur in prose, and two candidate rules were
+    # measured and DROPPED for redding that Clerk bundle. Offline and
+    # deterministic: temp repos, no network.
+    run: bash bin/vendormark_test.sh
   - name: gover
     # bin/gover is the gate the build lane runs against every Dockerfile before
     # it builds: it refuses a Go builder image older than the go.mod it
