@@ -867,6 +867,15 @@ jobs:
         # from github.com. Both rules are optional and independent: no FORGE_TOKEN
         # (or a github.com-hosted run, where the server IS github.com) leaves the
         # old behaviour exactly as it was.
+        #
+        # SPLIT THE SERVER, do not strip a scheme you assumed. GITHUB_SERVER_URL
+        # on this fleet's runners is `http://hanzo-git.hanzo.svc` — the forge's
+        # in-cluster address, plain http — and a `${SERVER#https://}` that only
+        # knows the https spelling passes it through whole, producing
+        # `https://http://hanzo-git.hanzo.svc/...` and a git that resolves the host
+        # `http`. Take the scheme and the host as the two values they are, and
+        # compare the HOST against github.com so the guard cannot be fooled by a
+        # spelling either.
         if: inputs.mode != 'delegate' && hashFiles('go.mod') != ''
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
@@ -876,13 +885,14 @@ jobs:
           set -uo pipefail
           CFG="$RUNNER_TEMP/gitconfig-go-test"; : > "$CFG"
           SERVER="${GITHUB_SERVER_URL:-https://github.com}"
+          SCHEME="${SERVER%%://*}"; HOST="${SERVER#*://}"; HOST="${HOST%/}"
           wrote=0
 
-          if [ -n "${FORGE_TOKEN:-}" ] && [ "$SERVER" != "https://github.com" ]; then
+          if [ -n "${FORGE_TOKEN:-}" ] && [ "$HOST" != "github.com" ]; then
             GIT_CONFIG_GLOBAL="$CFG" git config --global \
-              url."https://x:${FORGE_TOKEN}@${SERVER#https://}/${OWNER}/".insteadOf \
+              url."${SCHEME}://x:${FORGE_TOKEN}@${HOST}/${OWNER}/".insteadOf \
               "https://github.com/${OWNER}/"
-            echo "${OWNER}/* modules resolve from ${SERVER}"
+            echo "${OWNER}/* modules resolve from ${SCHEME}://${HOST}"
             wrote=1
           fi
 
