@@ -38,19 +38,31 @@
 # Only the two LABELLED markers git actually writes:
 #
 #   ^<<<<<<< <label>     the start marker, seven '<' then a space
+#   ^=======              the divider, seven bare equals
 #   ^>>>>>>> <label>     the end marker, seven '>' then a space
 #
-# The middle `=======` divider is deliberately NOT matched. It is seven bare
-# equals signs at the start of a line, which is also how reStructuredText and
-# Setext-style Markdown underline a heading — a real and common shape in our
-# docs. Matching it would fail repos that have nothing wrong with them, and a
-# gate that fails what ought to pass is a gate that gets switched off. The two
-# angle-bracket forms carry a label and have no such collision.
+# ALL THREE, IN THAT ORDER, EACH ON ITS OWN LINE. Not any one of them — the
+# whole shape. That is not belt-and-braces, it is the difference between a gate
+# and a nuisance, and it was measured the expensive way: matching the start
+# marker ALONE failed hanzoai/app, whose builder tests carry
 #
-# Exactly seven, anchored at column 1, followed by a space: `<<<<<<<<` (eight,
-# a heredoc or a C++ stream) does not match, and neither does an indented
-# mention inside a comment explaining conflict markers — which is what lets this
-# file describe them without flagging itself.
+#   <<<<<<< START_TITLE index.html >>>>>>> END_TITLE
+#
+# as literal fixture data. That line opens with seven '<' and a space and is
+# not a merge conflict — both markers sit on ONE line, which is a thing git
+# never writes. A start marker that also carries an end marker is therefore
+# excluded outright, and a file must show the divider and a separate end line
+# before this refuses it.
+#
+# The divider is only ever matched as part of that conjunction, never alone:
+# seven bare equals signs at column 1 is also how reStructuredText and Setext
+# Markdown underline a heading, and failing every doc in the estate is how a
+# gate gets switched off.
+#
+# Exactly seven, anchored at column 1: `<<<<<<<<` (eight — a heredoc, a C++
+# stream) does not match, and neither does an indented mention inside a comment
+# explaining conflict markers, which is what lets this file describe them
+# without flagging itself.
 #
 # Tracked files only, via `git grep`, so a stray marker in an untracked scratch
 # file or in node_modules cannot fail a build. `-I` skips binaries.
@@ -61,18 +73,35 @@ cd "${1:-.}"
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
   echo "conflictmarkers: not a git work tree ($(pwd)) — skipping"; exit 0; }
 
-# Built from a variable rather than written literally, so this script is not its
+# Built from variables rather than written literally, so this script is not its
 # own first finding when it scans the repo that carries it.
 L=$(printf '<%.0s' $(seq 7))
+E=$(printf '=%.0s' $(seq 7))
 R=$(printf '>%.0s' $(seq 7))
 
-hits=$(git grep -I -n -E "^(${L}|${R}) " -- . || true)
+# Candidate files: those carrying a start marker that is NOT also an end marker
+# on the same line. `-l` for names only; the line numbers come later, per file.
+cands=$(git grep -I -l -E "^${L} " -- . || true)
 
-if [ -n "$hits" ]; then
+bad=""
+for f in $cands; do
+  grep -qE "^${L} " -- "$f" 2>/dev/null || continue
+  # The same-line form (app's fixture) is not a conflict. Require at least one
+  # start line that does not also carry an end marker.
+  grep -E "^${L} " -- "$f" 2>/dev/null | grep -qv -- "$R" || continue
+  # And require the rest of the shape: a bare divider and a separate end line.
+  grep -qE "^${E}$" -- "$f" 2>/dev/null || continue
+  grep -E "^${R} " -- "$f" 2>/dev/null | grep -qv -- "$L" || continue
+  bad="$bad $f"
+done
+
+if [ -n "$bad" ]; then
   echo "::error::committed merge-conflict markers — an unresolved merge is in the tree"
-  echo "$hits" | while IFS= read -r line; do
-    echo "  $line"
-    echo "::error file=${line%%:*}::committed conflict marker"
+  for f in $bad; do
+    grep -nE "^(${L} |${E}$|${R} )" -- "$f" | while IFS= read -r line; do
+      echo "  $f:$line"
+    done
+    echo "::error file=${f}::committed conflict marker"
   done
   echo
   echo "Resolve the merge and commit the result. If the file is GENERATED, do not"
