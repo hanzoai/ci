@@ -104,6 +104,14 @@ permissions:
 jobs:
   cicd:
     runs-on: ${{ fromJson(inputs.runner) }}
+    env:
+      # corepack fetches the pnpm/yarn TARBALL ITSELF from registry.npmjs.org,
+      # and it does not read .npmrc to do it — so 317 repos that pin
+      # `packageManager` reach out to npmjs on every install no matter how
+      # carefully their registry is configured. This is the one variable that
+      # closes that hole; without it "installs go through our registry" is true
+      # of the dependencies and false of the package manager fetching them.
+      COREPACK_NPM_REGISTRY: https://pkg.hanzo.ai
     steps:
       - uses: actions/checkout@v4
         with:
@@ -427,6 +435,18 @@ jobs:
           # ask KMS twice.
           SITE_DECL="$(yq -r '.site | type' hanzo.yml 2>/dev/null || echo '!!null')"
           if [ -n "$(yq -r '.bucket // ""' hanzo.yml 2>/dev/null || true)" ] || [ "$SITE_DECL" = '!!map' ]; then
+            # The registry credential comes from KMS like every other secret —
+            # the ONLY things that live in GitHub are KMS_CLIENT_ID/SECRET.
+            # Named here so a repo with no kubeconfig (most of them) can still
+            # reach registry.hanzo.ai; the kubeconfig read below stays as the
+            # fallback for repos provisioned before these names existed.
+            for k in REGISTRY_USER REGISTRY_PASSWORD; do
+              v=$(get "$k")
+              if [ -n "$v" ]; then
+                [ "$k" = REGISTRY_PASSWORD ] && echo "::add-mask::$v"
+                echo "$k=$v" >> "$GITHUB_ENV"
+              fi
+            done
             for k in S3_ADMIN_ACCESS_KEY S3_ADMIN_SECRET_KEY; do
               v=$(get "$k")
               if [ -n "$v" ]; then echo "::add-mask::$v"; echo "$k=$v" >> "$GITHUB_ENV"; fi
@@ -521,14 +541,20 @@ jobs:
             echo "::notice::KMS GHCR token login failed — keeping the earlier login"
           fi
 
-      - name: Native registry credential (oci.hanzo.ai)
+      - name: Native registry credential (registry.hanzo.ai)
         if: inputs.mode != 'delegate'
         env:
           KUBECONFIG: ${{ steps.kms.outputs.kubeconfig }}
-          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
-          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          # KMS first (exported to GITHUB_ENV by the step above), GitHub secret
+          # second. `env:` here cannot see GITHUB_ENV from THIS step's own env
+          # block, so the KMS values are read out of the environment in `run:`.
+          GH_REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          GH_REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
         run: |
           set -uo pipefail
+          # REGISTRY_USER/PASSWORD may already be in the environment from KMS.
+          REGISTRY_USER="${REGISTRY_USER:-${GH_REGISTRY_USER:-}}"
+          REGISTRY_PASSWORD="${REGISTRY_PASSWORD:-${GH_REGISTRY_PASSWORD:-}}"
           # Direct credential first (repo/org secret — works on private repos,
           # where the Free plan hides org secrets... including these; private
           # repos set them at REPO level). KMS-kubeconfig read is the fallback.
@@ -537,14 +563,14 @@ jobs:
             # cred) must never fail the run — the image still pushes to GHCR, the
             # primary. Without this guard, bash -e aborts the step and SKIPS the
             # build entirely (a registry hiccup takes the whole lane red).
-            if echo "$REGISTRY_PASSWORD" | docker login oci.hanzo.ai -u "$REGISTRY_USER" --password-stdin; then
+            if echo "$REGISTRY_PASSWORD" | docker login registry.hanzo.ai -u "$REGISTRY_USER" --password-stdin; then
               echo "MIRROR_OK=1" >> "$GITHUB_ENV"
             else
               echo "::notice::registry.hanzo.ai login failed — mirror skipped (GHCR-only push)"
             fi
             exit 0
           fi
-          [ -z "${KUBECONFIG:-}" ] && { echo "::warning::no registry credential and no kubeconfig — image will NOT reach oci.hanzo.ai (ghcr only)"; exit 0; }
+          [ -z "${KUBECONFIG:-}" ] && { echo "::warning::no registry credential and no kubeconfig — image will NOT reach registry.hanzo.ai (ghcr only)"; exit 0; }
           # Bare runners ship no kubectl — same static provision the deploy
           # step uses.
           command -v kubectl >/dev/null 2>&1 || {
@@ -555,13 +581,13 @@ jobs:
           }
           CFG=$(kubectl -n hanzo get secret registry-credentials                   -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null | base64 -d || true)
           if [ -z "$CFG" ]; then
-            echo "::warning::registry-credentials not readable from this kubeconfig — image will NOT reach oci.hanzo.ai (ghcr only)"; exit 0
+            echo "::warning::registry-credentials not readable from this kubeconfig — image will NOT reach registry.hanzo.ai (ghcr only)"; exit 0
           fi
           USERPASS=$(echo "$CFG" | jq -r '.auths["registry.hanzo.ai"].auth // empty' | base64 -d)
-          [ -z "$USERPASS" ] && { echo "::warning::no registry auth in dockerconfig — image will NOT reach oci.hanzo.ai (ghcr only)"; exit 0; }
+          [ -z "$USERPASS" ] && { echo "::warning::no registry auth in dockerconfig — image will NOT reach registry.hanzo.ai (ghcr only)"; exit 0; }
           echo "::add-mask::${USERPASS#*:}"
           # Best-effort: login failure → skip mirror, never fail the run (see above).
-          if echo "${USERPASS#*:}" | docker login oci.hanzo.ai -u "${USERPASS%%:*}" --password-stdin; then
+          if echo "${USERPASS#*:}" | docker login registry.hanzo.ai -u "${USERPASS%%:*}" --password-stdin; then
             echo "MIRROR_OK=1" >> "$GITHUB_ENV"
           else
             echo "::notice::registry.hanzo.ai login failed — mirror skipped (GHCR-only push)"
@@ -736,7 +762,7 @@ jobs:
             echo "| \`$pin\` | \`$dig\` |" >> "$RUNNER_TEMP/pins.md"
             # Dual-host: mirror the exact tag set to registry.hanzo.ai (server-
             # side manifest copy — no rebuild). ghcr.io/<org>/<name> →
-            # oci.hanzo.ai/<org>/<name>; public consumers keep ghcr, the fleet
+            # registry.hanzo.ai/<org>/<name>; public consumers keep ghcr, the fleet
             # is migrating to pull from ours. A skip here is now a WARNING, not
             # a notice: an image that never reaches our registry is the reason
             # a deploy still depends on GitHub, and that should be visible in
@@ -750,10 +776,20 @@ jobs:
                   | tar -xz -C "$HOME/.local/bin" crane
                 export PATH="$HOME/.local/bin:$PATH"
               }
-              mrepo="oci.hanzo.ai/${repo#*/}"
+              # ONE mapping, stated once. The GHCR org and the registry org are
+              # not the same word — ghcr.io/hanzoai/x mirrors to
+              # registry.hanzo.ai/hanzo/x — and a second copy of this table is
+              # how a push path and a pin drift into naming different images.
+              rorg="${repo#*/}"; rname="${rorg#*/}"; rorg="${rorg%%/*}"
+              case "$rorg" in
+                hanzoai) rorg=hanzo ;;
+                zooai)   rorg=zoo ;;
+                *)       ;;   # bootnode, lux-private, ... map to themselves
+              esac
+              mrepo="registry.hanzo.ai/$rorg/$rname"
               echo "$TAGS" | tr ' ' '\n' | grep -v '^-t$' | grep -v '^$' | while read -r ref; do
                 crane copy "$ref" "${mrepo}:${ref##*:}" \
-                  || echo "::warning::$ref did not reach oci.hanzo.ai (ghcr push unaffected)"
+                  || echo "::warning::$ref did not reach registry.hanzo.ai (ghcr push unaffected)"
               done
             fi
             echo "::endgroup::"
