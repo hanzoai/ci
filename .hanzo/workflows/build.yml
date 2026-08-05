@@ -179,6 +179,18 @@ jobs:
         #     there: a .d.ts nothing imports is never parsed, and in YAML, JSON,
         #     Markdown and every config format we ship the markers are silently
         #     VALID content.
+        #   vendormark — a site-generator vendor's branding left in the tree.
+        #     Several sites began as output from a hosted "prompt to React app"
+        #     generator, which signs its work in four places at once: an asset
+        #     folder named after the vendor (so its name is in every image URL,
+        #     and on one site in the FAVICON, so it was in every browser tab), a
+        #     build plugin in package.json, an injected third-party <script>,
+        #     and the commit messages, author identities and Co-authored-by
+        #     trailers of its bot. The last survives any amount of tidying the
+        #     working tree — a repo can render a perfect page and still say in
+        #     `git log` who really wrote it. Removing it needed a history
+        #     rewrite and a force-push of every branch; this is so that is never
+        #     needed twice.
         #
         # Both proven RED against cloud@v1.801.424 (the real outage) and GREEN
         # against the repaired tree before landing here. They read the checkout
@@ -190,6 +202,7 @@ jobs:
           "$RUNNER_TEMP/ci/bin/ignoretracked" .
           "$RUNNER_TEMP/ci/bin/modsize" .
           "$RUNNER_TEMP/ci/bin/conflictmarkers" .
+          "$RUNNER_TEMP/ci/bin/vendormark" .
 
       - name: Provision parse toolchain (jq + PyYAML)
         # This reusable parses the caller's hanzo.yml with python3 + PyYAML and
