@@ -839,16 +839,62 @@ jobs:
         # unset) — so `go vet` dies with `could not read Username for github.com`.
         # Reuse the SAME token here for the runner's git (GIT_TOKEN, set by the
         # KMS step above; GH_PAT fallback). No-op when neither is present.
+        #
+        # AND OUR OWN MODULES RESOLVE FROM OUR OWN FORGE. A module path is a NAME,
+        # not an address: `github.com/<owner>/x` is what the package is called, and
+        # which host git dials for it is a separate decision. On a forge runner
+        # that decision is the forge — the forge is where the code canonically
+        # lives, and github.com is fed by a mirror that trails it, sometimes by
+        # hours and sometimes not at all.
+        #
+        # Measured, on the first run in which this step's gate had ever actually
+        # executed: hanzoai/cloud's go.mod carries `github.com/hanzoai/dashscopego
+        # v0.6.0` as an indirect dependency. git.hanzo.ai serves it; github.com
+        # answers `Repository not found`. So `go vet` died before a single test
+        # ran, on a module that was never missing. Its own caller already knew the
+        # answer — cloud's `containment` and `reach` jobs each make this exact
+        # substitution, with a comment about the nine consecutive releases an
+        # ACL drift on ONE sibling module once blocked — but the gate that runs
+        # its tests reached the modules through a different door.
+        #
+        # go.sum is what makes this safe rather than merely convenient: the forge
+        # serves the same objects, so the fetched zip hashes to the h1: line
+        # already committed. A forge serving different bytes fails the build
+        # loudly instead of shipping them.
+        #
+        # Longest prefix wins in git, so the owner-scoped forge rule outranks the
+        # bare github.com rule beneath it and every OTHER module still resolves
+        # from github.com. Both rules are optional and independent: no FORGE_TOKEN
+        # (or a github.com-hosted run, where the server IS github.com) leaves the
+        # old behaviour exactly as it was.
         if: inputs.mode != 'delegate' && hashFiles('go.mod') != ''
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
+          FORGE_TOKEN: ${{ secrets.FORGE_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
         run: |
           set -uo pipefail
-          TOKEN="${GIT_TOKEN:-${GH_PAT:-}}"
-          if [ -z "$TOKEN" ]; then echo "no git token — public modules only"; exit 0; fi
           CFG="$RUNNER_TEMP/gitconfig-go-test"; : > "$CFG"
-          GIT_CONFIG_GLOBAL="$CFG" git config --global \
-            url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+          SERVER="${GITHUB_SERVER_URL:-https://github.com}"
+          wrote=0
+
+          if [ -n "${FORGE_TOKEN:-}" ] && [ "$SERVER" != "https://github.com" ]; then
+            GIT_CONFIG_GLOBAL="$CFG" git config --global \
+              url."https://x:${FORGE_TOKEN}@${SERVER#https://}/${OWNER}/".insteadOf \
+              "https://github.com/${OWNER}/"
+            echo "${OWNER}/* modules resolve from ${SERVER}"
+            wrote=1
+          fi
+
+          TOKEN="${GIT_TOKEN:-${GH_PAT:-}}"
+          if [ -n "$TOKEN" ]; then
+            GIT_CONFIG_GLOBAL="$CFG" git config --global \
+              url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+            echo "github.com modules authenticated"
+            wrote=1
+          fi
+
+          [ "$wrote" = 1 ] || { echo "no git credential — public modules only"; exit 0; }
           { echo "GIT_CONFIG_GLOBAL=$CFG"; echo "GIT_CONFIG_NOSYSTEM=1"; } >> "$GITHUB_ENV"
           echo "runner git authenticated for private Go modules"
 
