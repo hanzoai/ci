@@ -593,216 +593,6 @@ jobs:
             echo "::notice::registry.hanzo.ai login failed — mirror skipped (GHCR-only push)"
           fi
 
-      - name: Build & push images (per hanzo.yml)
-        if: inputs.mode != 'delegate'
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
-        run: |
-          set -euo pipefail
-          # Test-only callers (hanzo.yml without `images:` — e.g. a repo whose
-          # image lane lives in its own release.yml, or a pure library) skip the
-          # build step entirely instead of exploding on a null .images.
-          if [ "$(yq -r '.images // [] | length' hanzo.yml 2>/dev/null || echo 0)" = "0" ]; then
-            echo "::notice::no images: in hanzo.yml — test-only caller, skipping build"; exit 0
-          fi
-          # Build-time private cross-org Go module read (the buildx `gh_token`
-          # secret): prefer the KMS-fetched GIT_TOKEN, else fall back to the org
-          # GH_PAT — the SAME BuildKit gh_token cloud's release.yml uses (proven
-          # working). Keeps image builds green when the KMS deploy-cred fetch is
-          # unavailable (a repo with a private cross-org dep like hanzoai/cloud
-          # otherwise fails `go mod tidy` with git exit 128 in the buildx stage).
-          # No-op for public-only builds when both are empty. Exported so the
-          # `--secret id=gh_token,env=GIT_TOKEN` below reads it from the env.
-          export GIT_TOKEN="${GIT_TOKEN:-${GH_PAT:-}}"
-          SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
-          IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo 1 || echo 0)
-          REL="${{ github.ref_name }}"   # the git tag, verbatim: v1.26.19
-          VER="${REL#v}"                 # v-stripped alias: 1.26.19
-          yq -o=json -I=0 '.images' hanzo.yml | jq -c '.[]' | while read -r img; do
-            name=$(echo "$img"|jq -r .name); ctx=$(echo "$img"|jq -r .context)
-            df=$(echo "$img"|jq -r '.dockerfile // (.context+"/Dockerfile")'); repo=$(echo "$img"|jq -r .repo)
-            # tag-suffix is OPTIONAL (most repos ship a single variant). When set
-            # (e.g. "ce"/"ee") it qualifies every tag; when absent the tags are
-            # clean (no trailing dash). Build + deploy must agree on this shape.
-            sfx=$(echo "$img"|jq -r '."tag-suffix" // ""')
-            # platforms is OPT-IN per image in hanzo.yml (default: amd64 only, so
-            # every existing repo's tag shape "-amd64" is UNCHANGED). Set e.g.
-            #   platforms: [linux/amd64, linux/arm64]
-            # to emit a multi-arch MANIFEST LIST — one digest serving both arches.
-            # DOKS has no arm64 nodes, so arm64 builds via buildx QEMU emulation
-            # (binfmt set up below); pure-Go (CGO_ENABLED=0) Dockerfiles that honor
-            # $TARGETARCH cross-compile natively (fast, no emulation). For true
-            # native-speed arm64, register a bare-metal arm64 host (spark/GB10) as
-            # the hanzo-build-linux-arm64 self-hosted runner (values-build-arm64.yaml).
-            plats=$(echo "$img"|jq -r '(.platforms // ["linux/amd64"]) | join(",")')
-            # ---- Refuse a Go builder older than the module it compiles -------
-            # The official golang images set GOTOOLCHAIN=local, so a go.mod
-            # requiring a newer Go than the base image does not degrade — it
-            # dies mid-build with "go.mod requires go >= X (running Y;
-            # GOTOOLCHAIN=local)". hanzoai/visor v1.108.16 is the shipped
-            # instance, and it is invisible before the image build: every local
-            # `go build` succeeds because a dev box runs GOTOOLCHAIN=auto and
-            # just downloads what the module asks for. So the break is
-            # introduced by editing go.mod — a file with nothing to do with
-            # Docker — and found by a red release build.
-            #
-            # It is not one repo's problem either: a sweep of every Dockerfile
-            # across the orgs found 54 below their own go.mod in 23 repos, and
-            # only 7 of 223 Go builder stages set GOTOOLCHAIN=auto. Fixing those
-            # fixes today; this line is what makes the 55th impossible.
-            #
-            # Checked here, before any build work, so the run fails in seconds
-            # rather than after binfmt, a version derivation and a layer cache.
-            "$CI_HOME/bin/gover" "$df" "$ctx"
-            # ---- The semver this build publishes ----------------------------
-            # A branch build used to publish sha-<short7> and nothing else, so an
-            # image only earned a version when a human remembered to cut a git
-            # tag. That is the whole reason 14 of the fleet's 117 pins named a
-            # commit instead of a release: not drift, just the only tag CI ever
-            # offered them. Every build now publishes a version too, and the
-            # sha- tag stays beside it for forensics.
-            #
-            # The number is DERIVED, never typed, by bin/imgver — the ONE
-            # implementation, shared with the hand-rolled
-            # .hanzo/workflows/deploy.yml that 11 repos carry instead of importing
-            # this workflow (see .github/actions/imgver). Written twice it would be
-            # right twice and then wrong once, which is exactly how `sha-<short>`
-            # became the only tag those repos ever published. Read that script for
-            # the rule; it is monotonic against the repo's manifest AND the
-            # registry, so one tag can never cover two digests.
-            ver=""
-            if [ "$IS_TAG" = 1 ]; then
-              # Release build: the git tag IS the version. Identity in, identity
-              # out — deriving here would publish a number nobody asked for.
-              :
-            else
-              # An explicit `version:` on the image entry wins over the repo-wide
-              # one; both are optional, and imgver falls back to the manifest.
-              iv=$(echo "$img"|jq -r '.version // ""')
-              [ -z "$iv" ] && iv=$(yq -r '.version // ""' hanzo.yml)
-              ver=$(IMGVER_VERSION="$iv" "$CI_HOME/bin/imgver" "$repo" "$ctx")
-            fi
-            if [ "$plats" = "linux/amd64" ]; then
-              # single-arch: keep the exact legacy tag shape (-amd64) deploys expect.
-              TAGS="-t $repo:sha-${SHORT}-amd64${sfx:+-$sfx} -t $repo:${sfx:+$sfx-}latest"
-            else
-              # multi-arch: one arch-neutral manifest-list tag (no -amd64 suffix).
-              docker run --privileged --rm tonistiigi/binfmt --install arm64 >/dev/null 2>&1 || true
-              TAGS="-t $repo:sha-${SHORT}${sfx:+-$sfx} -t $repo:${sfx:+$sfx-}latest"
-            fi
-            # Release (tag) build. The git tag IS the release name, so publish it
-            # VERBATIM (v1.26.19) — that is the shape a universe CR pins, and
-            # stripping the v is why releases were finished by hand-`crane copy`ing
-            # sha-<sha7> onto the semver a human typed. Identity in, identity out.
-            # The v-stripped alias stays for CRs already pinned that way (world
-            # 2.4.51), and is skipped when a repo tags without a v. The old
-            # `<ver>-amd64` alias is deleted: no CR in the fleet pinned it.
-            if [ "$IS_TAG" = 1 ]; then
-              TAGS="$TAGS -t $repo:${REL}${sfx:+-$sfx}"
-              [ "$REL" != "$VER" ] && TAGS="$TAGS -t $repo:${VER}${sfx:+-$sfx}"
-            else
-              # The tag universe is meant to PIN. It goes on every build, not
-              # only the ones somebody remembered to tag by hand.
-              TAGS="$TAGS -t $repo:${ver}${sfx:+-$sfx}"
-            fi
-            echo "::group::build $name → $repo (${sfx}) [$plats]"
-            # --build-arg assembly: static hanzo.yml `args` (a fixed value, e.g. a
-            # pinned base image tag) + `build_secrets` (KMS values the KMS step
-            # exported into the env above). Empty when a repo declares neither, so
-            # the buildx line is unchanged for every existing repo.
-            BUILD_ARGS=""
-            while IFS= read -r kv; do [ -n "$kv" ] && BUILD_ARGS="$BUILD_ARGS --build-arg $kv"; done \
-              < <(echo "$img" | jq -r '(.args // {}) | to_entries[] | "\(.key)=\(.value)"')
-            for bs in $(echo "$img" | jq -r '(.build_secrets // [])[]'); do
-              v=$(printenv "$bs" 2>/dev/null || true)
-              # Defense in depth: the KMS step above already refuses to continue
-              # with an unresolved build_secret, so reaching here empty means the
-              # two steps disagree. Stop rather than bake a blank credential.
-              [ -z "$v" ] && { echo "::error::build_secret $bs is unset at build time — refusing to bake an empty value"; exit 1; }
-              BUILD_ARGS="$BUILD_ARGS --build-arg $bs=$v"
-            done
-            # PROVENANCE: which commit are these bytes. Passed BOTH ways on
-            # purpose. The --label sets it from outside for any Dockerfile; the
-            # --build-arg feeds `ARG REVISION` for the Dockerfiles that stamp the
-            # label themselves (hanzoai/cloud declares `ARG REVISION=unknown`,
-            # and `unknown` is exactly what every image built without this said).
-            #
-            # An unlabelled image cannot be traced to source, and that stops being
-            # cosmetic the moment two builders race for one tag: with one image
-            # labelled and the other reading `unknown`, "which of these is the
-            # release" had no answer short of diffing layers — while the wrong one
-            # was already pinned. A version is a receipt only if the image can
-            # name its own commit, so every image this fleet publishes now can.
-            #
-            # A Dockerfile with no `ARG REVISION` ignores the build-arg (buildkit
-            # warns, never fails), so this is a no-op for every repo that has not
-            # asked for it.
-            PROV="--build-arg REVISION=$GITHUB_SHA"
-            PROV="$PROV --label org.opencontainers.image.revision=$GITHUB_SHA"
-            PROV="$PROV --label org.opencontainers.image.version=${ver:-$REL}"
-            PROV="$PROV --label org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY"
-            # GIT_TOKEN (from KMS, via GITHUB_ENV) is passed as the `gh_token`
-            # BuildKit secret so Dockerfiles can clone private Go modules; omitted
-            # cleanly when absent (public-only builds unaffected).
-            docker buildx build --platform "$plats" $BUILD_ARGS $PROV ${GIT_TOKEN:+--secret id=gh_token,env=GIT_TOKEN} --push $TAGS -f "$df" "$ctx"
-            # The semver is the tag the fleet PINS, so prove it exists before the
-            # run goes green — buildx can exit 0 while the manifest is not yet
-            # resolvable, and a pin onto a phantom tag is an ImagePullBackOff.
-            # The digest is printed with it because universe pins repo:tag@digest
-            # and the kubelet honours the DIGEST: publishing both here is what
-            # lets the two move together instead of being looked up separately
-            # and drifting apart.
-            pin="$repo:${ver:-$REL}${sfx:+-$sfx}"
-            for i in 1 2 3 4 5 6; do
-              dig=$(docker buildx imagetools inspect "$pin" --format '{{.Manifest.Digest}}' 2>/dev/null || true)
-              [ -n "$dig" ] && break
-              sleep 5
-            done
-            [ -n "$dig" ] || { echo "::error::$pin not resolvable after push"; exit 1; }
-            echo "| \`$pin\` | \`$dig\` |" >> "$RUNNER_TEMP/pins.md"
-            # Dual-host: mirror the exact tag set to registry.hanzo.ai (server-
-            # side manifest copy — no rebuild). ghcr.io/<org>/<name> →
-            # registry.hanzo.ai/<org>/<name>; public consumers keep ghcr, the fleet
-            # is migrating to pull from ours. A skip here is now a WARNING, not
-            # a notice: an image that never reaches our registry is the reason
-            # a deploy still depends on GitHub, and that should be visible in
-            # the run, not buried.
-            if [ "${MIRROR_OK:-}" = "1" ]; then
-              # crane, not buildx imagetools: the IAM token realm doesn't answer
-              # buildx's multi-scope token request (spec gap, tracked).
-              command -v crane >/dev/null 2>&1 || {
-                mkdir -p "$HOME/.local/bin"
-                curl -fsSL https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_Linux_x86_64.tar.gz \
-                  | tar -xz -C "$HOME/.local/bin" crane
-                export PATH="$HOME/.local/bin:$PATH"
-              }
-              # ONE mapping, stated once. The GHCR org and the registry org are
-              # not the same word — ghcr.io/hanzoai/x mirrors to
-              # registry.hanzo.ai/hanzo/x — and a second copy of this table is
-              # how a push path and a pin drift into naming different images.
-              rorg="${repo#*/}"; rname="${rorg#*/}"; rorg="${rorg%%/*}"
-              case "$rorg" in
-                hanzoai) rorg=hanzo ;;
-                zooai)   rorg=zoo ;;
-                *)       ;;   # bootnode, lux-private, ... map to themselves
-              esac
-              mrepo="registry.hanzo.ai/$rorg/$rname"
-              echo "$TAGS" | tr ' ' '\n' | grep -v '^-t$' | grep -v '^$' | while read -r ref; do
-                crane copy "$ref" "${mrepo}:${ref##*:}" \
-                  || echo "::warning::$ref did not reach registry.hanzo.ai (ghcr push unaffected)"
-              done
-            fi
-            echo "::endgroup::"
-          done
-          # The pins this run earned, ready to paste into universe. Tag and
-          # digest are printed TOGETHER because they are one fact: the failure
-          # this prevents is a new tag landing beside an old digest, which
-          # reports the new version on the pod and serves the old bytes.
-          if [ -s "$RUNNER_TEMP/pins.md" ]; then
-            { echo "### Pins"; echo; echo "| image | digest |"; echo "|---|---|";
-              cat "$RUNNER_TEMP/pins.md"; } >> "$GITHUB_STEP_SUMMARY"
-          fi
-
       - name: Provision Go toolchain (go test gates on bare runners)
         # hanzo.yml `test:` gates (e.g. `go vet ./...`, `go test ...`) run
         # DIRECTLY on the runner, NOT inside a build container — but the stock
@@ -1109,6 +899,227 @@ jobs:
               exit 1
             fi
           done
+
+      - name: Build & push images (per hanzo.yml)
+        # AFTER the gate, deliberately. This step used to run before `test:`,
+        # so a repo whose gates FAILED still published an image: hanzoai/base
+        # f9ec7067 pushed sha-f9ec706-amd64 on a run whose tests then went red.
+        # Deploy and Publish site were skipped, so nothing shipped it — but the
+        # tag existed, and a tag that exists is something a human pins by hand.
+        # An artifact is a claim that the commit passed; it should not be
+        # possible to produce one from a commit that did not.
+        #
+        # Nothing here needs the toolchains above it, and Deploy still follows
+        # this step, so the only thing the move changes is that a red gate now
+        # produces no image at all.
+        if: inputs.mode != 'delegate'
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          # Test-only callers (hanzo.yml without `images:` — e.g. a repo whose
+          # image lane lives in its own release.yml, or a pure library) skip the
+          # build step entirely instead of exploding on a null .images.
+          if [ "$(yq -r '.images // [] | length' hanzo.yml 2>/dev/null || echo 0)" = "0" ]; then
+            echo "::notice::no images: in hanzo.yml — test-only caller, skipping build"; exit 0
+          fi
+          # Build-time private cross-org Go module read (the buildx `gh_token`
+          # secret): prefer the KMS-fetched GIT_TOKEN, else fall back to the org
+          # GH_PAT — the SAME BuildKit gh_token cloud's release.yml uses (proven
+          # working). Keeps image builds green when the KMS deploy-cred fetch is
+          # unavailable (a repo with a private cross-org dep like hanzoai/cloud
+          # otherwise fails `go mod tidy` with git exit 128 in the buildx stage).
+          # No-op for public-only builds when both are empty. Exported so the
+          # `--secret id=gh_token,env=GIT_TOKEN` below reads it from the env.
+          export GIT_TOKEN="${GIT_TOKEN:-${GH_PAT:-}}"
+          SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
+          IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo 1 || echo 0)
+          REL="${{ github.ref_name }}"   # the git tag, verbatim: v1.26.19
+          VER="${REL#v}"                 # v-stripped alias: 1.26.19
+          yq -o=json -I=0 '.images' hanzo.yml | jq -c '.[]' | while read -r img; do
+            name=$(echo "$img"|jq -r .name); ctx=$(echo "$img"|jq -r .context)
+            df=$(echo "$img"|jq -r '.dockerfile // (.context+"/Dockerfile")'); repo=$(echo "$img"|jq -r .repo)
+            # tag-suffix is OPTIONAL (most repos ship a single variant). When set
+            # (e.g. "ce"/"ee") it qualifies every tag; when absent the tags are
+            # clean (no trailing dash). Build + deploy must agree on this shape.
+            sfx=$(echo "$img"|jq -r '."tag-suffix" // ""')
+            # platforms is OPT-IN per image in hanzo.yml (default: amd64 only, so
+            # every existing repo's tag shape "-amd64" is UNCHANGED). Set e.g.
+            #   platforms: [linux/amd64, linux/arm64]
+            # to emit a multi-arch MANIFEST LIST — one digest serving both arches.
+            # DOKS has no arm64 nodes, so arm64 builds via buildx QEMU emulation
+            # (binfmt set up below); pure-Go (CGO_ENABLED=0) Dockerfiles that honor
+            # $TARGETARCH cross-compile natively (fast, no emulation). For true
+            # native-speed arm64, register a bare-metal arm64 host (spark/GB10) as
+            # the hanzo-build-linux-arm64 self-hosted runner (values-build-arm64.yaml).
+            plats=$(echo "$img"|jq -r '(.platforms // ["linux/amd64"]) | join(",")')
+            # ---- Refuse a Go builder older than the module it compiles -------
+            # The official golang images set GOTOOLCHAIN=local, so a go.mod
+            # requiring a newer Go than the base image does not degrade — it
+            # dies mid-build with "go.mod requires go >= X (running Y;
+            # GOTOOLCHAIN=local)". hanzoai/visor v1.108.16 is the shipped
+            # instance, and it is invisible before the image build: every local
+            # `go build` succeeds because a dev box runs GOTOOLCHAIN=auto and
+            # just downloads what the module asks for. So the break is
+            # introduced by editing go.mod — a file with nothing to do with
+            # Docker — and found by a red release build.
+            #
+            # It is not one repo's problem either: a sweep of every Dockerfile
+            # across the orgs found 54 below their own go.mod in 23 repos, and
+            # only 7 of 223 Go builder stages set GOTOOLCHAIN=auto. Fixing those
+            # fixes today; this line is what makes the 55th impossible.
+            #
+            # Checked here, before any build work, so the run fails in seconds
+            # rather than after binfmt, a version derivation and a layer cache.
+            "$CI_HOME/bin/gover" "$df" "$ctx"
+            # ---- The semver this build publishes ----------------------------
+            # A branch build used to publish sha-<short7> and nothing else, so an
+            # image only earned a version when a human remembered to cut a git
+            # tag. That is the whole reason 14 of the fleet's 117 pins named a
+            # commit instead of a release: not drift, just the only tag CI ever
+            # offered them. Every build now publishes a version too, and the
+            # sha- tag stays beside it for forensics.
+            #
+            # The number is DERIVED, never typed, by bin/imgver — the ONE
+            # implementation, shared with the hand-rolled
+            # .hanzo/workflows/deploy.yml that 11 repos carry instead of importing
+            # this workflow (see .github/actions/imgver). Written twice it would be
+            # right twice and then wrong once, which is exactly how `sha-<short>`
+            # became the only tag those repos ever published. Read that script for
+            # the rule; it is monotonic against the repo's manifest AND the
+            # registry, so one tag can never cover two digests.
+            ver=""
+            if [ "$IS_TAG" = 1 ]; then
+              # Release build: the git tag IS the version. Identity in, identity
+              # out — deriving here would publish a number nobody asked for.
+              :
+            else
+              # An explicit `version:` on the image entry wins over the repo-wide
+              # one; both are optional, and imgver falls back to the manifest.
+              iv=$(echo "$img"|jq -r '.version // ""')
+              [ -z "$iv" ] && iv=$(yq -r '.version // ""' hanzo.yml)
+              ver=$(IMGVER_VERSION="$iv" "$CI_HOME/bin/imgver" "$repo" "$ctx")
+            fi
+            if [ "$plats" = "linux/amd64" ]; then
+              # single-arch: keep the exact legacy tag shape (-amd64) deploys expect.
+              TAGS="-t $repo:sha-${SHORT}-amd64${sfx:+-$sfx} -t $repo:${sfx:+$sfx-}latest"
+            else
+              # multi-arch: one arch-neutral manifest-list tag (no -amd64 suffix).
+              docker run --privileged --rm tonistiigi/binfmt --install arm64 >/dev/null 2>&1 || true
+              TAGS="-t $repo:sha-${SHORT}${sfx:+-$sfx} -t $repo:${sfx:+$sfx-}latest"
+            fi
+            # Release (tag) build. The git tag IS the release name, so publish it
+            # VERBATIM (v1.26.19) — that is the shape a universe CR pins, and
+            # stripping the v is why releases were finished by hand-`crane copy`ing
+            # sha-<sha7> onto the semver a human typed. Identity in, identity out.
+            # The v-stripped alias stays for CRs already pinned that way (world
+            # 2.4.51), and is skipped when a repo tags without a v. The old
+            # `<ver>-amd64` alias is deleted: no CR in the fleet pinned it.
+            if [ "$IS_TAG" = 1 ]; then
+              TAGS="$TAGS -t $repo:${REL}${sfx:+-$sfx}"
+              [ "$REL" != "$VER" ] && TAGS="$TAGS -t $repo:${VER}${sfx:+-$sfx}"
+            else
+              # The tag universe is meant to PIN. It goes on every build, not
+              # only the ones somebody remembered to tag by hand.
+              TAGS="$TAGS -t $repo:${ver}${sfx:+-$sfx}"
+            fi
+            echo "::group::build $name → $repo (${sfx}) [$plats]"
+            # --build-arg assembly: static hanzo.yml `args` (a fixed value, e.g. a
+            # pinned base image tag) + `build_secrets` (KMS values the KMS step
+            # exported into the env above). Empty when a repo declares neither, so
+            # the buildx line is unchanged for every existing repo.
+            BUILD_ARGS=""
+            while IFS= read -r kv; do [ -n "$kv" ] && BUILD_ARGS="$BUILD_ARGS --build-arg $kv"; done \
+              < <(echo "$img" | jq -r '(.args // {}) | to_entries[] | "\(.key)=\(.value)"')
+            for bs in $(echo "$img" | jq -r '(.build_secrets // [])[]'); do
+              v=$(printenv "$bs" 2>/dev/null || true)
+              # Defense in depth: the KMS step above already refuses to continue
+              # with an unresolved build_secret, so reaching here empty means the
+              # two steps disagree. Stop rather than bake a blank credential.
+              [ -z "$v" ] && { echo "::error::build_secret $bs is unset at build time — refusing to bake an empty value"; exit 1; }
+              BUILD_ARGS="$BUILD_ARGS --build-arg $bs=$v"
+            done
+            # PROVENANCE: which commit are these bytes. Passed BOTH ways on
+            # purpose. The --label sets it from outside for any Dockerfile; the
+            # --build-arg feeds `ARG REVISION` for the Dockerfiles that stamp the
+            # label themselves (hanzoai/cloud declares `ARG REVISION=unknown`,
+            # and `unknown` is exactly what every image built without this said).
+            #
+            # An unlabelled image cannot be traced to source, and that stops being
+            # cosmetic the moment two builders race for one tag: with one image
+            # labelled and the other reading `unknown`, "which of these is the
+            # release" had no answer short of diffing layers — while the wrong one
+            # was already pinned. A version is a receipt only if the image can
+            # name its own commit, so every image this fleet publishes now can.
+            #
+            # A Dockerfile with no `ARG REVISION` ignores the build-arg (buildkit
+            # warns, never fails), so this is a no-op for every repo that has not
+            # asked for it.
+            PROV="--build-arg REVISION=$GITHUB_SHA"
+            PROV="$PROV --label org.opencontainers.image.revision=$GITHUB_SHA"
+            PROV="$PROV --label org.opencontainers.image.version=${ver:-$REL}"
+            PROV="$PROV --label org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY"
+            # GIT_TOKEN (from KMS, via GITHUB_ENV) is passed as the `gh_token`
+            # BuildKit secret so Dockerfiles can clone private Go modules; omitted
+            # cleanly when absent (public-only builds unaffected).
+            docker buildx build --platform "$plats" $BUILD_ARGS $PROV ${GIT_TOKEN:+--secret id=gh_token,env=GIT_TOKEN} --push $TAGS -f "$df" "$ctx"
+            # The semver is the tag the fleet PINS, so prove it exists before the
+            # run goes green — buildx can exit 0 while the manifest is not yet
+            # resolvable, and a pin onto a phantom tag is an ImagePullBackOff.
+            # The digest is printed with it because universe pins repo:tag@digest
+            # and the kubelet honours the DIGEST: publishing both here is what
+            # lets the two move together instead of being looked up separately
+            # and drifting apart.
+            pin="$repo:${ver:-$REL}${sfx:+-$sfx}"
+            for i in 1 2 3 4 5 6; do
+              dig=$(docker buildx imagetools inspect "$pin" --format '{{.Manifest.Digest}}' 2>/dev/null || true)
+              [ -n "$dig" ] && break
+              sleep 5
+            done
+            [ -n "$dig" ] || { echo "::error::$pin not resolvable after push"; exit 1; }
+            echo "| \`$pin\` | \`$dig\` |" >> "$RUNNER_TEMP/pins.md"
+            # Dual-host: mirror the exact tag set to registry.hanzo.ai (server-
+            # side manifest copy — no rebuild). ghcr.io/<org>/<name> →
+            # registry.hanzo.ai/<org>/<name>; public consumers keep ghcr, the fleet
+            # is migrating to pull from ours. A skip here is now a WARNING, not
+            # a notice: an image that never reaches our registry is the reason
+            # a deploy still depends on GitHub, and that should be visible in
+            # the run, not buried.
+            if [ "${MIRROR_OK:-}" = "1" ]; then
+              # crane, not buildx imagetools: the IAM token realm doesn't answer
+              # buildx's multi-scope token request (spec gap, tracked).
+              command -v crane >/dev/null 2>&1 || {
+                mkdir -p "$HOME/.local/bin"
+                curl -fsSL https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_Linux_x86_64.tar.gz \
+                  | tar -xz -C "$HOME/.local/bin" crane
+                export PATH="$HOME/.local/bin:$PATH"
+              }
+              # ONE mapping, stated once. The GHCR org and the registry org are
+              # not the same word — ghcr.io/hanzoai/x mirrors to
+              # registry.hanzo.ai/hanzo/x — and a second copy of this table is
+              # how a push path and a pin drift into naming different images.
+              rorg="${repo#*/}"; rname="${rorg#*/}"; rorg="${rorg%%/*}"
+              case "$rorg" in
+                hanzoai) rorg=hanzo ;;
+                zooai)   rorg=zoo ;;
+                *)       ;;   # bootnode, lux-private, ... map to themselves
+              esac
+              mrepo="registry.hanzo.ai/$rorg/$rname"
+              echo "$TAGS" | tr ' ' '\n' | grep -v '^-t$' | grep -v '^$' | while read -r ref; do
+                crane copy "$ref" "${mrepo}:${ref##*:}" \
+                  || echo "::warning::$ref did not reach registry.hanzo.ai (ghcr push unaffected)"
+              done
+            fi
+            echo "::endgroup::"
+          done
+          # The pins this run earned, ready to paste into universe. Tag and
+          # digest are printed TOGETHER because they are one fact: the failure
+          # this prevents is a new tag landing beside an old digest, which
+          # reports the new version on the pod and serves the old bytes.
+          if [ -s "$RUNNER_TEMP/pins.md" ]; then
+            { echo "### Pins"; echo; echo "| image | digest |"; echo "|---|---|";
+              cat "$RUNNER_TEMP/pins.md"; } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Client — commit the projection and cut the patch
         # LAST, and after `test:` on purpose: this pushes a tag, the tag starts a
