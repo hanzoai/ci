@@ -1,0 +1,60 @@
+name: sitedeploy
+description: Publish a built static export to the Hanzo PaaS Sites plane.
+# For every repo whose deploy is "a static export goes live" — hanzo.ai, hanzo.app,
+# hips, computer and the ones after them. Those were each about to carry their own
+# copy of enqueue → upload → complete, which is how one contract becomes N
+# transcriptions that drift (see the imgver action next door for the same story
+# told about image tags).
+#
+#   - uses: hanzoai/ci/.github/actions/sitedeploy@v1
+#     with:  { slug: hanzo-ai, dir: out }
+#     env:   { HANZO_DEPLOY_TOKEN: '${{ secrets.HANZO_DEPLOY_TOKEN }}' }
+#
+# A SITE IS NOT AN APP. This publishes files and stops: no image, no CR, no
+# replicas, no registry. Building a container so a Go binary can serve /public is
+# the shape the Sites plane exists to retire.
+#
+# ONE credential. The 202 hands back a prefix-scoped, 30-minute presigned POST
+# grant, so CI never holds a bucket key — do NOT add SITES_S3_* here; that is the
+# standing shared-bucket credential the grant replaced.
+inputs:
+  slug:
+    description: The project slug on the Sites plane (POST /v1/projects/<slug>/deploy)
+    required: true
+  dir:
+    description: The built export directory
+    required: true
+  api:
+    description: Cloud API base
+    required: false
+    default: https://api.hanzo.ai
+  jobs:
+    description: Parallel uploads
+    required: false
+    default: '24'
+runs:
+  using: composite
+  steps:
+    - name: Fetch sitedeploy
+      shell: bash
+      # The action ref is the script ref: an action pinned to @v1 runs v1's
+      # sitedeploy. Both forges, because this repo is served from each.
+      run: |
+        set -euo pipefail
+        ref="${GITHUB_ACTION_REF:-v1}"
+        for url in https://git.hanzo.ai/hanzoai/ci https://github.com/hanzoai/ci; do
+          git clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/sitedeploy-ci" 2>/dev/null && break
+        done
+        [ -x "$RUNNER_TEMP/sitedeploy-ci/bin/sitedeploy" ] \
+          || { echo "::error::could not fetch hanzoai/ci@$ref (bin/sitedeploy)"; exit 1; }
+
+    - name: Deploy
+      shell: bash
+      env:
+        HANZO_API: ${{ inputs.api }}
+        SITEDEPLOY_JOBS: ${{ inputs.jobs }}
+        SITEDEPLOY_COMMIT: ${{ github.sha }}
+        SITEDEPLOY_BRANCH: ${{ github.ref_name }}
+      run: |
+        set -euo pipefail
+        bash "$RUNNER_TEMP/sitedeploy-ci/bin/sitedeploy" '${{ inputs.slug }}' '${{ inputs.dir }}'
