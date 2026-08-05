@@ -375,6 +375,15 @@ jobs:
           if [ -z "$ORG" ]; then
             case "${{ github.repository_owner }}" in
               hanzoai) ORG=hanzo ;;
+              # hanzo-inc is the same TENANT as hanzoai — pay, commerce and the
+              # rest of the company surfaces bill and seal to KMS org `hanzo`.
+              # Without this line ORG fell through to the literal owner,
+              # "hanzo-inc", which is not a KMS org. That still LOOKED fine,
+              # because the read below takes its org from the TOKEN, not the URL
+              # — so the only things that were wrong were the fallback URL and
+              # every error message, which named an org that does not exist and
+              # sent the reader looking for a tenant instead of a credential.
+              hanzo-inc) ORG=hanzo ;;
               luxfi)   ORG=lux ;;
               zooai)   ORG=zoo ;;
               *)       ORG="${{ github.repository_owner }}" ;;
