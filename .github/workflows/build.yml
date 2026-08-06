@@ -29,14 +29,17 @@ on:
         default: '["hanzo-build-linux-amd64"]'
       mode:
         description: >-
-          Build execution mode. `buildx` (default) runs the full buildx →
-          test → deploy pipeline ON the runner. `delegate` instead POSTs the
-          build to platform.hanzo.ai (`/v1/runner`) — platform builds
-          in-cluster with BuildKit and rolls the operator Service CR itself, so
-          the GitHub job finishes in seconds with no runner buildx. A repo opts
-          in by passing `with: { mode: delegate }`; everything else is unchanged.
-          Requires the `PLATFORM_BUILD_CALLBACK_TOKEN` secret (via secrets:
-          inherit).
+          Where the IMAGE is built. `buildx` (default) builds it on this runner.
+          `delegate` POSTs it to platform.hanzo.ai (`/v1/runner`), which builds
+          in-cluster with BuildKit and rolls the operator Service CR itself.
+          A repo opts in with `with: { mode: delegate }` and needs the
+          `PLATFORM_BUILD_CALLBACK_TOKEN` secret (via secrets: inherit).
+
+          THE GATE RUNS IN BOTH MODES, and that is the whole point of the input
+          being named for the build. `delegate` used to be evaluated fourth, ahead
+          of every toolchain and ahead of `test:`, so it skipped the gate along
+          with the build — 20 steps skipped, 0 executed, green. What a delegated
+          run skips is buildx, publish and deploy. It does not skip being tested.
         type: string
         default: buildx
       tests:
@@ -222,64 +225,7 @@ jobs:
           jq --version
           yq --version
 
-      - name: Delegate build to platform (mode=delegate)
-        # The GHA-escape fast path: instead of running buildx on this runner, POST
-        # each image in hanzo.yml to platform.hanzo.ai's direct-enqueue webhook
-        # (`/v1/runner`). Platform creates a build_job row, launches an
-        # in-cluster BuildKit Job on its own pool, pushes to the registry, and —
-        # for a system service — patches the operator Service CR to roll it. The
-        # downstream is IDENTICAL to the platform GitHub-App webhook path (one
-        # build path, two front doors), so a delegated build behaves exactly like
-        # a platform-native one. This job then exits in seconds — no buildx, no
-        # KMS, no runner-side deploy.
-        if: inputs.mode == 'delegate'
-        env:
-          ENQUEUE_URL: ${{ vars.PLATFORM_ENQUEUE_URL || 'https://platform.hanzo.ai/v1/runner' }}
-          ENQUEUE_TOKEN: ${{ secrets.PLATFORM_BUILD_CALLBACK_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "${ENQUEUE_TOKEN:-}" ]; then
-            echo "::error::mode=delegate needs the PLATFORM_BUILD_CALLBACK_TOKEN secret (secrets: inherit)"; exit 1
-          fi
-          REPO="${{ github.repository }}"
-          SHA="${{ github.sha }}"
-          SHORT=$(echo "$SHA" | cut -c1-7)
-          REF="${{ github.ref }}"
-          BRANCH="${{ github.ref_name }}"
-          # One enqueue per (image, platform), mirroring the buildx tag shape the
-          # deploy path expects (`sha-<short>-<arch>[-<suffix>]`). Default arch is
-          # amd64 (single-arch), so an existing repo's tag shape is unchanged.
-          yq -o=json -I=0 '.images' hanzo.yml | jq -c '.[]' | while read -r img; do
-            name=$(echo "$img"|jq -r .name); repo=$(echo "$img"|jq -r .repo)
-            ctx=$(echo "$img"|jq -r .context); df=$(echo "$img"|jq -r '.dockerfile // (.context+"/Dockerfile")')
-            sfx=$(echo "$img"|jq -r '."tag-suffix" // ""')
-            # Same Go-builder check the buildx lane runs. It belongs here too:
-            # delegating the build moves WHERE it runs, not whether the image
-            # can compile the module, and a mismatch enqueued to platform fails
-            # on a machine whose logs this run never shows. Cheap to check on
-            # the runner that already has the checkout; expensive to discover
-            # from the in-cluster builder.
-            "$CI_HOME/bin/gover" "$df" "$ctx"
-            echo "$img" | jq -r '(.platforms // ["linux/amd64"])[]' | while read -r plat; do
-              arch="${plat##*/}"
-              image="${repo}:sha-${SHORT}-${arch}${sfx:+-$sfx}"
-              body=$(jq -nc \
-                --arg repo "$REPO" --arg sha "$SHA" --arg image "$image" \
-                --arg ref "$REF" --arg branch "$BRANCH" \
-                --arg dockerfile "$df" --arg context "$ctx" --arg arch "$arch" \
-                '{repo:$repo,sha:$sha,image:$image,ref:$ref,branch:$branch,dockerfile:$dockerfile,context:$context,os:"linux",arch:$arch}')
-              echo "::group::delegate $name → $image"
-              code=$(curl -sS -o /tmp/enqueue.out -w '%{http_code}' -X POST "$ENQUEUE_URL" \
-                -H "Authorization: Bearer $ENQUEUE_TOKEN" -H 'Content-Type: application/json' -d "$body")
-              cat /tmp/enqueue.out; echo
-              # 202 Accepted = queued; 409 = no live runner for the pool (surface it loud).
-              if [ "$code" != "202" ]; then echo "::error::enqueue $image failed (HTTP $code)"; exit 1; fi
-              echo "::endgroup::"
-            done
-          done
-
       - name: Authenticated git for go modules (rate-limit + any private repo)
-        if: inputs.mode != 'delegate'
         # luxfi/hanzoai/zooai Go modules are PUBLIC, so `go` resolves them through
         # the default public proxy (proxy.golang.org) + checksum db (sum.golang.org)
         # — canonical, IMMUTABLE hashes that a force-moved tag can no longer break.
@@ -335,7 +281,6 @@ jobs:
 
       - name: Fetch deploy credentials from KMS
         id: kms
-        if: inputs.mode != 'delegate'
         env:
           KMS_CLIENT_ID: ${{ secrets.KMS_CLIENT_ID }}
           KMS_CLIENT_SECRET: ${{ secrets.KMS_CLIENT_SECRET }}
@@ -400,6 +345,24 @@ jobs:
           # how a stale key survived: every failure looked like "not in KMS", and
           # "not in KMS" was survivable.
           DECLARED="$(yq -r '[(.images // [])[] | (.build_secrets // [])[]] | unique | .[]' hanzo.yml 2>/dev/null || true)"
+          # A build_secret becomes `--build-arg NAME=value` below, and a build-arg
+          # is IN THE PUBLISHED IMAGE — `docker history` prints it to anyone who
+          # can pull. So `build_secrets` can only ever carry values that are
+          # public on purpose: a Vite/Next SPA has no server to read an env from,
+          # so its ingest key must be inlined at build, and inlining it is what
+          # publishing it means. Every other value must not be here at all.
+          #
+          # Nothing checked that. The one repo whose value is genuinely
+          # publishable (hanzoai/ui, a `pk-…` ingest key) asserted the `pk-`
+          # prefix INSIDE ITS OWN Dockerfile — so the check existed once, for one
+          # image, and any repo that added a real credential got no check at all.
+          # Per-repo vigilance is not a mechanism; the assertion belongs here,
+          # where the build-arg is assembled, once, for every caller.
+          #
+          # The rule is the NAME, and it lives in bin/publishable with its own
+          # test — the same shape as gover and imgver, for the same reason: a
+          # rule inlined in YAML is a rule nothing can run.
+          "$CI_HOME/bin/publishable" hanzo.yml
           required() { [ -n "$DECLARED" ]; }
           if [ -z "${KMS_CLIENT_ID:-}" ] || [ -z "$ORG" ]; then
             if required; then
@@ -610,7 +573,7 @@ jobs:
         # OWN Go version from go.mod so the toolchain matches the module exactly.
         # Guarded to Go repos (go.mod present) so pure-JS/TS callers are
         # unaffected; harmless if a future runner image bakes Go in.
-        if: inputs.mode != 'delegate' && hashFiles('go.mod') != ''
+        if: hashFiles('go.mod') != ''
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -624,7 +587,7 @@ jobs:
         # fails (snapshot mirror rot: "no longer has a Release file"),
         # repoint archive.ubuntu.com at the DO mirror — both sources.list and
         # noble's deb822 ubuntu.sources — and retry once.
-        if: inputs.mode != 'delegate' && hashFiles('go.mod') != ''
+        if: hashFiles('go.mod') != ''
         run: |
           command -v gcc >/dev/null 2>&1 && exit 0
           sudo apt-get update -qq || {
@@ -649,12 +612,12 @@ jobs:
         # root-only hashFiles SKIPPED this step and the gate died at
         #     bash: line 3: pnpm: command not found   (exit 127)
         # after 49 ginkgo suites had already passed.
-        if: inputs.mode != 'delegate' && hashFiles('package.json', '**/package.json') != ''
+        if: hashFiles('package.json', '**/package.json') != ''
         uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Enable corepack (pnpm/yarn shims for JS test gates)
-        if: inputs.mode != 'delegate' && hashFiles('package.json', '**/package.json') != ''
+        if: hashFiles('package.json', '**/package.json') != ''
         run: corepack enable
 
       - name: Provision Rust toolchain (cargo test gates)
@@ -666,7 +629,7 @@ jobs:
         # the exact failure this workflow refuses everywhere else.
         # Guarded to Rust callers (Cargo.toml present); a no-op once a runner
         # image bakes rustup in.
-        if: inputs.mode != 'delegate' && hashFiles('Cargo.toml') != ''
+        if: hashFiles('Cargo.toml') != ''
         uses: dtolnay/rust-toolchain@stable
 
       - name: Provision Java toolchain (client codegen)
@@ -885,7 +848,7 @@ jobs:
         # `http`. Take the scheme and the host as the two values they are, and
         # compare the HOST against github.com so the guard cannot be fooled by a
         # spelling either.
-        if: inputs.mode != 'delegate' && hashFiles('go.mod') != ''
+        if: hashFiles('go.mod') != ''
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
           FORGE_TOKEN: ${{ secrets.FORGE_TOKEN }}
@@ -936,7 +899,7 @@ jobs:
         # it ran nothing AND nothing shows as having run. A gate that is not a test
         # gate — vet, lint, a build, a codegen-freshness check — says neither and is
         # untouched. To silence it legitimately, make the gate run a test.
-        if: inputs.mode != 'delegate' && inputs.tests != 'false'
+        if: inputs.tests != 'false'
         run: |
           set -euo pipefail
           NOTHING='\[no test files\]|\[no tests to run\]|no tests ran|collected 0 items|No tests found|no test specified|running 0 tests|Tests:[[:space:]]+0 total|(^|[^0-9])0 (passing|passed)'
@@ -963,6 +926,78 @@ jobs:
               grep -Eho "$NOTHING" "$log" | sort -u | sed 's/^/  ran nothing: /'
               exit 1
             fi
+          done
+
+      - name: Delegate build to platform (mode=delegate)
+        # Delegate moves WHERE the image is built. It does not move whether the
+        # commit was gated — so this step sits AFTER `Test (per hanzo.yml)`, and
+        # every step the gate needs runs in both modes. It used to sit fourth,
+        # before any of them, and `mode: delegate` therefore skipped the gate
+        # along with the build: 20 steps skipped, 0 executed, green. "ci gates,
+        # platform builds" was the design and the ordering said otherwise.
+        #
+        # What it does: POST each image in hanzo.yml to platform.hanzo.ai's
+        # direct-enqueue webhook (`/v1/runner`). Platform creates a build_job
+        # row, launches an in-cluster BuildKit Job on its own pool, pushes to the
+        # registry, and — for a system service — patches the operator Service CR
+        # to roll it. Downstream is IDENTICAL to the platform webhook path, so a
+        # delegated build behaves exactly like a platform-native one. What this
+        # job skips is buildx, publish and deploy — not the gate.
+        if: inputs.mode == 'delegate'
+        env:
+          ENQUEUE_URL: ${{ vars.PLATFORM_ENQUEUE_URL || 'https://platform.hanzo.ai/v1/runner' }}
+          ENQUEUE_TOKEN: ${{ secrets.PLATFORM_BUILD_CALLBACK_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ENQUEUE_TOKEN:-}" ]; then
+            echo "::error::mode=delegate needs the PLATFORM_BUILD_CALLBACK_TOKEN secret (secrets: inherit)"; exit 1
+          fi
+          # `/v1/runner` has no way to carry a build_secret: its wire body accepts
+          # buildArgs, and platform resolves NO KMS name — its own secrets arrive
+          # as a KMSSecret CRD with a statically declared key list, which cannot
+          # serve a name discovered by reading a hanzo.yml at some SHA. A repo
+          # that declares build_secrets and delegates gets an image built without
+          # them: green run, empty credential, exactly the silence the KMS step
+          # refuses. Say so here rather than downstream, where this run shows no
+          # logs at all.
+          if [ -n "$(yq -r '[(.images // [])[] | (.build_secrets // [])[]] | unique | .[]' hanzo.yml 2>/dev/null || true)" ]; then
+            echo "::error::hanzo.yml declares build_secrets, which mode=delegate cannot deliver — platform builds with no KMS. Build on the runner (drop mode: delegate), or drop the build_secrets."; exit 1
+          fi
+          REPO="${{ github.repository }}"
+          SHA="${{ github.sha }}"
+          SHORT=$(echo "$SHA" | cut -c1-7)
+          REF="${{ github.ref }}"
+          BRANCH="${{ github.ref_name }}"
+          # One enqueue per (image, platform), mirroring the buildx tag shape the
+          # deploy path expects (`sha-<short>-<arch>[-<suffix>]`). Default arch is
+          # amd64 (single-arch), so an existing repo's tag shape is unchanged.
+          yq -o=json -I=0 '.images' hanzo.yml | jq -c '.[]' | while read -r img; do
+            name=$(echo "$img"|jq -r .name); repo=$(echo "$img"|jq -r .repo)
+            ctx=$(echo "$img"|jq -r .context); df=$(echo "$img"|jq -r '.dockerfile // (.context+"/Dockerfile")')
+            sfx=$(echo "$img"|jq -r '."tag-suffix" // ""')
+            # Same Go-builder check the buildx lane runs. It belongs here too:
+            # delegating the build moves WHERE it runs, not whether the image
+            # can compile the module, and a mismatch enqueued to platform fails
+            # on a machine whose logs this run never shows. Cheap to check on
+            # the runner that already has the checkout; expensive to discover
+            # from the in-cluster builder.
+            "$CI_HOME/bin/gover" "$df" "$ctx"
+            echo "$img" | jq -r '(.platforms // ["linux/amd64"])[]' | while read -r plat; do
+              arch="${plat##*/}"
+              image="${repo}:sha-${SHORT}-${arch}${sfx:+-$sfx}"
+              body=$(jq -nc \
+                --arg repo "$REPO" --arg sha "$SHA" --arg image "$image" \
+                --arg ref "$REF" --arg branch "$BRANCH" \
+                --arg dockerfile "$df" --arg context "$ctx" --arg arch "$arch" \
+                '{repo:$repo,sha:$sha,image:$image,ref:$ref,branch:$branch,dockerfile:$dockerfile,context:$context,os:"linux",arch:$arch}')
+              echo "::group::delegate $name → $image"
+              code=$(curl -sS -o /tmp/enqueue.out -w '%{http_code}' -X POST "$ENQUEUE_URL" \
+                -H "Authorization: Bearer $ENQUEUE_TOKEN" -H 'Content-Type: application/json' -d "$body")
+              cat /tmp/enqueue.out; echo
+              # 202 Accepted = queued; 409 = no live runner for the pool (surface it loud).
+              if [ "$code" != "202" ]; then echo "::error::enqueue $image failed (HTTP $code)"; exit 1; fi
+              echo "::endgroup::"
+            done
           done
 
       - name: Build & push images (per hanzo.yml)

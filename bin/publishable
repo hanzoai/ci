@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# publishable — refuse a `build_secrets` name that does not declare itself public.
+#
+# Usage: publishable <hanzo.yml>   (reads images[].build_secrets, rc=1 on refusal)
+#
+# WHY A NAME AND NOT A VALUE. A build_secret is handed to buildx as
+# `--build-arg NAME=value`, and a build-arg is IN THE PUBLISHED IMAGE: `docker
+# history` prints it to anyone who can pull. So the only value that may sit
+# here is one that is public on purpose — a Vite/Next static export has no
+# server to read an env from, so its ingest key must be inlined at build, and
+# inlining it is what publishing it means.
+#
+# The value cannot be the test. At the moment ci reads hanzo.yml the value does
+# not exist yet (KMS has not been called), and guessing secrecy from a string's
+# shape is a heuristic that is wrong in both directions. The name is what a
+# reviewer reads, it is in git, and it is decided by the person who knows the
+# answer. So the name carries the assertion.
+#
+# The fleet had already started saying it this way — hanzoai/docs renamed
+# EVENT_INGEST_KEY -> PUBLISHABLE_KEY, and hanzoai/world's four are VITE_*,
+# which a bundler inlines by construction. This turns that convention into the
+# mechanism. Before it, the ONE repo whose value is genuinely publishable
+# (hanzoai/ui, a `pk-…` key) asserted the prefix inside its own Dockerfile, so
+# the check existed once, for one image, and any repo adding a real credential
+# got no check at all.
+set -uo pipefail
+
+f=${1:-hanzo.yml}
+[ -r "$f" ] || exit 0   # no config, nothing declared, nothing to refuse
+
+names=$(yq -r '[(.images // [])[] | (.build_secrets // [])[]] | unique | .[]' "$f" 2>/dev/null) || exit 0
+[ -n "$names" ] || exit 0
+
+rc=0
+for n in $names; do
+  case "$n" in
+    # Prefixes a bundler already treats as client-side, plus an explicit
+    # self-declaration for everything else. Anything outside this set has not
+    # claimed to be public, so it is not baked.
+    PUBLISHABLE_*|PUBLIC_*|NEXT_PUBLIC_*|EXPO_PUBLIC_*|NUXT_PUBLIC_*|VITE_*|REACT_APP_*|*_PUBLISHABLE|*_PUBLIC) ;;
+    *)
+      echo "::error::build_secret '$n' does not declare itself publishable, and a build_secret is baked into the image as a --build-arg where \`docker history\` reveals it. Rename it (PUBLISHABLE_*, PUBLIC_*, NEXT_PUBLIC_*, VITE_*, REACT_APP_*) if the value is public on purpose; if it is a real credential it cannot be a build_secret at all." >&2
+      rc=1 ;;
+  esac
+done
+exit $rc
