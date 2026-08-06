@@ -23,5 +23,15 @@ concurrency:
   cancel-in-progress: true
 jobs:
   gate:
-    uses: hanzoai/ci/.hanzo/workflows/build.yml@v2
+    uses: hanzoai/ci/.hanzo/workflows/build.yml@v1.0.38
     secrets: inherit
+    # PROOF BRANCH — not for main. `delegate` used to be evaluated fourth, ahead
+    # of every toolchain and ahead of `test:`, so a delegated run skipped the gate
+    # along with the build and finished green having proven nothing. This asks for
+    # the delegated build on purpose, pinned at the version tag that carries the
+    # reorder. @v1 and @v2 both still resolve to the pre-reorder pipeline, and
+    # v1.0.37 predates the inline publishable rule, so it is v1.0.38 or nothing.
+    # The run must show `Test (per hanzo.yml)` EXECUTED, with the delegate POST
+    # after it.
+    with:
+      mode: delegate
