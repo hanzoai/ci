@@ -359,10 +359,26 @@ jobs:
           # Per-repo vigilance is not a mechanism; the assertion belongs here,
           # where the build-arg is assembled, once, for every caller.
           #
-          # The rule is the NAME, and it lives in bin/publishable with its own
-          # test — the same shape as gover and imgver, for the same reason: a
-          # rule inlined in YAML is a rule nothing can run.
-          "$CI_HOME/bin/publishable" hanzo.yml
+          # INLINE, not "$CI_HOME/bin/publishable", and that is forced rather than
+          # chosen. The tools checkout and this workflow resolve from DIFFERENT
+          # places: the caller pins the workflow at a ref its forge resolves, while
+          # the tools step derives its ref from GITHUB_WORKFLOW_REF — which
+          # git.hanzo.ai does not set, so it falls back to `v1` and clones
+          # github.com. Measured on run 36473: `GITHUB_WORKFLOW_REF=<unset>`,
+          # `derived ref=v1`, `cloned https://github.com/hanzoai/ci@v1`. A step
+          # that calls a NEW file under $CI_HOME is therefore broken on every forge
+          # run until a tag moves on a host this repo is not even pinned to.
+          #
+          # The rule is also spelled in bin/publishable, which the `publishable`
+          # gate tests. Two spellings of one rule is the same shape as the two
+          # copies of this file, and it gets the same treatment: a gate refuses
+          # any difference between them. See `publishable-rule-is-one-rule`.
+          for bs in $DECLARED; do
+            case "$bs" in
+              PUBLISHABLE_*|PUBLIC_*|NEXT_PUBLIC_*|EXPO_PUBLIC_*|NUXT_PUBLIC_*|VITE_*|REACT_APP_*|*_PUBLISHABLE|*_PUBLIC) ;;
+              *) echo "::error::build_secret '$bs' does not declare itself publishable, and a build_secret is baked into the image as a --build-arg where \`docker history\` reveals it. Rename it (PUBLISHABLE_*, PUBLIC_*, NEXT_PUBLIC_*, VITE_*, REACT_APP_*) if the value is public on purpose; if it is a real credential it cannot be a build_secret at all."; exit 1 ;;
+            esac
+          done
           required() { [ -n "$DECLARED" ]; }
           if [ -z "${KMS_CLIENT_ID:-}" ] || [ -z "$ORG" ]; then
             if required; then
