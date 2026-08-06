@@ -121,6 +121,24 @@ test:
     # IfNotPresent never picks up and no reader can see. Offline and
     # deterministic: the registry floor is injected, so it needs no network.
     run: bash bin/imgver_test.sh
+  - name: vendormark
+    # bin/vendormark is the gate the build lane runs against every checkout: it
+    # refuses a site-generator vendor's branding in a tracked path, in tracked
+    # content, in a commit message, in an author identity or in a Co-authored-by
+    # trailer. Five shipped sites carried it — one serving the vendor's upload
+    # folder as its favicon — and clearing them took a history rewrite and a
+    # force-push of every branch.
+    #
+    # The suite pins the refusals AND the allowances, and the allowances are the
+    # larger half on purpose. The vendor's name is also an ordinary English
+    # adjective: across the 1,065 repos swept it appears innocently in tokenizer
+    # vocabularies, word lists, ML corpora, packed public-suffix data and an
+    # upstream Clerk bundle's list of other people's dev hosts. A gate that reds
+    # a fifth of the estate is a gate someone switches off, so the content rules
+    # are only strings that cannot occur in prose, and two candidate rules were
+    # measured and DROPPED for redding that Clerk bundle. Offline and
+    # deterministic: temp repos, no network.
+    run: bash bin/vendormark_test.sh
   - name: gover
     # bin/gover is the gate the build lane runs against every Dockerfile before
     # it builds: it refuses a Go builder image older than the go.mod it
@@ -137,6 +155,22 @@ test:
     # and a multi-module repo is judged by its NEAREST go.mod. Offline and
     # deterministic: temp dirs, no registry, no network.
     run: bash bin/gover_test.sh
+  - name: sitepublish
+    # bin/sitepublish is the whole of the `site:` lane. The lane it replaced was
+    # dead: it staged with `mc mirror` behind S3_ADMIN_ACCESS_KEY/SECRET_KEY,
+    # names KMS holds for no org, so it failed closed for every caller — and of
+    # the 155 hanzo.yml files across the three orgs, not one declared a `site:`.
+    #
+    # The suite is weighted toward REFUSALS because the failure that matters here
+    # is a green publish that verified nothing — indistinguishable from a working
+    # one until a site quietly stops updating. Three defects of exactly that
+    # shape are pinned by name: an object-shaped read of a body that is not an
+    # object, `.releases[]` against the BARE ARRAY the list route returns (which
+    # resolves nothing and so can never fail for its stated reason), and
+    # `[ "$a" = "$b" ]` on two empty strings, which is TRUE. Reintroducing them
+    # turns 3, 9 and 1 of these tests red respectively. Offline and
+    # deterministic: a curl shim answers the routes from fixtures, no network.
+    run: bash bin/sitepublish_test.sh
 
 # No `deploy:` ON PURPOSE. Rollout is a reviewed tag pin in hanzoai/universe
 # (infra/k8s/operator/crs/ci.yaml), the same rule cloud and git follow: a
