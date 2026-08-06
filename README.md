@@ -171,6 +171,43 @@ Builds are `CGO_ENABLED=0 -trimpath`: the host that installs this runs it on
 whatever base image the host is, and the digest must be a function of the
 source, not of the checkout path.
 
+## `site:` — a static export, promoted to an immutable release
+
+`images:` ships an OCI image a **cluster** runs; `binaries:` ships an executable
+a **host** installs. `site:` ships a static export an **edge** serves — no image,
+no CR, no replicas. Building a container so a Go binary can serve `/public` is
+the shape this retires.
+
+```yaml
+site:
+  slug: hanzo-console         # the project on the Sites plane
+  dir: out                    # the built export; needs index.html at its root
+  build: npm ci && npm run build   # optional; run first
+  on: [main]                  # same branch gate as deploy.on; tags always publish
+```
+
+That is the whole configuration. **There is no credential to provision**: the
+bearer is the IAM JWT the workflow already mints from `KMS_CLIENT_ID` /
+`KMS_CLIENT_SECRET`, so a repo that can build can publish. CI names no bucket and
+no org — the org segment is prepended server-side from the validated principal,
+which is what makes the prefix unforgeable.
+
+The export is zipped and posted to `/v1/projects/<slug>/deploy`, then that prefix
+is promoted by `/v1/sites/<slug>/publish` into an **immutable release** whose id
+digests its object manifest. The site's pointer is flipped to it, and the step
+then re-reads the release list and refuses unless the release it just published
+is the one that is live. Rollback is the same pointer aimed at an older release.
+
+**One size boundary, and it is the server's.** cloud's public edge caps a request
+body at 16 MiB (`GATEWAY_BODY_LIMIT`) and refuses a larger POST before any
+handler runs — reporting only `Error when parsing request`, which names neither
+size nor cause. `bin/sitepublish` therefore measures the zip and refuses *with
+the number* first. Of the 24 built exports in the estate, 22 fit; the two that do
+not (`hanzo.ai` at 27.9 MiB zipped and 8,536 files, `trillerfest.com` at 76.7
+MiB) use [`bin/sitedeploy`](bin/sitedeploy), which streams per-file against a
+presigned grant and has no body limit. `hanzo.ai` is also past the server's own
+5,000-entry cap, so no transport makes that export a release.
+
 ## Runners — our fleet or your own
 
 By default the build runs on the **Hanzo `git-runner` fleet** on git.hanzo.ai
