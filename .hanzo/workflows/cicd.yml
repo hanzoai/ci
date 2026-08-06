@@ -25,9 +25,3 @@ jobs:
   gate:
     uses: hanzoai/ci/.hanzo/workflows/build.yml@v2
     secrets: inherit
-    # PROOF RUN. `delegate` used to be evaluated fourth, ahead of `test:`, so a
-    # delegated run skipped the gate along with the build: 20 steps skipped, 0
-    # executed, green. This PR asks for the delegated build on purpose — the run
-    # must show `Test (per hanzo.yml)` EXECUTED, with the delegate POST after it.
-    with:
-      mode: delegate
