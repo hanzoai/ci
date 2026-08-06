@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# vendormark — refuse a repo that carries a site-generator vendor's branding.
+# One implementation, every caller.
+#
+#   vendormark [dir] [git-range]
+#
+# WHAT THIS CATCHES
+#
+# Several sites in the estate began life as output from a hosted "prompt to
+# React app" generator. The generator does not sign its work in a comment you
+# would notice — it signs it in the SHAPE of the repo, in four places at once:
+#
+#   1. an asset folder named after the vendor, e.g. public/<vendor>-uploads/,
+#      so every image the browser requests carries the vendor's name in its URL
+#   2. a build plugin dependency in package.json and the lockfiles
+#   3. an injected third-party <script> tag in index.html
+#   4. commit messages, author identities and Co-authored-by trailers written
+#      by the vendor's bot
+#
+# The fourth is the one nothing else looks at, and the one that survives every
+# amount of tidying the working tree: a repo can render a perfect page and
+# still say, in `git log`, who really wrote it.
+#
+# This was not a hypothetical. A sweep of 1,065 repositories across the three
+# orgs found the mark in five shipped sites — one of them serving the vendor's
+# upload folder as its FAVICON, so the vendor's path was in the <head> of every
+# page and in every browser tab. Purging it needed a history rewrite and a
+# force-push of every branch. This gate exists so that is never needed twice.
+#
+# WHY THE CONTENT RULES ARE SO SPECIFIC
+#
+# The vendor's name is also an ordinary English adjective, and the naive gate —
+# case-insensitive substring of that word — is unshippable. Measured across all
+# 1,065 repos, the bare word appears legitimately in 20+ of them and NONE of
+# them are contaminated:
+#
+#     tokenizer vocab.json (3 repos)     "lovable</w>": 38565
+#     English word lists                 words_alpha.txt, faker adjectives
+#     ML training/eval corpora           alpaca, kto, BAGEL eval prompts
+#     x/net publicsuffix packed data     a substring of concatenated domains
+#     vendored prompt corpora            third-party collections that quote it
+#     our own marketing copy             a competitor named in a case study
+#
+# A gate that reds a fifth of the estate on day one is a gate someone switches
+# off, and then we are worse off than before it existed. So the content rules
+# are only the strings that CANNOT occur in prose: a path segment, an npm
+# package name, an injected script URL, a generator meta tag, a bot's email.
+#
+# Two candidate rules were DROPPED after measuring them, and it is worth saying
+# why: `lovableproject.com` and `lovable.app` red an upstream Clerk SDK bundle,
+# which ships a list of dev-preview host suffixes naming several generators. A
+# third party's honest list of other people's hosts is not our contamination.
+# Those two strings are still refused in commit messages and git identities,
+# where no third party can put them.
+#
+# PATHS AND IDENTITIES ARE ABSOLUTE
+#
+# Content is judged narrowly; paths and git identities are not. There is no
+# legitimate reason for the vendor's name to appear in a filename we track or
+# in an author, committer or Co-authored-by line we write. Those are refused on
+# the bare word, no exceptions, because that is where the mark is load-bearing
+# and where tidying the working tree never reaches.
+#
+# THE ESCAPE HATCH
+#
+# `.vendormark-allow` — one path glob per line, `#` comments ignored. It exists
+# for exactly one honest case: a repo whose JOB is to name these vendors, such
+# as the history-scrubber rule files in hanzoai/.github, which cannot do their
+# work without spelling the string they remove. If you are reaching for it for
+# any other reason, you are about to ship the mark.
+#
+# EXIT: 0 clean, 1 mark found.
+set -uo pipefail
+
+root=${1:-.}
+range=${2:-}
+cd "$root" 2>/dev/null || { echo "vendormark: no such directory: $root" >&2; exit 1; }
+git rev-parse --git-dir >/dev/null 2>&1 || exit 0   # not a repo: nothing to check
+
+# PATHS: the bare vendor name, no exceptions. Add a vendor here and its
+# filenames are refused everywhere.
+VENDORS='lovable'
+
+# CONTENT: only strings that cannot occur in prose — an asset folder, an npm
+# package, the injected script, a generator meta tag, the bot's address. Spelled
+# out in full rather than composed from $VENDORS, because half of them do not
+# contain the vendor's name at all. See the header for the two that were
+# measured against the estate and dropped.
+CONTENT_SIG='lovable-uploads/|lovable-tagger|@lovable\.dev|cdn\.gpteng\.co|gptengineer\.js|content="[Ll]ovable"'
+
+# IDENTITIES AND MESSAGES: the bare word plus the vendor hosts, because nothing
+# outside our own commits can write these.
+IDENT_SIG='lovable|gptengineer|gpt-engineer'
+
+fail=0
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+
+# --- allowlist ------------------------------------------------------------
+: > "$tmp/allow"
+if [ -f .vendormark-allow ]; then
+  grep -vE '^\s*(#|$)' .vendormark-allow > "$tmp/allow" || true
+fi
+allowed() {  # $1 = path
+  [ -s "$tmp/allow" ] || return 1
+  while IFS= read -r g; do
+    # shellcheck disable=SC2254
+    case "$1" in $g) return 0;; esac
+  done < "$tmp/allow"
+  return 1
+}
+
+# --- 1. tracked paths -----------------------------------------------------
+git ls-files 2>/dev/null | grep -iE "$VENDORS" > "$tmp/paths" || true
+if [ -s "$tmp/paths" ]; then
+  n=0
+  while IFS= read -r p; do allowed "$p" || { echo "  path:    $p"; n=$((n+1)); }; done < "$tmp/paths"
+  if [ "$n" -gt 0 ]; then
+    echo "::error::${n} tracked path(s) carry a site-generator vendor's name. Every one of them is a URL the browser requests, so the vendor's branding is in the page. Move the assets to a neutral folder (public/img/) and repoint the references in the same change — a favicon or logo that a <link> or <img> depends on must be REPLACED with the real brand mark, not merely deleted."
+    fail=1
+  fi
+fi
+
+# --- 2. tracked content ---------------------------------------------------
+git grep -Iin -E "$CONTENT_SIG" HEAD 2>/dev/null | sed 's#^HEAD:##' > "$tmp/content" || true
+if [ -s "$tmp/content" ]; then
+  n=0
+  while IFS= read -r line; do
+    p=${line%%:*}
+    allowed "$p" || { echo "  content: $(echo "$line" | cut -c1-140)"; n=$((n+1)); }
+  done < "$tmp/content"
+  if [ "$n" -gt 0 ]; then
+    echo "::error::${n} tracked line(s) reference a site-generator vendor's asset folder, build plugin or injected script. Drop the dependency and the script tag; repoint the asset URLs."
+    fail=1
+  fi
+fi
+
+# --- 3. commit messages, identities, trailers -----------------------------
+# Default scope is HEAD alone, which is what a fetch-depth:1 CI checkout has and
+# is enough to refuse the commit being pushed. Pass a range (or set
+# VENDORMARK_RANGE) to judge more, e.g. origin/main..HEAD for a whole PR.
+range=${range:-${VENDORMARK_RANGE:-}}
+if [ -n "$range" ]; then set -- "$range"; else set -- -1 HEAD; fi
+git log "$@" --format='%H%x01%an <%ae>%x01%cn <%ce>%x01%B%x01%(trailers:unfold=true)%x02' 2>/dev/null \
+  | tr -d '\n' | tr '\002' '\n' > "$tmp/log" || true
+if [ -s "$tmp/log" ]; then
+  n=0
+  while IFS= read -r c; do
+    echo "$c" | grep -qiE "$IDENT_SIG" || continue
+    echo "  commit:  $(echo "$c" | tr '\001' ' ' | cut -c1-150)"
+    n=$((n+1))
+  done < "$tmp/log"
+  if [ "$n" -gt 0 ]; then
+    echo "::error::${n} commit(s) name a site-generator vendor in the message, the author/committer identity or a Co-authored-by trailer. A working tree can be tidied; \`git log\` cannot be, short of a history rewrite and a force-push of every branch. Reword before pushing. Describe the work — \"generated placeholder assets\" — and never credit the generator."
+    fail=1
+  fi
+fi
+
+if [ "$fail" -eq 0 ]; then
+  echo "vendormark: OK — no site-generator branding in paths, tracked content, messages or identities"
+fi
+exit "$fail"
