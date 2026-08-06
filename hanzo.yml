@@ -89,6 +89,30 @@ test:
     # publishing decision wearing the word "secret". Until this, the only check
     # in the fleet lived inside hanzoai/ui's own Dockerfile, for one image.
     run: bash bin/publishable_test.sh
+  - name: publishable-rule-is-one-rule
+    # The rule is spelled twice on purpose, and this is what keeps it one rule.
+    #
+    # build.yml cannot call bin/publishable, because the tools checkout and the
+    # workflow resolve from DIFFERENT places: a caller pins the workflow at a ref
+    # its own forge resolves, while the tools step derives its ref from
+    # GITHUB_WORKFLOW_REF — which git.hanzo.ai does not set, so it falls back to
+    # `v1` and clones github.com. Measured on run 36473: `derived ref=v1`,
+    # `cloned https://github.com/hanzoai/ci@v1`. So a step calling a NEW file
+    # under $CI_HOME is broken on every forge run until a tag moves on a host the
+    # caller never named. The pipeline has to carry its own rule.
+    #
+    # Which leaves the pattern in two files, which is the same shape as the two
+    # copies of build.yml and gets the same treatment: demand they are identical
+    # and let the gate, not a reader, be the thing that notices.
+    run: |
+      set -e
+      a=$(grep -oE '^[[:space:]]*PUBLISHABLE_\*\|[^)]*\)' .github/workflows/build.yml | tr -d '[:space:]')
+      b=$(grep -oE '^[[:space:]]*PUBLISHABLE_\*\|[^)]*\)' bin/publishable          | tr -d '[:space:]')
+      [ -n "$a" ] && [ -n "$b" ] || { echo "::error::publishable rule not found in build.yml ($a) or bin/publishable ($b) — an edit renamed it, fix this assertion"; exit 1; }
+      [ "$a" = "$b" ] || { echo "::error::the publishable rule differs between build.yml and bin/publishable — build.yml is what runs, bin/publishable is what is tested, so a difference means the tested rule is not the enforced one:
+        build.yml:       $a
+        bin/publishable: $b"; exit 1; }
+      echo "OK: one publishable rule, two spellings — $a"
   - name: imgver
     # bin/imgver decides the version EVERY image in the fleet publishes — this
     # workflow's build lane calls it, and so does the imgver composite action the
