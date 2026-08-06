@@ -59,6 +59,36 @@ test:
         exit 1
       fi
       echo "OK: .github and .hanzo copies are one file ($(wc -l < .github/workflows/build.yml) lines)"
+  - name: gate-runs-before-delegate
+    # `mode: delegate` chooses WHERE the image is built. It must never choose
+    # WHETHER the commit was tested. It did: the delegate step was evaluated
+    # fourth, ahead of every toolchain and ahead of `test:`, and every other step
+    # carried `if: inputs.mode != 'delegate'` — so a delegated run skipped the
+    # gate along with the build and finished green in seconds having proven
+    # nothing. The seam was right and the ORDER was wrong, which is the kind of
+    # defect that reads as correct in every diff that touches one step at a time.
+    #
+    # Two assertions, because either one alone can be satisfied while the gate
+    # still does not run: the delegate POST must come AFTER the test gate, and
+    # the test gate must not be delegate-guarded.
+    run: |
+      set -e
+      f=.github/workflows/build.yml
+      t=$(grep -n '^      - name: Test (per hanzo.yml)$'                       "$f" | cut -d: -f1)
+      d=$(grep -n '^      - name: Delegate build to platform (mode=delegate)$' "$f" | cut -d: -f1)
+      [ -n "$t" ] && [ -n "$d" ] || { echo "::error::cannot find the test gate ($t) or the delegate step ($d) — a rename broke this assertion, fix the assertion"; exit 1; }
+      [ "$d" -gt "$t" ] || { echo "::error::the delegate step (line $d) runs BEFORE the test gate (line $t) — a delegated build would ship an ungated commit"; exit 1; }
+      if sed -n "${t}p;$((t+1)),$((t+80))p" "$f" | grep -m1 '^        if: ' | grep -q "mode != 'delegate'"; then
+        echo "::error::the test gate is guarded by \`inputs.mode != 'delegate'\` — delegate would skip it"; exit 1
+      fi
+      echo "OK: test gate at line $t, delegate POST at line $d, gate not delegate-guarded"
+  - name: publishable
+    # bin/publishable refuses a `build_secrets` name that has not declared itself
+    # public. That matters because a build_secret is baked in as a --build-arg,
+    # which `docker history` prints to anyone who can pull — so the key is a
+    # publishing decision wearing the word "secret". Until this, the only check
+    # in the fleet lived inside hanzoai/ui's own Dockerfile, for one image.
+    run: bash bin/publishable_test.sh
   - name: imgver
     # bin/imgver decides the version EVERY image in the fleet publishes — this
     # workflow's build lane calls it, and so does the imgver composite action the
