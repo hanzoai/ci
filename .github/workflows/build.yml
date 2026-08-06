@@ -413,28 +413,41 @@ jobs:
           if [ -n "$GIT_TOKEN" ]; then echo "::add-mask::$GIT_TOKEN"; echo "GIT_TOKEN=$GIT_TOKEN" >> "$GITHUB_ENV"; fi
           KUBECONFIG_B64=$(get KUBECONFIG)
           if [ -n "$KUBECONFIG_B64" ]; then echo "$KUBECONFIG_B64" | base64 -d > "$RUNNER_TEMP/kubeconfig"; echo "kubeconfig=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_OUTPUT"; fi
+          # The REGISTRY credential, and it is fetched UNCONDITIONALLY because
+          # every repo that publishes an image needs it — which is most of them.
+          #
+          # It used to sit inside the `bucket:`/`site:` gate below, and that gate
+          # is about writing bytes to hanzoai/s3, a completely unrelated lane. So
+          # a repo declaring only `images:` — hanzoai/bot, and it is not alone —
+          # asked KMS for nothing and reached the docker login step with empty
+          # credentials. The build then failed at the push with no clue pointing
+          # here, and the obvious "fix" is to paste REGISTRY_USER/REGISTRY_PASSWORD
+          # into the forge's org secrets, which is exactly the CI-only copy the
+          # comment below warns about: a second thing to rotate, and the one
+          # nobody remembers. The contract is that the ONLY things living in the
+          # forge are KMS_CLIENT_ID/SECRET, so the fetch moves out of the gate
+          # rather than the credential moving into GitHub.
+          #
+          # Empty is harmless: nothing is exported when KMS has no such key, and
+          # the login step already falls back to the kubeconfig read for repos
+          # provisioned before these names existed.
+          for k in REGISTRY_USER REGISTRY_PASSWORD; do
+            v=$(get "$k")
+            if [ -n "$v" ]; then
+              [ "$k" = REGISTRY_PASSWORD ] && echo "::add-mask::$v"
+              echo "$k=$v" >> "$GITHUB_ENV"
+            fi
+          done
           # Object-store credential, for the two lanes that write bytes to
           # hanzoai/s3: a repo publishing `binaries:` to a bucket:, and a repo
           # publishing a `site:` (whose build output has to land in the org's own
-          # storage space before /v1/sites can promote it). Same four names the
+          # storage space before /v1/sites can promote it). Same names the
           # services read at run time, from the same org/path/env — a CI-only copy
           # of a credential is a second thing to rotate and the one nobody
           # remembers. One fetch serves both lanes; a repo declaring both does not
           # ask KMS twice.
           SITE_DECL="$(yq -r '.site | type' hanzo.yml 2>/dev/null || echo '!!null')"
           if [ -n "$(yq -r '.bucket // ""' hanzo.yml 2>/dev/null || true)" ] || [ "$SITE_DECL" = '!!map' ]; then
-            # The registry credential comes from KMS like every other secret —
-            # the ONLY things that live in GitHub are KMS_CLIENT_ID/SECRET.
-            # Named here so a repo with no kubeconfig (most of them) can still
-            # reach registry.hanzo.ai; the kubeconfig read below stays as the
-            # fallback for repos provisioned before these names existed.
-            for k in REGISTRY_USER REGISTRY_PASSWORD; do
-              v=$(get "$k")
-              if [ -n "$v" ]; then
-                [ "$k" = REGISTRY_PASSWORD ] && echo "::add-mask::$v"
-                echo "$k=$v" >> "$GITHUB_ENV"
-              fi
-            done
             for k in S3_ADMIN_ACCESS_KEY S3_ADMIN_SECRET_KEY; do
               v=$(get "$k")
               if [ -n "$v" ]; then echo "::add-mask::$v"; echo "$k=$v" >> "$GITHUB_ENV"; fi
