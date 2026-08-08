@@ -39,26 +39,41 @@ test:
       set -e
       export GOWORK=off
       go test -count=1 ./...
-  - name: build-yml-is-one-file
-    # The reusable pipeline is published at TWO paths because two forges read two
-    # directories — github.com only `.github/workflows`, git.hanzo.ai only
-    # `.hanzo/workflows`. That is one artifact spelled twice, and nothing until
-    # now asserted it: the `.hanzo` copy had drifted nine lines (a truncated
-    # second `on:` block and a duplicate `name:` key) and no reader could see it,
-    # because the only consumer of that copy is a forge no push from here reaches.
+  - name: one-definition
+    # The reusable answers at TWO addresses because two forges read two
+    # directories, and 99 repos are pinned across both. Only one address may hold
+    # the pipeline; the other forwards. This asserts which, and that the hop
+    # loses nothing.
     #
-    # The ONLY legitimate difference is the path each names for itself, so
-    # normalise that one spelling and demand byte equality of the rest. A gate
-    # that allowed "the important parts match" would be a gate that cannot say
-    # what important means.
+    # THE DEFINITION GOES IN `.github/workflows` AND THE FORWARDER IN `.hanzo`,
+    # never the reverse. github.com resolves a local reusable (`uses: ./…`) out of
+    # `.github/workflows` and nowhere else, so a forwarder there naming
+    # `./.hanzo/…` is unresolvable: the run ends as `startup_failure` with no
+    # steps, which prints no failing step to read. That is what every github-side
+    # caller did — all 12 `spec-update` fan-outs among them — while the forge-side
+    # callers, reading the definition directly, stayed green and hid it.
+    #
+    # The second half is the one a diff cannot see. An input the forwarder does
+    # not declare arrives at `${{ inputs.x }}` as the empty string, and an input
+    # it declares but does not pass on never reaches the definition at all — both
+    # silently substitute a default for the caller's value. So the two input sets
+    # and the carried set must be the same set, not merely overlapping.
     run: |
       set -e
-      norm() { sed 's|\.hanzo/workflows/build\.yml|.github/workflows/build.yml|g' "$1"; }
-      if ! diff -u <(norm .github/workflows/build.yml) <(norm .hanzo/workflows/build.yml); then
-        echo "::error::the two published copies of the reusable have diverged. They are one file at two paths — edit both, or the forge runs a pipeline github.com has never seen."
-        exit 1
-      fi
-      echo "OK: .github and .hanzo copies are one file ($(wc -l < .github/workflows/build.yml) lines)"
+      def=.github/workflows/build.yml
+      fwd=.hanzo/workflows/build.yml
+      grep -q '^    uses: \./\.github/workflows/build\.yml$' "$fwd" || {
+        echo "::error::$fwd must forward to ./.github/workflows/build.yml — the definition cannot live under .hanzo, github.com cannot resolve a local reusable there"; exit 1; }
+      grep -q '^      - name: ' "$fwd" && {
+        echo "::error::$fwd has grown steps — the pipeline has exactly one definition and it is $def"; exit 1; } || true
+      grep -q '^      - name: ' "$def" || {
+        echo "::error::$def holds no steps — the definition and the forwarder have been swapped"; exit 1; }
+      declared() { sed -n '/^on:$/,/^jobs:$/p' "$1" | sed -n 's/^      \([a-z]*\):$/\1/p'; }
+      diff <(declared "$def") <(declared "$fwd") || {
+        echo "::error::the forwarder declares different inputs than $def — one it omits arrives as the empty string and overrides the definition's default"; exit 1; }
+      diff <(declared "$def") <(sed -n 's/^      \([a-z]*\): .*inputs\..*/\1/p' "$fwd") || {
+        echo "::error::the forwarder declares an input it never passes on — the caller's value is dropped at the hop"; exit 1; }
+      echo "OK: one definition ($(wc -l < "$def") lines), one forwarder carrying all $(declared "$def" | wc -l) inputs"
   - name: gate-runs-before-delegate
     # `mode: delegate` chooses WHERE the image is built. It must never choose
     # WHETHER the commit was tested. It did: the delegate step was evaluated
