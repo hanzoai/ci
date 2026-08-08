@@ -112,7 +112,7 @@ test:
     # and let the gate, not a reader, be the thing that notices.
     run: |
       set -e
-      a=$(grep -oE '^[[:space:]]*PUBLISHABLE_\*\|[^)]*\)' .github/workflows/build.yml | tr -d '[:space:]')
+      a=$(grep -oE '^[[:space:]]*PUBLISHABLE_\*\|[^)]*\)' .hanzo/workflows/build.yml | tr -d '[:space:]')
       b=$(grep -oE '^[[:space:]]*PUBLISHABLE_\*\|[^)]*\)' bin/publishable          | tr -d '[:space:]')
       [ -n "$a" ] && [ -n "$b" ] || { echo "::error::publishable rule not found in build.yml ($a) or bin/publishable ($b) — an edit renamed it, fix this assertion"; exit 1; }
       [ "$a" = "$b" ] || { echo "::error::the publishable rule differs between build.yml and bin/publishable — build.yml is what runs, bin/publishable is what is tested, so a difference means the tested rule is not the enforced one:
