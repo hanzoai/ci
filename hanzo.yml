@@ -40,40 +40,31 @@ test:
       export GOWORK=off
       go test -count=1 ./...
   - name: one-definition
-    # The reusable answers at TWO addresses because two forges read two
-    # directories, and 99 repos are pinned across both. Only one address may hold
-    # the pipeline; the other forwards. This asserts which, and that the hop
-    # loses nothing.
+    # The pipeline has ONE address: .hanzo/workflows/build.yml. Nothing runs on
+    # github.com, so the constraint that used to split this in two — github.com
+    # resolves a local reusable only out of `.github/workflows` — no longer buys
+    # anything, and the split it forced was costing the forge instead.
     #
-    # THE DEFINITION GOES IN `.github/workflows` AND THE FORWARDER IN `.hanzo`,
-    # never the reverse. github.com resolves a local reusable (`uses: ./…`) out of
-    # `.github/workflows` and nowhere else, so a forwarder there naming
-    # `./.hanzo/…` is unresolvable: the run ends as `startup_failure` with no
-    # steps, which prints no failing step to read. That is what every github-side
-    # caller did — all 12 `spec-update` fan-outs among them — while the forge-side
-    # callers, reading the definition directly, stayed green and hid it.
+    # The forwarder is what broke. A caller naming the forwarder made the forge
+    # take a second hop it cannot take: the run expanded into jobs with no labels,
+    # no steps and no runner, and reported `failure` with nothing to read. Every
+    # cicd lane in the fleet had been red that way for a day — insights, cloud,
+    # universe, and this repo — while the deploy lanes, which name their runner
+    # directly, stayed green and hid it.
     #
-    # The second half is the one a diff cannot see. An input the forwarder does
-    # not declare arrives at `${{ inputs.x }}` as the empty string, and an input
-    # it declares but does not pass on never reaches the definition at all — both
-    # silently substitute a default for the caller's value. So the two input sets
-    # and the carried set must be the same set, not merely overlapping.
+    # So: one file, no hop, and nothing to keep in sync. This asserts the
+    # definition is here and holds steps, and that no workflow has reappeared
+    # under `.github/workflows` to become a second address.
     run: |
       set -e
-      def=.github/workflows/build.yml
-      fwd=.hanzo/workflows/build.yml
-      grep -q '^    uses: \./\.github/workflows/build\.yml$' "$fwd" || {
-        echo "::error::$fwd must forward to ./.github/workflows/build.yml — the definition cannot live under .hanzo, github.com cannot resolve a local reusable there"; exit 1; }
-      grep -q '^      - name: ' "$fwd" && {
-        echo "::error::$fwd has grown steps — the pipeline has exactly one definition and it is $def"; exit 1; } || true
+      def=.hanzo/workflows/build.yml
       grep -q '^      - name: ' "$def" || {
-        echo "::error::$def holds no steps — the definition and the forwarder have been swapped"; exit 1; }
-      declared() { sed -n '/^on:$/,/^jobs:$/p' "$1" | sed -n 's/^      \([a-z]*\):$/\1/p'; }
-      diff <(declared "$def") <(declared "$fwd") || {
-        echo "::error::the forwarder declares different inputs than $def — one it omits arrives as the empty string and overrides the definition's default"; exit 1; }
-      diff <(declared "$def") <(sed -n 's/^      \([a-z]*\): .*inputs\..*/\1/p' "$fwd") || {
-        echo "::error::the forwarder declares an input it never passes on — the caller's value is dropped at the hop"; exit 1; }
-      echo "OK: one definition ($(wc -l < "$def") lines), one forwarder carrying all $(declared "$def" | wc -l) inputs"
+        echo "::error::$def holds no steps — it is the definition, not a forwarder"; exit 1; }
+      grep -q '^    uses: ' "$def" && {
+        echo "::error::$def forwards somewhere — the forge cannot take a second hop, that is what this layout removed"; exit 1; } || true
+      [ -d .github/workflows ] && {
+        echo "::error::.github/workflows is back — nothing runs on github.com and a second address is how the fleet went red"; exit 1; } || true
+      echo "OK: one definition ($(wc -l < "$def") lines), no forwarder, no second address"
   - name: gate-runs-before-delegate
     # `mode: delegate` chooses WHERE the image is built. It must never choose
     # WHETHER the commit was tested. It did: the delegate step was evaluated
