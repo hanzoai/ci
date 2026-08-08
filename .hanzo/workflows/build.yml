@@ -331,19 +331,21 @@ jobs:
           # credential from KMS (it silently fell back to GH_PAT and failed on
           # private hanzoai/cloud). hanzo.yml `kms.org` and KMS_ORG still override.
           if [ -z "$ORG" ]; then
+            # A brand owns MANY GitHub orgs and exactly one KMS tenant. hanzo-inc,
+            # hanzo-apps, hanzo-js, hanzo-go, hanzo-rs, hanzo-cpp, hanzogui and
+            # hanzos3 all bill and seal to KMS org `hanzo`, the same as hanzoai.
+            # Matching the family by prefix rather than listing the orgs is what
+            # keeps a NEW org from being a silent outage: enumerating them meant
+            # every org added after this line fell through to the literal owner,
+            # which is not a KMS org, and the build then looked for its deploy
+            # credential at a tenant that does not exist. That failure LOOKS fine
+            # — the read below takes its org from the TOKEN, not the URL — so only
+            # the fallback URL and the error messages were wrong, and they sent
+            # the reader hunting a tenant instead of a credential.
             case "${{ github.repository_owner }}" in
-              hanzoai) ORG=hanzo ;;
-              # hanzo-inc is the same TENANT as hanzoai — pay, commerce and the
-              # rest of the company surfaces bill and seal to KMS org `hanzo`.
-              # Without this line ORG fell through to the literal owner,
-              # "hanzo-inc", which is not a KMS org. That still LOOKED fine,
-              # because the read below takes its org from the TOKEN, not the URL
-              # — so the only things that were wrong were the fallback URL and
-              # every error message, which named an org that does not exist and
-              # sent the reader looking for a tenant instead of a credential.
-              hanzo-inc) ORG=hanzo ;;
-              luxfi)   ORG=lux ;;
-              zooai)   ORG=zoo ;;
+              hanzo*)  ORG=hanzo ;;
+              lux*)    ORG=lux ;;
+              zoo*)    ORG=zoo ;;
               *)       ORG="${{ github.repository_owner }}" ;;
             esac
           fi

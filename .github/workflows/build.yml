@@ -518,6 +518,37 @@ jobs:
               # one at build time and only shows up as silence in production.
               echo "::error::build_secret $bs is not readable at $KMS_ENDPOINT ($ORG/$PATHQ env=$ENV) — refusing to bake an empty value. Seal it, or drop it from hanzo.yml build_secrets."; exit 1
             fi
+            # A publishable key gets ASKED whether it still works, because present
+            # and readable is not the same as usable and every check before this
+            # one stops at present.
+            #
+            # This is the gap that took out hanzo.ai, cloud.hanzo.ai and
+            # docs.hanzo.ai at once. The key they baked, pk-live-c886…, was sealed,
+            # non-empty and correctly `pk-` shaped — it satisfied every gate in
+            # this file and in each repo's Dockerfile — but its PROJECT had been
+            # deleted, so the door answered 403 ingest_key_unknown and the sites
+            # lost 100% of their events while every build stayed green. docs then
+            # rebuilt cleanly on 08-06 and baked the same dead key again, because
+            # nothing anywhere asks.
+            #
+            # Shape cannot see a deleted project; only the door knows. One POST
+            # with an empty batch is a no-op that returns 200 for a live key, 403
+            # for a key naming no project, 401 for one that cannot be read at all.
+            #
+            # Scoped to pk- values so it never fires on an unrelated build_secret,
+            # and it fails CLOSED: a dead key is a broken artifact, not a warning.
+            case "$v" in
+              pk-*)
+                code=$(curl -s -o /tmp/ingest_probe.json -w '%{http_code}' --max-time 20 \
+                  -X POST "https://api.hanzo.ai/v1/event?ingest_key=$v" \
+                  -H 'content-type: application/json' -d '{"batch":[]}' || echo 000)
+                case "$code" in
+                  200) echo "build_secret $bs resolves at the ingest door (200)" ;;
+                  000) echo "::warning::could not reach the ingest door to check $bs; proceeding (network, not the key)" ;;
+                  *)   echo "::error::build_secret $bs does not resolve: the door answered $code $(cat /tmp/ingest_probe.json 2>/dev/null). Baking it ships an image that drops every event. Rotate the KMS value, then rebuild."; exit 1 ;;
+                esac
+                ;;
+            esac
             echo "::add-mask::$v"
             { echo "$bs<<__KMS_BUILDARG_EOF__"; echo "$v"; echo "__KMS_BUILDARG_EOF__"; } >> "$GITHUB_ENV"
           done
