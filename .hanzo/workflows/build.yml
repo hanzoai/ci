@@ -1433,7 +1433,7 @@ jobs:
         # publish is.
         if: inputs.mode != 'delegate' && steps.client.outputs.ran == '1' && steps.client.outputs.changed == '1' && github.event_name != 'pull_request'
         env:
-          GH_PAT: ${{ secrets.GH_PAT }}
+          FORGE_TOKEN: ${{ secrets.FORGE_TOKEN }}
         run: |
           set -euo pipefail
           git config user.name hanzo-dev; git config user.email dev@hanzo.ai
@@ -1483,14 +1483,36 @@ jobs:
 
           git add -A
           git commit -q -m "$MSG"
-          REMOTE="https://x-access-token:${GH_PAT}@github.com/${{ github.repository }}"
+          # THE PROJECTION GOES BACK WHERE IT CAME FROM. This pushed to
+          # github.com, and the whole job had checked out from, generated
+          # against and pinned itself to git.hanzo.ai — so the last act of a
+          # successful regeneration was to offer the result to a host that had
+          # never seen the parent commit. Measured on hanzoai/python-sdk, whose
+          # client lane and full test gate had just gone green: `fatal: did not
+          # receive expected object`, then `[rejected] HEAD -> main (fetch
+          # first)` and `[remote rejected] v3.2.3`. The regeneration was correct
+          # and landed nowhere, which is indistinguishable from never running.
+          #
+          # GITHUB_SERVER_URL is the host this run belongs to — the forge's
+          # in-cluster address on a forge runner — so the push is addressed the
+          # same way the checkout was, and FORGE_TOKEN is the credential that
+          # host takes. The tag lands where the publish workflow that watches
+          # for it also lives.
+          [ -n "${FORGE_TOKEN:-}" ] || { echo "::error::the cut pushes the projection back to git.hanzo.ai and needs FORGE_TOKEN (contents:write)"; exit 1; }
+          REMOTE="${GITHUB_SERVER_URL:-https://git.hanzo.ai}"
+          REMOTE="${REMOTE%/}/${{ github.repository }}"
+          git config --local http.extraheader "Authorization: token ${FORGE_TOKEN}"
+          # The branch this run is on. act_runner leaves ref_name empty on an
+          # ordinary push, and `HEAD:` with nothing after the colon is not a
+          # refspec, so the default is spelled out rather than assumed.
+          BRANCH="${GITHUB_REF_NAME:-}"; [ -n "$BRANCH" ] || BRANCH=main
           if [ -n "$NEXT" ]; then
             git tag "v${NEXT}"
-            git push "$REMOTE" HEAD:${{ github.event.repository.default_branch }} "refs/tags/v${NEXT}"
+            git push "$REMOTE" "HEAD:$BRANCH" "refs/tags/v${NEXT}"
             echo "cut v${NEXT} — the repo's tag lane publishes it"
             echo "### client v${NEXT} from ${SPEC_REPO}@${SPEC_REF}" >> "$GITHUB_STEP_SUMMARY"
           else
-            git push "$REMOTE" HEAD:${{ github.event.repository.default_branch }}
+            git push "$REMOTE" "HEAD:$BRANCH"
             echo "::warning::projection committed but NOT cut — hanzo.yml declares no client.version:, so this repo publishes when a human tags it"
             echo "### projection from ${SPEC_REPO}@${SPEC_REF} — not cut (no client.version:)" >> "$GITHUB_STEP_SUMMARY"
           fi
