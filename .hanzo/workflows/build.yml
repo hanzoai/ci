@@ -672,18 +672,43 @@ jobs:
             echo "::notice::oci.hanzo.ai login failed — mirror skipped (GHCR-only push)"
           fi
 
+      - name: Locate the Go module
+        # WHICH go.mod, not just whether one exists. A POLYGLOT repo keeps its
+        # module one level down — hanzoai/flags is `go/ python/ rust/
+        # typescript/` — so a root-only look saw no Go, skipped the provision
+        # below, and its `go test ./...` gate died with the exact
+        # `go: command not found` that step exists to prevent. The Node gate
+        # further down already reads `**/package.json` for this same reason.
+        #
+        # Root wins when present, so every repo with a top-level module resolves
+        # exactly as before. vendor/ and node_modules/ are excluded because a
+        # dependency's go.mod is not this repo's toolchain.
+        id: gomod
+        run: |
+          set -euo pipefail
+          if [ -f go.mod ]; then
+            f=go.mod
+          else
+            f=$(find . -name go.mod -not -path './vendor/*' -not -path '*/node_modules/*' 2>/dev/null \
+                  | sed 's|^\./||' \
+                  | awk '{ print gsub(/\//,"/") " " $0 }' \
+                  | sort -n | head -1 | cut -d' ' -f2- || true)
+          fi
+          echo "file=${f}" >> "$GITHUB_OUTPUT"
+          [ -n "${f}" ] && echo "go module: ${f}" || echo "no go module — Go gates will not be provisioned"
+
       - name: Provision Go toolchain (go test gates on bare runners)
         # hanzo.yml `test:` gates (e.g. `go vet ./...`, `go test ...`) run
         # DIRECTLY on the runner, NOT inside a build container — but the stock
         # runner image may ship no Go, so a Go
         # gate dies with `go: command not found` (exit 127). Provision the repo's
-        # OWN Go version from go.mod so the toolchain matches the module exactly.
-        # Guarded to Go repos (go.mod present) so pure-JS/TS callers are
-        # unaffected; harmless if a future runner image bakes Go in.
-        if: hashFiles('go.mod') != ''
+        # OWN Go version from its go.mod so the toolchain matches the module
+        # exactly. Guarded to Go repos so pure-JS/TS callers are unaffected;
+        # harmless if a future runner image bakes Go in.
+        if: steps.gomod.outputs.file != ''
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version-file: ${{ steps.gomod.outputs.file }}
           cache: false
 
       - name: Provision C toolchain (cgo test gates)
@@ -694,7 +719,7 @@ jobs:
         # fails (snapshot mirror rot: "no longer has a Release file"),
         # repoint archive.ubuntu.com at the DO mirror — both sources.list and
         # noble's deb822 ubuntu.sources — and retry once.
-        if: hashFiles('go.mod') != ''
+        if: steps.gomod.outputs.file != ''
         run: |
           command -v gcc >/dev/null 2>&1 && exit 0
           sudo apt-get update -qq || {
@@ -736,7 +761,7 @@ jobs:
         # the exact failure this workflow refuses everywhere else.
         # Guarded to Rust callers (Cargo.toml present); a no-op once a runner
         # image bakes rustup in.
-        if: hashFiles('Cargo.toml') != ''
+        if: hashFiles('Cargo.toml', '**/Cargo.toml') != ''
         uses: dtolnay/rust-toolchain@stable
 
       - name: Provision Java toolchain (client codegen)
@@ -1026,7 +1051,7 @@ jobs:
         # `http`. Take the scheme and the host as the two values they are, and
         # compare the HOST against github.com so the guard cannot be fooled by a
         # spelling either.
-        if: hashFiles('go.mod') != ''
+        if: steps.gomod.outputs.file != ''
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
           FORGE_TOKEN: ${{ secrets.FORGE_TOKEN }}
@@ -1938,3 +1963,4 @@ jobs:
           # BodyLimit are all checked inside sitepublish, before anything is sent,
           # so each refusal names its own number instead of arriving as a 4xx.
           HANZO_API="$API" "$CI_HOME/bin/sitepublish" "$SLUG" "$DIR"
+
