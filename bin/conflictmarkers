@@ -79,19 +79,51 @@ L=$(printf '<%.0s' $(seq 7))
 E=$(printf '=%.0s' $(seq 7))
 R=$(printf '>%.0s' $(seq 7))
 
+# A FENCED CODE BLOCK IS QUOTATION, NOT CONTENT
+#
+# Indentation is the escape everywhere else here, and inside a fence it is not
+# available: leading spaces are rendered, so indenting would change what the
+# document SHOWS. And the shape alone cannot separate the two cases —
+# hanzoai/code documents Void's Search/Replace format, which deliberately spells
+# itself the way git does:
+#
+#   <<<<<<< ORIGINAL
+#   =======
+#   >>>>>>> UPDATED
+#
+# All three markers, in order, each at column 1. That is a real merge conflict
+# to every test above, and it is a code sample. Search/replace blocks in this
+# form are how most edit-applying tools prompt a model, so any repo that
+# documents one lands here.
+#
+# So read the fence: for Markdown, scan the file with fenced regions removed.
+# Only Markdown, and only into a temp file — the defect this exists to catch
+# lives in 23,000-line generated files, and those keep the direct path.
+# `--` is grep's option terminator, not awk's: awk reads it as a FILENAME and
+# dies "can't open file --". Paths reaching here come from `git grep -l`, so
+# they are tracked files, never options.
+scannable() {
+  awk '/^[[:space:]]*(```|~~~)/ { fence = !fence; next } !fence' "$1"
+}
+
 # Candidate files: those carrying a start marker that is NOT also an end marker
 # on the same line. `-l` for names only; the line numbers come later, per file.
 cands=$(git grep -I -l -E "^${L} " -- . || true)
 
 bad=""
+tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
 for f in $cands; do
-  grep -qE "^${L} " -- "$f" 2>/dev/null || continue
+  case "$f" in
+    *.md|*.markdown|*.mdx) scannable "$f" > "$tmp" 2>/dev/null; v="$tmp" ;;
+    *) v="$f" ;;
+  esac
+  grep -qE "^${L} " -- "$v" 2>/dev/null || continue
   # The same-line form (app's fixture) is not a conflict. Require at least one
   # start line that does not also carry an end marker.
-  grep -E "^${L} " -- "$f" 2>/dev/null | grep -qv -- "$R" || continue
+  grep -E "^${L} " -- "$v" 2>/dev/null | grep -qv -- "$R" || continue
   # And require the rest of the shape: a bare divider and a separate end line.
-  grep -qE "^${E}$" -- "$f" 2>/dev/null || continue
-  grep -E "^${R} " -- "$f" 2>/dev/null | grep -qv -- "$L" || continue
+  grep -qE "^${E}$" -- "$v" 2>/dev/null || continue
+  grep -E "^${R} " -- "$v" 2>/dev/null | grep -qv -- "$L" || continue
   bad="$bad $f"
 done
 
@@ -110,3 +142,4 @@ if [ -n "$bad" ]; then
 fi
 
 echo "OK: no committed conflict markers ($(git ls-files | wc -l) tracked files)"
+
