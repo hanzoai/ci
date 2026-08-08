@@ -830,18 +830,39 @@ jobs:
             *)                 MODE=move ;;
           esac
           # A CHECK is always about the document this tree already names; only a
-          # MOVE may take one from a dispatch. A manual re-run with no payload
-          # re-asks the document in .spec-lock, so pressing "run workflow" can
-          # never drag a client forward onto an undeployed document. main is the
-          # last resort, for a repo with no lock yet.
+          # MOVE may take a new one.
           LOCKED=$(sed -n 's/^ref=//p' .spec-lock 2>/dev/null || true)
           if [ "$MODE" = check ]; then
             [ -n "$LOCKED" ] || { echo "no .spec-lock — nothing to check against"; echo "ran=0" >> "$GITHUB_OUTPUT"; exit 0; }
             REF="$LOCKED"
           else
             REF=$(printf '%s' "$PAYLOAD" | jq -r '.sha // .version // ""')
+            # THE PROJECTION ASKS; NOTHING TELLS IT. With no payload — a schedule,
+            # or somebody pressing "run workflow" — read hanzoai/cloud's NEWEST
+            # TAG off the forge and move onto that.
+            #
+            # This replaces a fan-out that could not work in either direction:
+            # cloud pushed `repository_dispatch: spec-update` at nine repos, but
+            # github.com has zero self-hosted runners and every one of those
+            # callers asks for the forge's pool, so an accepted event queued until
+            # GitHub cancelled it a day later; and the forge, which has the
+            # runners, has no repository_dispatch endpoint at all. Twelve such
+            # dispatches exist and none ever ran a step.
+            #
+            # A TAG IS SAFE TO TAKE AND A BRANCH IS NOT, which is why this asks
+            # for one. cloud mints v<N> only after that sha has built, smoked and
+            # rolled out, so the newest tag is by construction a document
+            # production is already serving — the exact thing the old rule was
+            # protecting against reading main for. Sorted by the forge's own
+            # committer date, so the answer does not depend on tag name parsing.
+            if [ -z "$REF" ]; then
+              REF=$(curl -fsS -H "Authorization: token ${FORGE_TOKEN}" \
+                      "https://git.hanzo.ai/v1/repos/${SPEC_REPO}/tags?limit=1" \
+                    | jq -r '.[0].name // ""' || true)
+              [ -n "$REF" ] && echo "no payload: taking ${SPEC_REPO}'s newest tag ${REF}"
+            fi
             [ -n "$REF" ] || REF="$LOCKED"
-            [ -n "$REF" ] || REF=main
+            [ -n "$REF" ] || { echo "::error::no payload, no tag on ${SPEC_REPO}, and no .spec-lock — this tree names no document and none can be discovered"; exit 1; }
           fi
           WANT=$(printf '%s' "$PAYLOAD" | jq -r '.spec_sha256 // ""')
           VERSION=$(printf '%s' "$PAYLOAD" | jq -r '.version // ""')
