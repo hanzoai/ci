@@ -177,8 +177,21 @@ test:
     # turns 3, 9 and 1 of these tests red respectively. Offline and
     # deterministic: a curl shim answers the routes from fixtures, no network.
     run: bash bin/sitepublish_test.sh
+  - name: conflictmarkers
+    # bin/conflictmarkers runs against every repo in the fleet, so a false
+    # positive is as expensive as a miss: it blocks a build that would have
+    # worked, on a file the author cannot legally change. hanzoai/code is that
+    # case — VOID_CODEBASE_GUIDE.md documents Void's Search/Replace format,
+    # which deliberately spells itself the way git writes a conflict, and the
+    # escape used everywhere else here (indent it) would change what the page
+    # renders. So the suite pins BOTH directions: the .d.ts and unfenced-
+    # markdown conflicts still fail, and a fenced sample, a tilde fence,
+    # hanzoai/app's same-line fixture and an eight-bracket heredoc still pass.
+    # Offline and deterministic: git repos in temp dirs, no network.
+    run: bash bin/conflictmarkers_test.sh
 
 # No `deploy:` ON PURPOSE. Rollout is a reviewed tag pin in hanzoai/universe
 # (infra/k8s/operator/crs/ci.yaml), the same rule cloud and git follow: a
 # pipeline that both builds and rolls itself out can put an unreviewed image on
 # a public host, and cd.hanzo.ai's selfHeal would undo a direct patch anyway.
+
