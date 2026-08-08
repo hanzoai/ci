@@ -1,0 +1,11 @@
+# The detector and its test are where the signatures are DEFINED, so they match
+# themselves. Nothing else may carry a vendor mark, and that is the point: this
+# file names two paths, not a pattern, so an allowlist entry cannot quietly grow
+# to cover a page that really does ship someone else's branding.
+#
+# Left unlisted, `vendormark .` failed on this repo for every build — it read its
+# own CONTENT_SIG literal and reported the tool as a violation. A gate that
+# cannot pass over a correct tree teaches people to ignore it, and this one had
+# been red on main long enough for that to start.
+bin/vendormark
+bin/vendormark_test.sh
