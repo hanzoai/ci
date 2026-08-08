@@ -3,14 +3,23 @@
 # creds from KMS via Universal Auth at run time. Public so any org can import it
 # with `uses: hanzoai/ci/.github/workflows/build.yml@v1` + `secrets: inherit`.
 #
-# TWO PATHS, ONE FILE. git.hanzo.ai resolves only `.hanzo/workflows`, github.com
-# only `.github/workflows`, so this pipeline is published at both paths and a
-# caller pins whichever its forge can see. They are not two files that must be
-# kept in step — they are one artifact spelled twice, and hanzo.yml's
-# `build-yml-is-one-file` gate refuses any difference beyond the path each names
-# for itself. Nine stray lines had already drifted into the `.hanzo` copy — a
-# truncated second `on:` block and a second `name:` key — and no gate could see
-# it, because the only reader of that copy is a forge no push ever reaches.
+# THE DEFINITION LIVES HERE BECAUSE ONLY HERE RESOLVES ON BOTH FORGES. A caller
+# may pin either published address, and `.hanzo/workflows/build.yml` forwards to
+# this file for the 67 repos pinned at that one. The direction is not a taste:
+# github.com resolves a LOCAL reusable (`uses: ./…`) out of `.github/workflows`
+# and nowhere else, so a forwarder living here and naming `./.hanzo/…` cannot be
+# resolved at all — the run dies as `startup_failure` before its first step, and
+# a job with no steps reports no failing step to read. Every github-side caller
+# died that way, including all 12 `spec-update` fan-outs, while the forge-side
+# callers reading the definition directly stayed green. git.hanzo.ai resolves a
+# local reusable by path anywhere in the tree, so the forwarder is safe there and
+# only there.
+#
+# Neither copy is a duplicate of the other: this file holds the whole pipeline,
+# that one holds four `with:` lines, and hanzo.yml's `one-definition` gate refuses
+# any drift between the inputs this file declares and the inputs that one carries.
+# While both held a COPY they drifted inside a day — twenty lines landed in one
+# and not the other — which is the whole reason only one of them may have steps.
 #
 # The caller is ~7 lines (triggers + this `uses:`); all real config is hanzo.yml.
 name: Hanzo CI/CD
@@ -289,6 +298,26 @@ jobs:
           if [ -n "${GH_PAT:-}" ]; then
             echo "$GH_PAT" | docker login ghcr.io -u zeekay --password-stdin
           else
+            # SAY IT. This branch is the one that cost a day.
+            #
+            # The automatic token writes ONLY a package linked to this repo. That
+            # covers most of them, so the fallback works almost always and the
+            # almost is invisible: nothing here mentions which credential won,
+            # and the consequence surfaces twenty stages later as
+            #
+            #   denied: permission_denied: The token provided does not match expected scopes
+            #
+            # which reads as a broken token, a broken registry, or a broken repo
+            # — anything but "we quietly signed in as somebody else at step 3".
+            # An UNLINKED package hits it every time, and a package comes unlinked
+            # for a reason nobody remembers: its repo changed orgs. hanzoai/id
+            # moved to hanzo-inc, and from then on every one of its builds ran
+            # green through sixteen Docker stages and died at the push.
+            #
+            # A warning, not a refusal: public forks legitimately land here and
+            # create their own repo-linked package on first push. The fix is that
+            # the log now names the door it went through.
+            echo "::warning::GH_PAT is empty — pushing with the automatic token, which can write ONLY a package linked to this repo. An unlinked package will fail at push with 'does not match expected scopes'."
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           fi
 
@@ -518,6 +547,37 @@ jobs:
               # one at build time and only shows up as silence in production.
               echo "::error::build_secret $bs is not readable at $KMS_ENDPOINT ($ORG/$PATHQ env=$ENV) — refusing to bake an empty value. Seal it, or drop it from hanzo.yml build_secrets."; exit 1
             fi
+            # A publishable key gets ASKED whether it still works, because present
+            # and readable is not the same as usable and every check before this
+            # one stops at present.
+            #
+            # This is the gap that took out hanzo.ai, cloud.hanzo.ai and
+            # docs.hanzo.ai at once. The key they baked, pk-live-c886…, was sealed,
+            # non-empty and correctly `pk-` shaped — it satisfied every gate in
+            # this file and in each repo's Dockerfile — but its PROJECT had been
+            # deleted, so the door answered 403 ingest_key_unknown and the sites
+            # lost 100% of their events while every build stayed green. docs then
+            # rebuilt cleanly on 08-06 and baked the same dead key again, because
+            # nothing anywhere asks.
+            #
+            # Shape cannot see a deleted project; only the door knows. One POST
+            # with an empty batch is a no-op that returns 200 for a live key, 403
+            # for a key naming no project, 401 for one that cannot be read at all.
+            #
+            # Scoped to pk- values so it never fires on an unrelated build_secret,
+            # and it fails CLOSED: a dead key is a broken artifact, not a warning.
+            case "$v" in
+              pk-*)
+                code=$(curl -s -o /tmp/ingest_probe.json -w '%{http_code}' --max-time 20 \
+                  -X POST "https://api.hanzo.ai/v1/event?ingest_key=$v" \
+                  -H 'content-type: application/json' -d '{"batch":[]}' || echo 000)
+                case "$code" in
+                  200) echo "build_secret $bs resolves at the ingest door (200)" ;;
+                  000) echo "::warning::could not reach the ingest door to check $bs; proceeding (network, not the key)" ;;
+                  *)   echo "::error::build_secret $bs does not resolve: the door answered $code $(cat /tmp/ingest_probe.json 2>/dev/null). Baking it ships an image that drops every event. Rotate the KMS value, then rebuild."; exit 1 ;;
+                esac
+                ;;
+            esac
             echo "::add-mask::$v"
             { echo "$bs<<__KMS_BUILDARG_EOF__"; echo "$v"; echo "__KMS_BUILDARG_EOF__"; } >> "$GITHUB_ENV"
           done
@@ -553,7 +613,15 @@ jobs:
             echo "::notice::KMS GHCR token login failed — keeping the earlier login"
           fi
 
-      - name: Native registry credential (registry.hanzo.ai)
+      # oci.hanzo.ai IS THE HOST. registry.hanzo.ai was its alias and stopped
+      # resolving: /v2/ answers 404 there and 401 here, which is the difference
+      # between "no registry" and "a registry asking who you are". Because this
+      # step is best-effort by design — a mirror failure must not take the lane
+      # red — every build in the fleet has been quietly pushing GHCR-only since,
+      # logging a notice nobody reads. The credential needed no change: the
+      # in-cluster registry-credentials dockerconfig already carries auth for
+      # both names, and the jq below prefers the canonical one.
+      - name: Native registry credential (oci.hanzo.ai)
         if: inputs.mode != 'delegate'
         env:
           KUBECONFIG: ${{ steps.kms.outputs.kubeconfig }}
@@ -571,18 +639,18 @@ jobs:
           # where the Free plan hides org secrets... including these; private
           # repos set them at REPO level). KMS-kubeconfig read is the fallback.
           if [ -n "${REGISTRY_USER:-}" ] && [ -n "${REGISTRY_PASSWORD:-}" ]; then
-            # Best-effort: a registry.hanzo.ai login FAILURE (not just a missing
+            # Best-effort: an oci.hanzo.ai login FAILURE (not just a missing
             # cred) must never fail the run — the image still pushes to GHCR, the
             # primary. Without this guard, bash -e aborts the step and SKIPS the
             # build entirely (a registry hiccup takes the whole lane red).
-            if echo "$REGISTRY_PASSWORD" | docker login registry.hanzo.ai -u "$REGISTRY_USER" --password-stdin; then
+            if echo "$REGISTRY_PASSWORD" | docker login oci.hanzo.ai -u "$REGISTRY_USER" --password-stdin; then
               echo "MIRROR_OK=1" >> "$GITHUB_ENV"
             else
-              echo "::notice::registry.hanzo.ai login failed — mirror skipped (GHCR-only push)"
+              echo "::notice::oci.hanzo.ai login failed — mirror skipped (GHCR-only push)"
             fi
             exit 0
           fi
-          [ -z "${KUBECONFIG:-}" ] && { echo "::warning::no registry credential and no kubeconfig — image will NOT reach registry.hanzo.ai (ghcr only)"; exit 0; }
+          [ -z "${KUBECONFIG:-}" ] && { echo "::warning::no registry credential and no kubeconfig — image will NOT reach oci.hanzo.ai (ghcr only)"; exit 0; }
           # Bare runners ship no kubectl — same static provision the deploy
           # step uses.
           command -v kubectl >/dev/null 2>&1 || {
@@ -593,16 +661,16 @@ jobs:
           }
           CFG=$(kubectl -n hanzo get secret registry-credentials                   -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null | base64 -d || true)
           if [ -z "$CFG" ]; then
-            echo "::warning::registry-credentials not readable from this kubeconfig — image will NOT reach registry.hanzo.ai (ghcr only)"; exit 0
+            echo "::warning::registry-credentials not readable from this kubeconfig — image will NOT reach oci.hanzo.ai (ghcr only)"; exit 0
           fi
-          USERPASS=$(echo "$CFG" | jq -r '.auths["registry.hanzo.ai"].auth // empty' | base64 -d)
-          [ -z "$USERPASS" ] && { echo "::warning::no registry auth in dockerconfig — image will NOT reach registry.hanzo.ai (ghcr only)"; exit 0; }
+          USERPASS=$(echo "$CFG" | jq -r '.auths["oci.hanzo.ai"].auth // .auths["oci.hanzo.ai"].auth // empty' | base64 -d)
+          [ -z "$USERPASS" ] && { echo "::warning::no registry auth in dockerconfig — image will NOT reach oci.hanzo.ai (ghcr only)"; exit 0; }
           echo "::add-mask::${USERPASS#*:}"
           # Best-effort: login failure → skip mirror, never fail the run (see above).
-          if echo "${USERPASS#*:}" | docker login registry.hanzo.ai -u "${USERPASS%%:*}" --password-stdin; then
+          if echo "${USERPASS#*:}" | docker login oci.hanzo.ai -u "${USERPASS%%:*}" --password-stdin; then
             echo "MIRROR_OK=1" >> "$GITHUB_ENV"
           else
-            echo "::notice::registry.hanzo.ai login failed — mirror skipped (GHCR-only push)"
+            echo "::notice::oci.hanzo.ai login failed — mirror skipped (GHCR-only push)"
           fi
 
       - name: Provision Go toolchain (go test gates on bare runners)
@@ -712,9 +780,7 @@ jobs:
         # — cloud's next release included — ask a client repo "which document are
         # you?" without running a generator.
         #
-        # CREDENTIAL: SPEC_TOKEN, a fine-grained token with contents:read on
-        # hanzoai/cloud (private). The three existing generate.yml already
-        # declare this exact secret name for the repo this one replaces.
+        # CREDENTIAL: FORGE_TOKEN, contents:read on hanzoai/cloud at git.hanzo.ai.
         # TWO MODES, ONE FETCH, decided by the event — because there are two
         # questions and they need the same document.
         #
@@ -734,17 +800,18 @@ jobs:
         if: inputs.mode != 'delegate' && hashFiles('hanzo.yml') != ''
         id: client
         env:
-          # SPEC_TOKEN first, GH_PAT second, and the step SAYS which it used.
-          # SPEC_TOKEN is the least-privilege choice and stays the preferred one --
-          # but it is provisioned on no org and no repo on this forge, so the lane
-          # has never run. A missing org secret is "", not an error, so the guard
-          # below reported "needs SPEC_TOKEN" on every build with nothing to fix it.
-          # GH_PAT is provisioned on orgs/hanzoai and already reads private hanzoai
-          # repos, so it can serve until a fine-grained token is minted. Naming both
-          # and reporting the choice is the difference between a fallback and a
-          # silent credential swap.
-          SPEC_TOKEN: ${{ secrets.SPEC_TOKEN }}
-          GH_PAT: ${{ secrets.GH_PAT }}
+          # ONE HOST, SO ONE CREDENTIAL. The document lives on git.hanzo.ai and
+          # FORGE_TOKEN is what reads git.hanzo.ai — the same secret hanzoai/cloud
+          # already uses to cut the release tag this lane consumes.
+          #
+          # What stood here was a fallback chain, SPEC_TOKEN then GH_PAT, and both
+          # halves were wrong about which forge holds the document. SPEC_TOKEN is
+          # provisioned nowhere, so the lane always fell through; GH_PAT reads
+          # github.com, which mirrors hanzoai/cloud 4,968 commits behind and does
+          # not carry openapi.yaml at all. The chain therefore resolved to a
+          # credential that authenticated fine against a host with no document on
+          # it. It has never been safe — only unreached.
+          FORGE_TOKEN: ${{ secrets.FORGE_TOKEN }}
           PAYLOAD: ${{ toJson(github.event.client_payload) }}
         run: |
           set -euo pipefail
@@ -779,14 +846,21 @@ jobs:
           WANT=$(printf '%s' "$PAYLOAD" | jq -r '.spec_sha256 // ""')
           VERSION=$(printf '%s' "$PAYLOAD" | jq -r '.version // ""')
 
-          spec_tok="${SPEC_TOKEN:-}"; spec_src=SPEC_TOKEN
-          if [ -z "$spec_tok" ]; then spec_tok="${GH_PAT:-}"; spec_src=GH_PAT; fi
-          [ -n "$spec_tok" ] || { echo "::error::the client: lane needs SPEC_TOKEN (contents:read on ${SPEC_REPO}) or GH_PAT; neither is set"; exit 1; }
-          echo "spec credential: ${spec_src}"
+          [ -n "${FORGE_TOKEN:-}" ] || { echo "::error::the client: lane reads the document from git.hanzo.ai and needs FORGE_TOKEN (contents:read on ${SPEC_REPO}); it is unset"; exit 1; }
 
-          curl -fsSL -H "Authorization: Bearer ${spec_tok}" \
-            -H 'Accept: application/vnd.github.raw' \
-            "https://api.github.com/repos/${SPEC_REPO}/contents/${SPEC_PATH}?ref=${REF}" -o "$RUNNER_TEMP/spec"
+          # THE FORGE IS WHERE THE DOCUMENT IS. This lane runs on git.hanzo.ai's
+          # own runners against a repo whose canonical home is git.hanzo.ai, and
+          # it used to reach across to api.github.com for the bytes — a mirror
+          # that trails hanzoai/cloud by thousands of commits and does not serve
+          # openapi.yaml at all, so the fetch could only 404. Asking a mirror is
+          # not a weaker version of asking the source; it is asking a different
+          # question, and one whose answer no release ever produced.
+          #
+          # The forge serves its API at /v1/, NOT /api/v1/ — /api/v1 returns a 404
+          # that reads exactly like a rejected credential. Same route the CLI's
+          # Makefile takes, because there is one document at one address.
+          curl -fsSL -H "Authorization: token ${FORGE_TOKEN}" \
+            "https://git.hanzo.ai/v1/repos/${SPEC_REPO}/raw/${SPEC_PATH}?ref=${REF}" -o "$RUNNER_TEMP/spec"
           GOT=$(sha256sum "$RUNNER_TEMP/spec" | cut -d' ' -f1)
 
           # G2: one release, one document. A digest that does not match the one
@@ -809,12 +883,13 @@ jobs:
               "$REF" "$GOT" "$SPEC_REPO" "$SPEC_PATH" > .spec-lock
           fi
 
-          # SPEC_TOKEN carries the RESOLVED credential, not the raw secret. The
-          # generator does its own fetch when the spec repo is not already checked
-          # out ("no hanzoai/openapi checkout and no SPEC_TOKEN to clone one"), and
-          # it reads this name — so resolving the fallback only in the guard above
-          # left the script with nothing and moved the failure one line down.
-          export SPEC_TOKEN="$spec_tok"
+          # THE GENERATOR IS HANDED THE DOCUMENT, NOT THE MEANS TO GO FIND ONE.
+          # $SPEC is the bytes this step just fetched and digest-checked, so a
+          # generator that reads it is generating from the release's document by
+          # construction. The scripts used to clone a second repo instead — and
+          # four of them cloned one that could not resolve at $SPEC_REF at all —
+          # which is how a projection came to describe a document no release
+          # published. No credential travels onward: nothing downstream fetches.
           export SPEC="$RUNNER_TEMP/spec" SPEC_REF="$REF" SPEC_SHA256="$GOT" SPEC_VERSION="$VERSION"
           gen=$(yq -r '.client.generate // ""' hanzo.yml)
           if [ "$MODE" = check ]; then
@@ -1140,13 +1215,25 @@ jobs:
               [ -z "$iv" ] && iv=$(yq -r '.version // ""' hanzo.yml)
               ver=$(IMGVER_VERSION="$iv" "$CI_HOME/bin/imgver" "$repo" "$ctx")
             fi
+            # NO `latest`. Every build published it, branch and release alike,
+            # against a fleet rule that says a deployable tag is a semver or a
+            # sha and nothing else. It is the one tag that cannot answer "which
+            # build is this" — it names whatever finished most recently, so two
+            # digests wear it within a day and a pull is a race rather than a
+            # choice. Measured before removing: ZERO pins on it anywhere —
+            # charts, manifests, and all live workloads across every cluster.
+            # It was published for no reader.
+            #
+            # What every build still gets: an immutable `sha-<short7>` for
+            # forensics and a semver for pinning. Those two are the whole
+            # contract, and both are already below.
             if [ "$plats" = "linux/amd64" ]; then
               # single-arch: keep the exact legacy tag shape (-amd64) deploys expect.
-              TAGS="-t $repo:sha-${SHORT}-amd64${sfx:+-$sfx} -t $repo:${sfx:+$sfx-}latest"
+              TAGS="-t $repo:sha-${SHORT}-amd64${sfx:+-$sfx}"
             else
               # multi-arch: one arch-neutral manifest-list tag (no -amd64 suffix).
               docker run --privileged --rm tonistiigi/binfmt --install arm64 >/dev/null 2>&1 || true
-              TAGS="-t $repo:sha-${SHORT}${sfx:+-$sfx} -t $repo:${sfx:+$sfx-}latest"
+              TAGS="-t $repo:sha-${SHORT}${sfx:+-$sfx}"
             fi
             # Release (tag) build. The git tag IS the release name, so publish it
             # VERBATIM (v1.26.19) — that is the shape a universe CR pins, and
@@ -1218,9 +1305,9 @@ jobs:
             done
             [ -n "$dig" ] || { echo "::error::$pin not resolvable after push"; exit 1; }
             echo "| \`$pin\` | \`$dig\` |" >> "$RUNNER_TEMP/pins.md"
-            # Dual-host: mirror the exact tag set to registry.hanzo.ai (server-
+            # Dual-host: mirror the exact tag set to oci.hanzo.ai (server-
             # side manifest copy — no rebuild). ghcr.io/<org>/<name> →
-            # registry.hanzo.ai/<org>/<name>; public consumers keep ghcr, the fleet
+            # oci.hanzo.ai/<org>/<name>; public consumers keep ghcr, the fleet
             # is migrating to pull from ours. A skip here is now a WARNING, not
             # a notice: an image that never reaches our registry is the reason
             # a deploy still depends on GitHub, and that should be visible in
@@ -1236,7 +1323,7 @@ jobs:
               }
               # ONE mapping, stated once. The GHCR org and the registry org are
               # not the same word — ghcr.io/hanzoai/x mirrors to
-              # registry.hanzo.ai/hanzo/x — and a second copy of this table is
+              # oci.hanzo.ai/hanzo/x — and a second copy of this table is
               # how a push path and a pin drift into naming different images.
               rorg="${repo#*/}"; rname="${rorg#*/}"; rorg="${rorg%%/*}"
               case "$rorg" in
@@ -1244,10 +1331,10 @@ jobs:
                 zooai)   rorg=zoo ;;
                 *)       ;;   # bootnode, lux-private, ... map to themselves
               esac
-              mrepo="registry.hanzo.ai/$rorg/$rname"
+              mrepo="oci.hanzo.ai/$rorg/$rname"
               echo "$TAGS" | tr ' ' '\n' | grep -v '^-t$' | grep -v '^$' | while read -r ref; do
                 crane copy "$ref" "${mrepo}:${ref##*:}" \
-                  || echo "::warning::$ref did not reach registry.hanzo.ai (ghcr push unaffected)"
+                  || echo "::warning::$ref did not reach oci.hanzo.ai (ghcr push unaffected)"
               done
             fi
             echo "::endgroup::"
