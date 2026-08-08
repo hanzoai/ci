@@ -584,7 +584,15 @@ jobs:
             echo "::notice::KMS GHCR token login failed — keeping the earlier login"
           fi
 
-      - name: Native registry credential (registry.hanzo.ai)
+      # oci.hanzo.ai IS THE HOST. registry.hanzo.ai was its alias and stopped
+      # resolving: /v2/ answers 404 there and 401 here, which is the difference
+      # between "no registry" and "a registry asking who you are". Because this
+      # step is best-effort by design — a mirror failure must not take the lane
+      # red — every build in the fleet has been quietly pushing GHCR-only since,
+      # logging a notice nobody reads. The credential needed no change: the
+      # in-cluster registry-credentials dockerconfig already carries auth for
+      # both names, and the jq below prefers the canonical one.
+      - name: Native registry credential (oci.hanzo.ai)
         if: inputs.mode != 'delegate'
         env:
           KUBECONFIG: ${{ steps.kms.outputs.kubeconfig }}
@@ -602,18 +610,18 @@ jobs:
           # where the Free plan hides org secrets... including these; private
           # repos set them at REPO level). KMS-kubeconfig read is the fallback.
           if [ -n "${REGISTRY_USER:-}" ] && [ -n "${REGISTRY_PASSWORD:-}" ]; then
-            # Best-effort: a registry.hanzo.ai login FAILURE (not just a missing
+            # Best-effort: an oci.hanzo.ai login FAILURE (not just a missing
             # cred) must never fail the run — the image still pushes to GHCR, the
             # primary. Without this guard, bash -e aborts the step and SKIPS the
             # build entirely (a registry hiccup takes the whole lane red).
-            if echo "$REGISTRY_PASSWORD" | docker login registry.hanzo.ai -u "$REGISTRY_USER" --password-stdin; then
+            if echo "$REGISTRY_PASSWORD" | docker login oci.hanzo.ai -u "$REGISTRY_USER" --password-stdin; then
               echo "MIRROR_OK=1" >> "$GITHUB_ENV"
             else
-              echo "::notice::registry.hanzo.ai login failed — mirror skipped (GHCR-only push)"
+              echo "::notice::oci.hanzo.ai login failed — mirror skipped (GHCR-only push)"
             fi
             exit 0
           fi
-          [ -z "${KUBECONFIG:-}" ] && { echo "::warning::no registry credential and no kubeconfig — image will NOT reach registry.hanzo.ai (ghcr only)"; exit 0; }
+          [ -z "${KUBECONFIG:-}" ] && { echo "::warning::no registry credential and no kubeconfig — image will NOT reach oci.hanzo.ai (ghcr only)"; exit 0; }
           # Bare runners ship no kubectl — same static provision the deploy
           # step uses.
           command -v kubectl >/dev/null 2>&1 || {
@@ -624,16 +632,16 @@ jobs:
           }
           CFG=$(kubectl -n hanzo get secret registry-credentials                   -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null | base64 -d || true)
           if [ -z "$CFG" ]; then
-            echo "::warning::registry-credentials not readable from this kubeconfig — image will NOT reach registry.hanzo.ai (ghcr only)"; exit 0
+            echo "::warning::registry-credentials not readable from this kubeconfig — image will NOT reach oci.hanzo.ai (ghcr only)"; exit 0
           fi
-          USERPASS=$(echo "$CFG" | jq -r '.auths["registry.hanzo.ai"].auth // empty' | base64 -d)
-          [ -z "$USERPASS" ] && { echo "::warning::no registry auth in dockerconfig — image will NOT reach registry.hanzo.ai (ghcr only)"; exit 0; }
+          USERPASS=$(echo "$CFG" | jq -r '.auths["oci.hanzo.ai"].auth // .auths["oci.hanzo.ai"].auth // empty' | base64 -d)
+          [ -z "$USERPASS" ] && { echo "::warning::no registry auth in dockerconfig — image will NOT reach oci.hanzo.ai (ghcr only)"; exit 0; }
           echo "::add-mask::${USERPASS#*:}"
           # Best-effort: login failure → skip mirror, never fail the run (see above).
-          if echo "${USERPASS#*:}" | docker login registry.hanzo.ai -u "${USERPASS%%:*}" --password-stdin; then
+          if echo "${USERPASS#*:}" | docker login oci.hanzo.ai -u "${USERPASS%%:*}" --password-stdin; then
             echo "MIRROR_OK=1" >> "$GITHUB_ENV"
           else
-            echo "::notice::registry.hanzo.ai login failed — mirror skipped (GHCR-only push)"
+            echo "::notice::oci.hanzo.ai login failed — mirror skipped (GHCR-only push)"
           fi
 
       - name: Provision Go toolchain (go test gates on bare runners)
@@ -1261,9 +1269,9 @@ jobs:
             done
             [ -n "$dig" ] || { echo "::error::$pin not resolvable after push"; exit 1; }
             echo "| \`$pin\` | \`$dig\` |" >> "$RUNNER_TEMP/pins.md"
-            # Dual-host: mirror the exact tag set to registry.hanzo.ai (server-
+            # Dual-host: mirror the exact tag set to oci.hanzo.ai (server-
             # side manifest copy — no rebuild). ghcr.io/<org>/<name> →
-            # registry.hanzo.ai/<org>/<name>; public consumers keep ghcr, the fleet
+            # oci.hanzo.ai/<org>/<name>; public consumers keep ghcr, the fleet
             # is migrating to pull from ours. A skip here is now a WARNING, not
             # a notice: an image that never reaches our registry is the reason
             # a deploy still depends on GitHub, and that should be visible in
@@ -1279,7 +1287,7 @@ jobs:
               }
               # ONE mapping, stated once. The GHCR org and the registry org are
               # not the same word — ghcr.io/hanzoai/x mirrors to
-              # registry.hanzo.ai/hanzo/x — and a second copy of this table is
+              # oci.hanzo.ai/hanzo/x — and a second copy of this table is
               # how a push path and a pin drift into naming different images.
               rorg="${repo#*/}"; rname="${rorg#*/}"; rorg="${rorg%%/*}"
               case "$rorg" in
@@ -1287,10 +1295,10 @@ jobs:
                 zooai)   rorg=zoo ;;
                 *)       ;;   # bootnode, lux-private, ... map to themselves
               esac
-              mrepo="registry.hanzo.ai/$rorg/$rname"
+              mrepo="oci.hanzo.ai/$rorg/$rname"
               echo "$TAGS" | tr ' ' '\n' | grep -v '^-t$' | grep -v '^$' | while read -r ref; do
                 crane copy "$ref" "${mrepo}:${ref##*:}" \
-                  || echo "::warning::$ref did not reach registry.hanzo.ai (ghcr push unaffected)"
+                  || echo "::warning::$ref did not reach oci.hanzo.ai (ghcr push unaffected)"
               done
             fi
             echo "::endgroup::"
