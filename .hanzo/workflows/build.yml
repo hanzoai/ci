@@ -918,6 +918,28 @@ jobs:
           # which is how a projection came to describe a document no release
           # published. No credential travels onward: nothing downstream fetches.
           export SPEC="$RUNNER_TEMP/spec" SPEC_REF="$REF" SPEC_SHA256="$GOT" SPEC_VERSION="$VERSION"
+
+          # AND THE DRIVER ARRIVES THE SAME WAY. `generate.py` plus `sdks.yaml`
+          # are the one invocation five languages share, and every call site went
+          # and got them for itself: python and typescript cloned git.hanzo.ai
+          # anonymously, java and kotlin tried github.com through a SPEC_TOKEN /
+          # GH_TOKEN / GITHUB_TOKEN / ssh chain, go skipped the driver and read a
+          # different file over raw.githubusercontent.com. Five ways to reach one
+          # tool, four of them needing a credential the call site does not have.
+          #
+          # Measured on the first dispatch that ever reached this step (hanzoai/
+          # python-sdk, run 44584): `fatal: could not read Username for
+          # 'https://git.hanzo.ai'`, exit 128 — an anonymous clone of a private
+          # repo, from a job already holding the token that reads it. The lane has
+          # the credential, so the lane fetches the tool, once, and hands it over.
+          # A call site that no longer clones cannot be wrong about where to.
+          #
+          # extraheader rather than a token in the URL: a clone URL is echoed by
+          # git on failure and lands in the log verbatim.
+          export OPENAPI="$RUNNER_TEMP/driver"
+          [ -d "$OPENAPI" ] || git -c http.extraheader="Authorization: token ${FORGE_TOKEN}" \
+            clone --depth 1 -q https://git.hanzo.ai/hanzoai/openapi "$OPENAPI"
+
           gen=$(yq -r '.client.generate // ""' hanzo.yml)
           if [ "$MODE" = check ]; then
             echo "::group::client check ($SPEC_REPO@$REF)"
