@@ -1,7 +1,7 @@
 name: CI/CD
 # The gate for hanzoai/ci itself, on our own runners against git.hanzo.ai.
 #
-# THE LAW: `.github/workflows` runs zero CI; everything that gates or builds
+# THE LAW: `.github/workflows` does not exist; everything that gates or builds
 # lives here. All real config is the repo-root hanzo.yml — this file is the
 # ~7-line caller, exactly like cloud/commerce/console/git.
 #
