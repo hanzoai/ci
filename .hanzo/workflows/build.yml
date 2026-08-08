@@ -940,6 +940,20 @@ jobs:
           [ -d "$OPENAPI" ] || git -c http.extraheader="Authorization: token ${FORGE_TOKEN}" \
             clone --depth 1 -q https://git.hanzo.ai/hanzoai/openapi "$OPENAPI"
 
+          # AND AN INTERPRETER THAT CAN READ YAML, which is the driver's
+          # requirement and not any one language's. The parse toolchain above
+          # deliberately provides yq instead of PyYAML — pip is unavailable on
+          # locked-down nodes — so `python3 generate.py` finds no `yaml` module
+          # and dies on its import line, which is what the first regeneration to
+          # get this far actually did. uv carries its own interpreter and its own
+          # dependency resolution, needs no root, and is already how every python
+          # gate in this fleet runs. Guarded: a no-op where the image bakes it in.
+          command -v uv >/dev/null 2>&1 || {
+            curl -fsSL https://astral.sh/uv/install.sh | sh
+            export PATH="$HOME/.local/bin:$PATH"
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          }
+
           gen=$(yq -r '.client.generate // ""' hanzo.yml)
           if [ "$MODE" = check ]; then
             echo "::group::client check ($SPEC_REPO@$REF)"
