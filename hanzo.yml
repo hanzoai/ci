@@ -79,7 +79,7 @@ test:
     # the test gate must not be delegate-guarded.
     run: |
       set -e
-      f=.github/workflows/build.yml
+      f=.hanzo/workflows/build.yml
       t=$(grep -n '^      - name: Test (per hanzo.yml)$'                       "$f" | cut -d: -f1)
       d=$(grep -n '^      - name: Delegate build to platform (mode=delegate)$' "$f" | cut -d: -f1)
       [ -n "$t" ] && [ -n "$d" ] || { echo "::error::cannot find the test gate ($t) or the delegate step ($d) — a rename broke this assertion, fix the assertion"; exit 1; }

@@ -829,18 +829,46 @@ jobs:
             *)                 MODE=move ;;
           esac
           # A CHECK is always about the document this tree already names; only a
-          # MOVE may take one from a dispatch. A manual re-run with no payload
-          # re-asks the document in .spec-lock, so pressing "run workflow" can
-          # never drag a client forward onto an undeployed document. main is the
-          # last resort, for a repo with no lock yet.
+          # MOVE may take a new one.
           LOCKED=$(sed -n 's/^ref=//p' .spec-lock 2>/dev/null || true)
           if [ "$MODE" = check ]; then
             [ -n "$LOCKED" ] || { echo "no .spec-lock — nothing to check against"; echo "ran=0" >> "$GITHUB_OUTPUT"; exit 0; }
             REF="$LOCKED"
           else
             REF=$(printf '%s' "$PAYLOAD" | jq -r '.sha // .version // ""')
+            # THE PROJECTION ASKS; NOTHING TELLS IT. With no payload — a schedule,
+            # or somebody pressing "run workflow" — read hanzoai/cloud's NEWEST
+            # TAG off the forge and move onto that.
+            #
+            # This is the half that replaces a fan-out which could not work in
+            # either direction: hanzoai/cloud pushed `repository_dispatch:
+            # spec-update` at nine projection repos, but github.com has zero
+            # self-hosted runners and every one of those callers asks for the
+            # forge's pool, so an accepted event queued until GitHub cancelled it
+            # a day later; and the forge, which HAS the runners, has no
+            # repository_dispatch endpoint at all. Twelve such dispatches exist
+            # across the fleet and not one ever reached a first step, which is why
+            # the SDK repos sit on several different documents and none on the one
+            # cloud publishes. A repo puts `schedule:` on the forge caller it
+            # already has and regenerates on its own clock, with no credential
+            # spanning six owners.
+            #
+            # A TAG IS SAFE TO TAKE AND A BRANCH IS NOT, which is why this asks
+            # for one. The rule this replaces refused to move without a payload so
+            # nobody pressing "run workflow" could drag a client onto an undeployed
+            # document — a real hazard, and the `main` fallback below it was
+            # exactly that hazard. cloud mints v<N> only after that sha has built,
+            # smoked and rolled out, so its newest tag is by construction a
+            # document production is already serving. The protection is kept; the
+            # paralysis, and the branch read, are not.
+            if [ -z "$REF" ]; then
+              REF=$(curl -fsS -H "Authorization: token ${FORGE_TOKEN}" \
+                      "https://git.hanzo.ai/v1/repos/${SPEC_REPO}/tags?limit=1" \
+                    | jq -r '.[0].name // ""' || true)
+              [ -n "$REF" ] && echo "no payload: taking ${SPEC_REPO}'s newest tag ${REF}"
+            fi
             [ -n "$REF" ] || REF="$LOCKED"
-            [ -n "$REF" ] || REF=main
+            [ -n "$REF" ] || { echo "::error::no payload, no tag on ${SPEC_REPO}, and no .spec-lock — this tree names no document and none can be discovered"; exit 1; }
           fi
           WANT=$(printf '%s' "$PAYLOAD" | jq -r '.spec_sha256 // ""')
           VERSION=$(printf '%s' "$PAYLOAD" | jq -r '.version // ""')
