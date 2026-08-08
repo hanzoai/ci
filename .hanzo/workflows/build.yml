@@ -1169,13 +1169,25 @@ jobs:
               [ -z "$iv" ] && iv=$(yq -r '.version // ""' hanzo.yml)
               ver=$(IMGVER_VERSION="$iv" "$CI_HOME/bin/imgver" "$repo" "$ctx")
             fi
+            # NO `latest`. Every build published it, branch and release alike,
+            # against a fleet rule that says a deployable tag is a semver or a
+            # sha and nothing else. It is the one tag that cannot answer "which
+            # build is this" — it names whatever finished most recently, so two
+            # digests wear it within a day and a pull is a race rather than a
+            # choice. Measured before removing: ZERO pins on it anywhere —
+            # charts, manifests, and all live workloads across every cluster.
+            # It was published for no reader.
+            #
+            # What every build still gets: an immutable `sha-<short7>` for
+            # forensics and a semver for pinning. Those two are the whole
+            # contract, and both are already below.
             if [ "$plats" = "linux/amd64" ]; then
               # single-arch: keep the exact legacy tag shape (-amd64) deploys expect.
-              TAGS="-t $repo:sha-${SHORT}-amd64${sfx:+-$sfx} -t $repo:${sfx:+$sfx-}latest"
+              TAGS="-t $repo:sha-${SHORT}-amd64${sfx:+-$sfx}"
             else
               # multi-arch: one arch-neutral manifest-list tag (no -amd64 suffix).
               docker run --privileged --rm tonistiigi/binfmt --install arm64 >/dev/null 2>&1 || true
-              TAGS="-t $repo:sha-${SHORT}${sfx:+-$sfx} -t $repo:${sfx:+$sfx-}latest"
+              TAGS="-t $repo:sha-${SHORT}${sfx:+-$sfx}"
             fi
             # Release (tag) build. The git tag IS the release name, so publish it
             # VERBATIM (v1.26.19) — that is the shape a universe CR pins, and
