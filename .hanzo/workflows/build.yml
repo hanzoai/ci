@@ -289,6 +289,26 @@ jobs:
           if [ -n "${GH_PAT:-}" ]; then
             echo "$GH_PAT" | docker login ghcr.io -u zeekay --password-stdin
           else
+            # SAY IT. This branch is the one that cost a day.
+            #
+            # The automatic token writes ONLY a package linked to this repo. That
+            # covers most of them, so the fallback works almost always and the
+            # almost is invisible: nothing here mentions which credential won,
+            # and the consequence surfaces twenty stages later as
+            #
+            #   denied: permission_denied: The token provided does not match expected scopes
+            #
+            # which reads as a broken token, a broken registry, or a broken repo
+            # — anything but "we quietly signed in as somebody else at step 3".
+            # An UNLINKED package hits it every time, and a package comes unlinked
+            # for a reason nobody remembers: its repo changed orgs. hanzoai/id
+            # moved to hanzo-inc, and from then on every one of its builds ran
+            # green through sixteen Docker stages and died at the push.
+            #
+            # A warning, not a refusal: public forks legitimately land here and
+            # create their own repo-linked package on first push. The fix is that
+            # the log now names the door it went through.
+            echo "::warning::GH_PAT is empty — pushing with the automatic token, which can write ONLY a package linked to this repo. An unlinked package will fail at push with 'does not match expected scopes'."
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           fi
 
