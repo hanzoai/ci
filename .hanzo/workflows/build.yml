@@ -749,8 +749,28 @@ jobs:
         with:
           node-version: 22
       - name: Enable corepack (pnpm/yarn shims for JS test gates)
+        # corepack shims npm, pnpm and yarn — and ONLY those. A repo whose
+        # packageManager is `bun@…` makes it exit 1 with
+        #   Unsupported package manager specification (bun@1.3.9)
+        # which reads like a corrupt manifest rather than a tool that was never
+        # in corepack's remit; hanzoai/admin died there before running a test.
+        # Bun ships its own toolchain, provisioned in the next step.
         if: hashFiles('package.json', '**/package.json') != ''
-        run: corepack enable
+        run: |
+          set -euo pipefail
+          pm=$(node -p "require('./package.json').packageManager || ''" 2>/dev/null || echo '')
+          case "$pm" in
+            bun@*) echo "packageManager is ${pm} — corepack does not shim bun, skipping"; exit 0 ;;
+          esac
+          corepack enable
+
+      - name: Provision bun (bun test gates)
+        # Same guarded provision as the Go, Node and Rust steps: only for callers
+        # that declare it, harmless once a runner image bakes bun in. Keyed on the
+        # LOCKFILE rather than packageManager because that is what `hashFiles` can
+        # see without parsing, and a bun repo always has one.
+        if: hashFiles('bun.lock', '**/bun.lock', 'bun.lockb', '**/bun.lockb') != ''
+        uses: oven-sh/setup-bun@v2
 
       - name: Provision Rust toolchain (cargo test gates)
         # Same hole the Go and Node steps close, for the third language this fleet
@@ -1963,4 +1983,5 @@ jobs:
           # BodyLimit are all checked inside sitepublish, before anything is sent,
           # so each refusal names its own number instead of arriving as a 4xx.
           HANZO_API="$API" "$CI_HOME/bin/sitepublish" "$SLUG" "$DIR"
+
 
