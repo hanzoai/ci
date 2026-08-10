@@ -1546,20 +1546,27 @@ jobs:
           [ -n "${FORGE_TOKEN:-}" ] || { echo "::error::the cut pushes the projection back to git.hanzo.ai and needs FORGE_TOKEN (contents:write)"; exit 1; }
           REMOTE="${GITHUB_SERVER_URL:-https://git.hanzo.ai}"
           REMOTE="${REMOTE%/}/${{ github.repository }}"
-          # ON THE REMOTE'S OWN URL, because a bare `http.extraheader` loses to
-          # the one actions/checkout already wrote. Checkout sets
-          # `http.<server>/.extraheader` for the host it cloned from, and git
-          # picks the http.<url>.* entry whose URL matches longest — a
-          # host-only entry beats a keyless one, so the push carried the
-          # ACTIONS token rather than FORGE_TOKEN. Gitea will not let the
-          # actions token past a protected branch, so the last step of a
-          # successful regeneration died on `Not allowed to push to protected
-          # branch main` while the credential that is allowed sat unused in the
-          # environment. Measured on hanzoai/java-sdk run 20, whose client lane
-          # and both test gates had just gone green. Keying it to the repo URL
-          # is longer than checkout's host entry, so this one wins and
-          # checkout's own post-step cleanup still finds what it wrote.
-          git config --local "http.${REMOTE}.extraheader" "Authorization: token ${FORGE_TOKEN}"
+          # CLEAR WHAT CHECKOUT WROTE FIRST. `http.extraHeader` is MULTI-VALUED
+          # and url-matching does not displace a less specific entry: git sends
+          # EVERY matching header, and the server honours the first
+          # `Authorization` it reads. actions/checkout writes one for the host
+          # it cloned from, so setting ours merely put a second credential on
+          # the wire — the actions token won, and the last step of a successful
+          # regeneration died on `User -2 is not allowed to push to protected
+          # branch main` while the credential that IS allowed sat unused in the
+          # environment. Measured on hanzoai/java-sdk runs 20 and 21, whose
+          # client lane and both test gates had gone green; and on the wire:
+          #
+          #   git -c http.<host>/.extraheader='AUTHORIZATION: basic A' \
+          #       -c http.<host>/o/r.extraheader='Authorization: token F' ls-remote …
+          #     -> the request carries BOTH.
+          #
+          # One credential travels, which is the only shape that can be right.
+          # Safe to unset here because this is the last step of the job, and
+          # checkout's own post-step only unsets what it still finds.
+          git config --local --name-only --get-regexp '^http\..*extraheader$' 2>/dev/null \
+            | while read -r k; do git config --local --unset-all "$k"; done
+          git config --local http.extraheader "Authorization: token ${FORGE_TOKEN}"
           # The branch this run is on. act_runner leaves ref_name empty on an
           # ordinary push, and `HEAD:` with nothing after the colon is not a
           # refspec, so the default is spelled out rather than assumed.
