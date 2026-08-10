@@ -1546,7 +1546,20 @@ jobs:
           [ -n "${FORGE_TOKEN:-}" ] || { echo "::error::the cut pushes the projection back to git.hanzo.ai and needs FORGE_TOKEN (contents:write)"; exit 1; }
           REMOTE="${GITHUB_SERVER_URL:-https://git.hanzo.ai}"
           REMOTE="${REMOTE%/}/${{ github.repository }}"
-          git config --local http.extraheader "Authorization: token ${FORGE_TOKEN}"
+          # ON THE REMOTE'S OWN URL, because a bare `http.extraheader` loses to
+          # the one actions/checkout already wrote. Checkout sets
+          # `http.<server>/.extraheader` for the host it cloned from, and git
+          # picks the http.<url>.* entry whose URL matches longest — a
+          # host-only entry beats a keyless one, so the push carried the
+          # ACTIONS token rather than FORGE_TOKEN. Gitea will not let the
+          # actions token past a protected branch, so the last step of a
+          # successful regeneration died on `Not allowed to push to protected
+          # branch main` while the credential that is allowed sat unused in the
+          # environment. Measured on hanzoai/java-sdk run 20, whose client lane
+          # and both test gates had just gone green. Keying it to the repo URL
+          # is longer than checkout's host entry, so this one wins and
+          # checkout's own post-step cleanup still finds what it wrote.
+          git config --local "http.${REMOTE}.extraheader" "Authorization: token ${FORGE_TOKEN}"
           # The branch this run is on. act_runner leaves ref_name empty on an
           # ordinary push, and `HEAD:` with nothing after the colon is not a
           # refspec, so the default is spelled out rather than assumed.
