@@ -42,8 +42,13 @@ runs:
       run: |
         set -euo pipefail
         ref="${GITHUB_ACTION_REF:-v1}"
+        # The break tests for the TOOL, not for the clone: a host that answers
+        # with a tree carrying no bin/sitedeploy must fall through to the next
+        # one rather than break and dead-end the job on it.
         for url in https://git.hanzo.ai/hanzoai/ci https://github.com/hanzoai/ci; do
-          git clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/sitedeploy-ci" 2>/dev/null && break
+          git clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/sitedeploy-ci" 2>/dev/null \
+            && [ -x "$RUNNER_TEMP/sitedeploy-ci/bin/sitedeploy" ] && break
+          rm -rf "$RUNNER_TEMP/sitedeploy-ci"
         done
         [ -x "$RUNNER_TEMP/sitedeploy-ci/bin/sitedeploy" ] \
           || { echo "::error::could not fetch hanzoai/ci@$ref (bin/sitedeploy)"; exit 1; }

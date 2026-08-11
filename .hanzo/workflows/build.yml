@@ -153,9 +153,21 @@ jobs:
           raw="${GITHUB_WORKFLOW_REF:-}"
           ref="${raw##*@}"; ref="${ref#refs/heads/}"; ref="${ref#refs/tags/}"; ref="${ref:-v1}"
           echo "derived ref=${ref}"
-          for url in https://github.com/hanzoai/ci https://git.hanzo.ai/hanzo/ci https://git.hanzo.ai/hanzoai/ci; do
+          # The forge first, because the forge is where this repo is written and
+          # GitHub is its mirror. `hanzo/ci` IS NOT THIS REPO and is gone from the
+          # list: it is the tenant-org fork, whose v1 carries no bin/ at all, and
+          # it sat SECOND — so on any run where github.com was unreachable it
+          # cloned, the loop broke on that success, and the job died on "could not
+          # fetch (bin/imgver)" having never reached hanzoai/ci third. Namespaces
+          # are not interchangeable: hanzoai/* is the mirror namespace this repo
+          # lives in, hanzo/* is a tenant that happens to hold an old fork.
+          #
+          # The break therefore tests for the TOOL rather than for the clone, so a
+          # host that answers with the wrong tree falls through to the next.
+          for url in https://git.hanzo.ai/hanzoai/ci https://github.com/hanzoai/ci; do
             echo "::group::clone ${url}@${ref}"
-            if git clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/ci"; then
+            if git clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/ci" \
+               && [ -x "$RUNNER_TEMP/ci/bin/imgver" ]; then
               echo "cloned ${url}@${ref}"; echo "::endgroup::"; break
             fi
             echo "failed ${url}@${ref}"; echo "::endgroup::"

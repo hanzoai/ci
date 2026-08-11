@@ -177,6 +177,22 @@ test:
     # turns 3, 9 and 1 of these tests red respectively. Offline and
     # deterministic: a curl shim answers the routes from fixtures, no network.
     run: bash bin/sitepublish_test.sh
+  - name: sitedeploy
+    # bin/sitedeploy is the other half of the same plane — the per-file presigned
+    # route the exports too large for sitepublish's 16 MiB body take — and it is
+    # what all 15 static repos reach through the composite action. Its suite was
+    # written and then never wired here, so the one tool in bin/ with the widest
+    # blast radius was the one tool nothing tested on the way in.
+    #
+    # What it pins is the part cloud does NOT do for us. On the archive route the
+    # server stamps Content-Type and Cache-Control itself; under a presigned POST
+    # it stamps neither, because the policy carries no condition for either — so
+    # whatever this script sends is what the object keeps, and the cache-control
+    # table here is load-bearing rather than advisory. That is why the strings are
+    # asserted literally: they are a second spelling of apps/sites.CacheControlFor,
+    # and this suite is the only thing that can notice when the two disagree.
+    # Offline and deterministic: SITEDEPLOY_PLAN prints the manifest, no network.
+    run: bash bin/sitedeploy_test.sh
   - name: conflictmarkers
     # bin/conflictmarkers runs against every repo in the fleet, so a false
     # positive is as expensive as a miss: it blocks a build that would have
