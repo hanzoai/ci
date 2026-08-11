@@ -133,7 +133,45 @@ fi
 
 : "${HANZO_DEPLOY_TOKEN:?HANZO_DEPLOY_TOKEN is unset. It is the ONE credential this needs; set it on the forge (git.hanzo.ai), which is what reads .hanzo/workflows — not on GitHub. Mint: POST /v1/keys {\"type\":\"secret\"}}"
 
-# ---- 0. ensure the project exists (self-provision) --------------------------
+# ---- 0a. does the credential authenticate at all? ---------------------------
+# Every org-scoped route answers a rejected credential and an ABSENT one with the
+# same 403, `{"error":"X-Org-Id required"}`. That message names a HEADER, and the
+# header is one CI cannot set — the gateway strips a client-supplied X-Org-Id and
+# mints it from the validated bearer — so the true cause (the bearer resolved to
+# no principal) is reported as the one thing the caller is forbidden to fix.
+#
+# It cost a full investigation on hanzo.ai: every gate green, then `ensure project
+# hanzo-ai returned HTTP 403 X-Org-Id required` on the last step, reading as a
+# server or header regression when the credential had simply stopped resolving.
+# Verified against the live API — no auth, a bogus `sk-`, and a revoked key are
+# byte-identical on /v1/projects.
+#
+# /v1/keys refuses in a DIFFERENT voice ("sign in to manage API keys") and 200s
+# for a live key, so it separates the two failures this script cannot otherwise
+# tell apart: a bearer that does not authenticate, versus one that authenticates
+# and has no org. Name which, and say what to do about it.
+#
+# `|| true`, not `|| echo 000`: curl ALREADY writes 000 to stdout when it cannot
+# connect, so appending another made kcode `000000`, which matched no case and
+# took the hard-fail branch — a preflight that turned an unreachable API into
+# "your credential is revoked". Caught by the unreachable-host test below.
+kcode=$(curl -sS -o /dev/null -w '%{http_code}' \
+  -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN" "$api/v1/keys" || true)
+case "$kcode" in
+  200) : ;;
+  000|"") echo "::warning::could not reach $api/v1/keys to preflight the credential; continuing" ;;
+  *)
+    echo "::error::HANZO_DEPLOY_TOKEN does not authenticate ($api/v1/keys -> HTTP $kcode)."
+    echo "The token is present but resolves to no principal — absent from this repo's"
+    echo "scope, expired, or revoked. This is NOT a missing X-Org-Id header: CI cannot"
+    echo "set that header, cloud derives it from this bearer. Mint a replacement with"
+    echo "POST $api/v1/keys {\"type\":\"secret\"} as a member of the owning org, then set"
+    echo "it as the ORG-level Actions secret HANZO_DEPLOY_TOKEN on git.hanzo.ai — the"
+    echo "forge is what reads .hanzo/workflows, not GitHub."
+    exit 1 ;;
+esac
+
+# ---- 0b. ensure the project exists (self-provision) --------------------------
 # A brand-new slug has no project, and the enqueue below 404s on a missing one —
 # which is why every never-before-deployed site failed its first run. Create it
 # idempotently here instead: 200/201 the first time, 409 every time after, both
