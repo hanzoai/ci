@@ -206,8 +206,8 @@ test:
     # Offline and deterministic: git repos in temp dirs, no network.
     run: bash bin/conflictmarkers_test.sh
 
-# No `deploy:` ON PURPOSE. Rollout is a reviewed tag pin in hanzoai/universe
-# (infra/k8s/operator/crs/ci.yaml), the same rule cloud and git follow: a
-# pipeline that both builds and rolls itself out can put an unreviewed image on
-# a public host, and cd.hanzo.ai's selfHeal would undo a direct patch anyway.
+# No `deploy:` key exists any more — for any repo. A build ends at a published
+# image; what RUNS is a reviewed pin in hanzo/universe, which cd.hanzo.ai reads.
+# A pipeline that both builds and rolls itself out can put an unreviewed image
+# on a public host, and cd's selfHeal would undo a direct patch anyway.
 

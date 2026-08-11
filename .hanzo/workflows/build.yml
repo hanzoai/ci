@@ -1,4 +1,4 @@
-# Hanzo CI/CD — reusable build + test + deploy, driven by the caller repo's root
+# Hanzo CI/CD — reusable build + test + publish, driven by the caller repo's root
 # hanzo.yml. Runs on the git.hanzo.ai `git-runner` fleet; pulls registry + kubeconfig
 # creds from KMS via Universal Auth at run time. Public so any org can import it
 # with `uses: hanzoai/ci/.hanzo/workflows/build.yml@v1` + `secrets: inherit`.
@@ -359,7 +359,8 @@ jobs:
           #     modules (luxfi/dex, luxfi/precompile from a zooai build), which the
           #     repo-scoped automatic token cannot read. Handed to buildx as the
           #     `gh_token` BuildKit secret.
-          #   KUBECONFIG  — cluster access for the deploy step.
+          #   KUBECONFIG  — reads the registry credential out of the cluster so
+          #     an image can also reach oci.hanzo.ai.
           ORG="$(yq -r '.kms.org // ""' hanzo.yml 2>/dev/null || true)"
           : "${ORG:=${KMS_ORG:-}}"
           # Systemic default: when neither hanzo.yml `kms.org` nor the KMS_ORG var
@@ -1776,164 +1777,6 @@ jobs:
             echo "Index: \`$BASE/binaries.json\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Deploy (per hanzo.yml)
-        if: inputs.mode != 'delegate' && github.event_name != 'pull_request' && steps.kms.outputs.kubeconfig != ''
-        env:
-          KUBECONFIG: ${{ steps.kms.outputs.kubeconfig }}
-        run: |
-          set -euo pipefail
-          REF="${{ github.ref_name }}"
-          # A caller with no `deploy:` declares its rollout elsewhere (hanzoai/git
-          # pins its own CR by a reviewed universe change). Leave before reading
-          # deploy.services, which is null there — `jq '.[]'` over null aborts the
-          # step, and on a TAG build the deploy.on gate below is bypassed, so this
-          # used to surface only on a release. Same guard the build step has for
-          # `images:`.
-          if [ "$(yq -r '.deploy | type' hanzo.yml 2>/dev/null || echo '!!null')" != '!!map' ]; then
-            echo "::notice::no deploy: in hanzo.yml — build-only caller, skipping deploy"; exit 0
-          fi
-          ON=$(yq -o=json -I=0 '.deploy.on // []' hanzo.yml)
-          IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo 1 || echo 0)
-          if [ "$IS_TAG" != 1 ] && ! echo "$ON" | jq -e --arg b "$REF" 'index($b)' >/dev/null; then
-            echo "branch $REF not in deploy.on — skipping deploy"; exit 0
-          fi
-          # Bare runners ship no kubectl — provision the static binary
-          # (same sudo-free pattern as jq/yq above).
-          command -v kubectl >/dev/null 2>&1 || {
-            mkdir -p "$HOME/.local/bin"; export PATH="$HOME/.local/bin:$PATH"
-            KVER=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
-            curl -fsSL "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl" \
-              -o "$HOME/.local/bin/kubectl" && chmod +x "$HOME/.local/bin/kubectl"
-          }
-          SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
-          NS=$(yq -r '.deploy.namespace' hanzo.yml)
-          RTO=$(yq -r '.deploy."rollout-timeout" // "600s"' hanzo.yml)
-          yq -o=json -I=0 '.images' hanzo.yml > /tmp/imgs.json
-          # Desired state lives in the universe repo: the in-cluster
-          # gitops-reconcile job re-applies its CRs every ~5 minutes, so any
-          # direct patch that is not ALSO recorded there is reverted on the
-          # next cycle. Record first (durable), then patch (accelerates the
-          # roll). Universe write rides the same KMS git token as module reads.
-          UNIVERSE=""
-          if [ -n "${GIT_TOKEN:-}" ]; then
-            git clone -q --depth 1 \
-              "https://x-access-token:${GIT_TOKEN}@github.com/hanzoai/universe.git" \
-              /tmp/universe 2>/dev/null && UNIVERSE=/tmp/universe \
-              || echo "::warning::universe clone failed — rolls below are transient until recorded there"
-          fi
-          yq -o=json -I=0 '.deploy.services' hanzo.yml | jq -c '.[]' | while read -r s; do
-            svc=$(echo "$s"|jq -r .name); imgname=$(echo "$s"|jq -r .image)
-            repo=$(jq -r --arg n "$imgname" '.[]|select(.name==$n)|.repo' /tmp/imgs.json)
-            sfx=$(jq -r --arg n "$imgname" '.[]|select(.name==$n)|."tag-suffix" // ""' /tmp/imgs.json)
-            plats=$(jq -r --arg n "$imgname" '.[]|select(.name==$n)|(.platforms // ["linux/amd64"])|join(",")' /tmp/imgs.json)
-            # A TAGGED release pins the git tag VERBATIM (REF) — the very image the
-            # build step published above; a branch build stays on its transient
-            # per-commit sha tag (arch-matched: bare for multi-arch).
-            if [ "$IS_TAG" = 1 ]; then
-              tag="${REF}${sfx:+-$sfx}"
-            elif [ "$plats" = "linux/amd64" ]; then
-              tag="sha-${SHORT}-amd64${sfx:+-$sfx}"
-            else
-              tag="sha-${SHORT}${sfx:+-$sfx}"
-            fi
-            ref="$repo:$tag"
-            CR="$UNIVERSE/infra/k8s/operator/crs/$svc.yaml"
-            # Backward-clobber guard (semver): a transient BRANCH build must NEVER
-            # overwrite a service pinned to a semver RELEASE (rolls prod back to a dev
-            # image). Complements the sha-ancestry guard below, which only sees sha-
-            # tags. Releases are tagged; a branch push leaves the semver pin untouched.
-            cur=""
-            if [ -n "$UNIVERSE" ] && [ -f "$CR" ]; then cur="$(yq -r '.spec.image.tag // ""' "$CR")"; fi
-            if [ "$IS_TAG" != 1 ] && printf '%s' "$cur" | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]+'; then
-              echo "::notice::$svc pinned to release $cur — branch build ${SHORT} leaves it (tag a release to deploy)"; continue
-            fi
-            echo "rolling $svc → $ref"
-            # recorded=1 once the desired tag is durably in universe: the
-            # in-cluster operator reconciles that every ~5min, so an expired
-            # runner kubeconfig must not fail a deploy it will complete. Stays 0
-            # for bare-Deployment repos (no CR) where kubectl is the only path.
-            recorded=0
-            if [ -n "$UNIVERSE" ] && [ -f "$CR" ]; then
-              # Never roll a pin BACKWARD: builds finish out of order, and a slow
-              # build of an older commit must not overwrite a newer roll. If the
-              # CR's current sha is a descendant of ours, ours is stale — skip.
-              CURSHA=$(yq -r '.spec.image.tag // ""' "$CR" | sed -nE 's/^sha-([a-f0-9]{7}).*/\1/p')
-              git fetch -q --unshallow origin 2>/dev/null || true
-              if [ -n "$CURSHA" ] && [ "$CURSHA" != "$SHORT" ] \
-                 && git cat-file -e "$CURSHA" 2>/dev/null \
-                 && git merge-base --is-ancestor "$SHORT" "$CURSHA" 2>/dev/null; then
-                echo "::notice::$svc CR already at descendant $CURSHA — not rolling back to $SHORT"
-                recorded=1   # newer release already recorded + reconciling
-              else
-                yq -i ".spec.image.tag = \"$tag\"" "$CR"
-                # Sweep EVERY same-repo image reference in the CR (sidecars,
-                # initContainers pinned to this image) — the tag field alone
-                # left sidecars on stale tags every roll.
-                repoEsc=$(printf '%s' "$repo" | sed 's/[.[\*^$]/\\&/g')
-                sed -i -E "s|(${repoEsc}):sha-[A-Za-z0-9-]+|\1:${tag}|g" "$CR"
-                if git -C "$UNIVERSE" diff --quiet; then
-                  recorded=1   # CR already pins $tag (recorded on a prior run)
-                else
-                  commitCR() { git -C "$UNIVERSE" -c user.name=hanzo-ci -c user.email=dev@hanzo.ai \
-                    commit -qam "deploy($svc): $tag (${GITHUB_REPOSITORY}@${SHORT})"; }
-                  commitCR
-                  # EVERY service's deploy pushes to universe/main, so under
-                  # concurrent rolls a plain push loses the race with a
-                  # non-fast-forward reject (THE reason deploys stall when many
-                  # land at once). The clone is shallow (--depth 1) so `pull
-                  # --rebase` has no merge base and fails — instead fetch the moved
-                  # tip, hard-reset onto it, and re-apply our one-file CR change,
-                  # then retry the push. A no-op after reset (remote already
-                  # carries our tag) counts as recorded. We never force-push, so a
-                  # newer roll of THIS service is preserved (its tag survives the
-                  # reset; our re-apply is last-writer only when tags differ).
-                  for _try in 1 2 3 4 5 6; do
-                    if git -C "$UNIVERSE" push -q; then recorded=1; break; fi
-                    git -C "$UNIVERSE" fetch -q --depth 1 origin main || break
-                    git -C "$UNIVERSE" reset -q --hard FETCH_HEAD
-                    yq -i ".spec.image.tag = \"$tag\"" "$CR"
-                    sed -i -E "s|(${repoEsc}):sha-[A-Za-z0-9-]+|\1:${tag}|g" "$CR"
-                    if git -C "$UNIVERSE" diff --quiet; then recorded=1; break; fi
-                    commitCR
-                  done
-                  [ "$recorded" = 1 ] || echo "::warning::universe push failed for $svc after retries — roll is transient (runner kubectl must land it)"
-                fi
-              fi
-            fi
-            # Runner-side kubectl ACCELERATES the operator roll + smoke-tests it.
-            # When recorded=1 the operator owns the rollout, so an expired runner
-            # kubeconfig warns instead of failing the deploy; when recorded=0
-            # kubectl is the only path and stays fatal.
-            if [ "$recorded" = 1 ]; then
-              kc() { kubectl "$@" || echo "::warning::$svc: runner kubectl failed (expired kubeconfig?) — universe record stands; operator reconciles"; }
-            else
-              kc() { kubectl "$@"; }
-            fi
-            # Operator-managed services (Service CR) reconcile the Deployment —
-            # patch the CR when it exists; bare Deployments get set-image.
-            if kubectl -n "$NS" get "services.hanzo.ai/$svc" >/dev/null 2>&1; then
-              kc -n "$NS" patch "services.hanzo.ai/$svc" --type=merge \
-                -p "{\"spec\":{\"image\":{\"repository\":\"$repo\",\"tag\":\"$tag\"}}}"
-            else
-              # Bare Deployment: set the new image ONLY on containers already running
-              # THIS repo's image — never the '*' wildcard, which clobbers foreign
-              # sidecars (e.g. an rclone S3-mirror) with the app image and wedges the
-              # rollout. Fall back to the service-named container on first deploy.
-              mapfile -t CS < <(kubectl -n "$NS" get "deployment/$svc" \
-                -o jsonpath='{range .spec.template.spec.containers[*]}{.name} {.image}{"\n"}{end}' \
-                | awk -v r="$repo" 'index($2, r"@")==1 || index($2, r":")==1 {print $1}')
-              [ "${#CS[@]}" -eq 0 ] && CS=("$svc")
-              args=(); for c in "${CS[@]}"; do args+=("$c=$ref"); done
-              kc -n "$NS" set image "deployment/$svc" "${args[@]}"
-            fi
-            # Timeout scales with the image: a service vendoring GB-scale model/node
-            # packs (e.g. studio) pulls multi-GB layers on a cold node + waits for the
-            # operator to reconcile — legitimately minutes. 180s failed mid-pull and
-            # is THE reason studio deploys silently failed since 0.15.8. Override
-            # per-repo with deploy.rollout-timeout.
-            kc -n "$NS" rollout status "deployment/$svc" --timeout="$RTO"
-          done
-
       - name: Publish site (per hanzo.yml)
         # The site lane. `images:` ships an OCI image a CLUSTER runs; `binaries:`
         # ships an executable a HOST installs; neither describes a static export
@@ -1980,9 +1823,8 @@ jobs:
         run: |
           set -euo pipefail
           REF="${{ github.ref_name }}"
-          # Same guard shape the deploy step uses for a missing `deploy:`: a caller
-          # with no `site:` ships no static export, and reading .site.slug off null
-          # would abort the step instead of skipping it.
+          # A caller with no `site:` ships no static export, and reading
+          # .site.slug off null would abort the step instead of skipping it.
           if [ "$(yq -r '.site | type' hanzo.yml 2>/dev/null || echo '!!null')" != '!!map' ]; then
             echo "::notice::no site: in hanzo.yml — nothing to publish"; exit 0
           fi

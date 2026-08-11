@@ -3,8 +3,11 @@
 # hanzoai/ci
 
 One reusable CI/CD workflow for every Hanzo / Lux / Zoo repo. Build + test +
-deploy, driven entirely by the repo's root **`hanzo.yml`**. No per-repo build
+publish, driven entirely by the repo's root **`hanzo.yml`**. No per-repo build
 logic — repos import this and declare their specifics in `hanzo.yml`.
+
+A build ends at a published image. What RUNS is declared in `hanzo/universe`,
+and cd.hanzo.ai applies that within one poll — see [Deploying](#deploying).
 
 ## Use it
 
@@ -15,16 +18,10 @@ images:
   - { name: api, context: ./api, repo: ghcr.io/<org>/<repo>, tag-suffix: api }
 test:
   - { name: api, run: "pytest -q" }
-deploy:
-  cluster: <cluster>
-  namespace: <ns>
-  on: [main]
-  services:
-    - { name: <deployment>, image: api }
 kms: { path: /deploy, environment: prod }
 ```
 
-Second, a ~7-line `.github/workflows/cicd.yml` that just imports this:
+Second, a ~7-line `.hanzo/workflows/cicd.yml` that just imports this:
 
 ```yaml
 name: CI/CD
@@ -34,11 +31,29 @@ on:
   workflow_dispatch:
 jobs:
   cicd:
-    uses: hanzoai/ci/.github/workflows/build.yml@v1
+    uses: hanzoai/ci/.hanzo/workflows/build.yml@v1
     secrets: inherit
 ```
 
-That's it. The build/test/deploy logic lives here, once.
+That's it. The build/test/publish logic lives here, once.
+
+## Deploying
+
+This workflow does not deploy. It builds an image and publishes it.
+
+What runs in a cluster is declared in `hanzo/universe`, which cd.hanzo.ai reads:
+
+- Helm services — `charts/app/values/<ns>/<svc>.yaml` (`image.tag`, and
+  `image.digest`, which wins over the tag when both are set)
+- plain manifests — e.g. `infra/k8s/monitoring/<svc>.yaml`
+
+Change the declaration and cd applies it within one poll. The cluster enforces
+this: a `ValidatingAdmissionPolicy` named `cd-owns-the-fleet` rejects a direct
+edit, whoever makes it.
+
+  This cluster is reconciled, not edited. A workload changes by changing what
+  DECLARES it — the values file cd.hanzo.ai reads — and cd applies it within
+  one poll.
 
 ## `client:` — one document, eight generated clients
 
@@ -183,7 +198,7 @@ site:
   slug: hanzo-console         # the project on the Sites plane
   dir: out                    # the built export; needs index.html at its root
   build: npm ci && npm run build   # optional; run first
-  on: [main]                  # same branch gate as deploy.on; tags always publish
+  on: [main]                  # branch gate; tags always publish
 ```
 
 That is the whole configuration. **There is no credential to provision**: the
@@ -217,7 +232,7 @@ By default the build runs on the **Hanzo `git-runner` fleet** on git.hanzo.ai
 self-hosted runners, pass their labels:
 
 ```yaml
-    uses: hanzoai/ci/.github/workflows/build.yml@v1
+    uses: hanzoai/ci/.hanzo/workflows/build.yml@v1
     with:
       runner: '["self-hosted","my-pool","linux","amd64"]'
     secrets: inherit
@@ -230,7 +245,7 @@ to **platform.hanzo.ai** — which builds in-cluster with BuildKit and rolls the
 service itself — pass `mode: delegate`:
 
 ```yaml
-    uses: hanzoai/ci/.github/workflows/build.yml@v1
+    uses: hanzoai/ci/.hanzo/workflows/build.yml@v1
     with:
       mode: delegate
     secrets: inherit
