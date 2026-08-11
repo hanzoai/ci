@@ -39,12 +39,23 @@ runs:
     - name: Fetch imgver
       shell: bash
       # The action ref is the script ref: an action pinned to @v1 runs v1's
-      # imgver. Both forges, because this repo is served from each.
+      # imgver. The forge first, because the forge is where this repo is written
+      # and GitHub is its mirror.
+      #
+      # `hanzo/ci` IS NOT THIS REPO. It is the tenant-org fork, and its v1 has no
+      # bin/ at all — so on any run where github.com was unreachable this loop
+      # cloned it, broke on the successful clone, and died on "could not fetch
+      # (bin/imgver)" having never tried a host that has one. Namespaces are not
+      # interchangeable: hanzoai/* is the mirror namespace this repo lives in,
+      # hanzo/* is a tenant. Hence one list, and the break tests for the TOOL so a
+      # host answering with the wrong tree falls through instead of dead-ending.
       run: |
         set -euo pipefail
         ref="${GITHUB_ACTION_REF:-v1}"
-        for url in https://github.com/hanzoai/ci https://git.hanzo.ai/hanzo/ci; do
-          git clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/imgver-ci" 2>/dev/null && break
+        for url in https://git.hanzo.ai/hanzoai/ci https://github.com/hanzoai/ci; do
+          git clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/imgver-ci" 2>/dev/null \
+            && [ -x "$RUNNER_TEMP/imgver-ci/bin/imgver" ] && break
+          rm -rf "$RUNNER_TEMP/imgver-ci"
         done
         [ -x "$RUNNER_TEMP/imgver-ci/bin/imgver" ] \
           || { echo "::error::could not fetch hanzoai/ci@$ref (bin/imgver)"; exit 1; }
