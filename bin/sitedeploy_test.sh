@@ -76,5 +76,16 @@ out=$(HANZO_DEPLOY_TOKEN= bash "$SD" a-slug "$site" 2>&1); rc=$?
 t "no token: exits non-zero"          "$rc"  "1"
 t "no token: says which secret"       "$(printf '%s' "$out" | grep -c HANZO_DEPLOY_TOKEN)"  "1"
 
+# The credential preflight fails OPEN, and this is the case that proves it.
+# curl writes 000 to stdout itself when it cannot connect, so an added
+# `|| echo 000` made the code `000000` — matching no case, taking the
+# hard-fail branch, and reporting an unreachable API as a revoked token.
+# Every deploy in the estate would refuse to start during a blip, blaming a
+# credential that was fine. Port 1 on loopback is refused without leaving
+# the machine, so this stays offline like the rest of the suite.
+out=$(HANZO_API=http://127.0.0.1:1 HANZO_DEPLOY_TOKEN=sk-unused bash "$SD" a-slug "$site" 2>&1)
+t "unreachable API: warns rather than blaming the token"  "$(printf '%s' "$out" | grep -c 'could not reach')"     "1"
+t "unreachable API: claims no revocation"                 "$(printf '%s' "$out" | grep -c 'does not authenticate')" "0"
+
 [ $fail -eq 0 ] && echo "PASS" || echo "FAIL"
 exit $fail
