@@ -1458,7 +1458,7 @@ jobs:
                 # the `helm show chart` re-read charts.yml does after a push.
                 got=""
                 for i in 1 2 3 4 5 6; do
-                  got=$(crane digest "$dst" 2>/dev/null || true)
+                  got=$(crane digest "${dst}-mutant" 2>/dev/null || true)
                   [ "$got" = "$want" ] && break
                   sleep 5
                 done
