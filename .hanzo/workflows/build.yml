@@ -838,15 +838,15 @@ jobs:
         # you?" without running a generator.
         #
         # CREDENTIAL: FORGE_TOKEN, contents:read on hanzoai/cloud at git.hanzo.ai.
-        # TWO MODES, ONE FETCH, decided by the event — because there are two
+        # TWO MODES, ONE FETCH, decided by the payload — because there are two
         # questions and they need the same document.
         #
-        #   spec-update / workflow_dispatch  MOVE the projection onto a new
-        #     document, then commit and cut (last step of this job).
-        #   push / pull_request              CHECK that the committed projection
-        #     is still what its OWN document (.spec-lock) produces. Writes
-        #     nothing: a check that repairs what it measures reports success for
-        #     a tree that was wrong when the job started.
+        #   a payload naming a ref  MOVE the projection onto that document, then
+        #     commit and cut (last step of this job).
+        #   no payload              CHECK that the committed projection is still
+        #     what its OWN document (.spec-lock) produces. Writes nothing: a
+        #     check that repairs what it measures reports success for a tree that
+        #     was wrong when the job started.
         #
         # The check half replaces the hand-rolled `codegen-drift-check` /
         # `spec-drift-check` steps four repos each carried a copy of — and fixes
@@ -876,58 +876,36 @@ jobs:
 
           SPEC_REPO=$(yq -r '.client.spec.repo // "hanzoai/cloud"' hanzo.yml)
           SPEC_PATH=$(yq -r '.client.spec.path // "openapi.yaml"' hanzo.yml)
-          # The dispatch names the release. A manual re-run with no payload
-          # re-asks the document this tree ALREADY names (.spec-lock), so it is a
-          # no-op rather than a jump to whatever main happens to be — a client
-          # must never be dragged forward onto an undeployed document by someone
-          # pressing "run workflow". main is the last resort, for a repo that has
-          # no lock yet.
-          case "${{ github.event_name }}" in
-            push|pull_request) MODE=check ;;
-            *)                 MODE=move ;;
-          esac
-          # A CHECK is always about the document this tree already names; only a
-          # MOVE may take a new one.
+          # A MOVE IS A RUN THAT WAS HANDED A REF, and nothing else is. The
+          # payload is the only thing that ever names a new document, so it is
+          # the only thing that decides. A value, not a place.
+          #
+          # It used to ask `github.event_name`, and here that question has no
+          # answer: git.hanzo.ai reports `workflow_call` to a reusable whatever
+          # the caller's event was — measured across 24 repos, where `push`,
+          # `schedule` and `workflow_dispatch` all render the same string. So
+          # `push` never matched, MODE was `move` on every run in the fleet, and
+          # the check half was unreachable. Nine plain pushes regenerated,
+          # committed to main and cut a release tag off a document nobody had
+          # asked them for.
+          #
+          # AND IT NO LONGER GOES LOOKING. With no payload it read hanzoai/cloud's
+          # newest tag, on the theory that a tag is by construction a document
+          # production already serves. v1.801.507 is not on cloud's main and
+          # carries no openapi.yaml at all, so the fetch below could only 404 and
+          # it took the whole job with it. The pin has ONE owner — the re-pin
+          # that opens a patch a person reads — and a second one here is two
+          # notions of one document, which is the defect this lane exists to
+          # prevent.
+          REF=$(printf '%s' "$PAYLOAD" | jq -r '.sha // .version // ""')
           LOCKED=$(sed -n 's/^ref=//p' .spec-lock 2>/dev/null || true)
-          if [ "$MODE" = check ]; then
-            [ -n "$LOCKED" ] || { echo "no .spec-lock — nothing to check against"; echo "ran=0" >> "$GITHUB_OUTPUT"; exit 0; }
-            REF="$LOCKED"
+          if [ -n "$REF" ]; then
+            MODE=move
           else
-            REF=$(printf '%s' "$PAYLOAD" | jq -r '.sha // .version // ""')
-            # THE PROJECTION ASKS; NOTHING TELLS IT. With no payload — a schedule,
-            # or somebody pressing "run workflow" — read hanzoai/cloud's NEWEST
-            # TAG off the forge and move onto that.
-            #
-            # This is the half that replaces a fan-out which could not work in
-            # either direction: hanzoai/cloud pushed `repository_dispatch:
-            # spec-update` at nine projection repos, but github.com has zero
-            # self-hosted runners and every one of those callers asks for the
-            # forge's pool, so an accepted event queued until GitHub cancelled it
-            # a day later; and the forge, which HAS the runners, has no
-            # repository_dispatch endpoint at all. Twelve such dispatches exist
-            # across the fleet and not one ever reached a first step, which is why
-            # the SDK repos sit on several different documents and none on the one
-            # cloud publishes. A repo puts `schedule:` on the forge caller it
-            # already has and regenerates on its own clock, with no credential
-            # spanning six owners.
-            #
-            # A TAG IS SAFE TO TAKE AND A BRANCH IS NOT, which is why this asks
-            # for one. The rule this replaces refused to move without a payload so
-            # nobody pressing "run workflow" could drag a client onto an undeployed
-            # document — a real hazard, and the `main` fallback below it was
-            # exactly that hazard. cloud mints v<N> only after that sha has built,
-            # smoked and rolled out, so its newest tag is by construction a
-            # document production is already serving. The protection is kept; the
-            # paralysis, and the branch read, are not.
-            if [ -z "$REF" ]; then
-              REF=$(curl -fsS -H "Authorization: token ${FORGE_TOKEN}" \
-                      "https://git.hanzo.ai/v1/repos/${SPEC_REPO}/tags?limit=1" \
-                    | jq -r '.[0].name // ""' || true)
-              [ -n "$REF" ] && echo "no payload: taking ${SPEC_REPO}'s newest tag ${REF}"
-            fi
-            [ -n "$REF" ] || REF="$LOCKED"
-            [ -n "$REF" ] || { echo "::error::no payload, no tag on ${SPEC_REPO}, and no .spec-lock — this tree names no document and none can be discovered"; exit 1; }
+            MODE=check
+            REF="$LOCKED"
           fi
+          [ -n "$REF" ] || { echo "no payload and no .spec-lock — this tree names no document"; echo "ran=0" >> "$GITHUB_OUTPUT"; exit 0; }
           WANT=$(printf '%s' "$PAYLOAD" | jq -r '.spec_sha256 // ""')
           VERSION=$(printf '%s' "$PAYLOAD" | jq -r '.version // ""')
 
