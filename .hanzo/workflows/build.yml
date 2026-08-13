@@ -1407,10 +1407,16 @@ jobs:
             # Dual-host: mirror the exact tag set to oci.hanzo.ai (server-
             # side manifest copy — no rebuild). ghcr.io/<org>/<name> →
             # oci.hanzo.ai/<org>/<name>; public consumers keep ghcr, the fleet
-            # is migrating to pull from ours. A skip here is now a WARNING, not
-            # a notice: an image that never reaches our registry is the reason
-            # a deploy still depends on GitHub, and that should be visible in
-            # the run, not buried.
+            # is migrating to pull from ours.
+            #
+            # A copy that does not land FAILS THE RUN. It used to print
+            # `::warning::` from a `while read` on the end of a pipeline — a
+            # child shell, where neither `set -e` nor an `exit` reaches the
+            # step — so a failed copy and a successful one produced the same
+            # green run and the same unread line. 73 of the fleet's 102
+            # first-party images were published to ghcr and never reached
+            # oci.hanzo.ai at all, every one of them under a green run. A
+            # mirror nobody is told about is a mirror nobody fills.
             if [ "${MIRROR_OK:-}" = "1" ]; then
               # crane, not buildx imagetools: the IAM token realm doesn't answer
               # buildx's multi-scope token request (spec gap, tracked).
@@ -1431,9 +1437,34 @@ jobs:
                 *)       ;;   # bootnode, lux-private, ... map to themselves
               esac
               mrepo="oci.hanzo.ai/$rorg/$rname"
-              echo "$TAGS" | tr ' ' '\n' | grep -v '^-t$' | grep -v '^$' | while read -r ref; do
-                crane copy "$ref" "${mrepo}:${ref##*:}" \
-                  || echo "::warning::$ref did not reach oci.hanzo.ai (ghcr push unaffected)"
+              # The tag set as an ARRAY, walked in THIS shell: a herestring is a
+              # redirect, not a pipeline, so `set -e` and `exit` still belong to
+              # the step. TAGS is the same `-t <ref>` list handed to buildx, so
+              # what is mirrored is by construction what was pushed.
+              read -ra tagv <<<"$TAGS"
+              for ref in "${tagv[@]}"; do
+                [ "$ref" = "-t" ] && continue
+                dst="$mrepo:${ref##*:}"
+                # The digest the SOURCE serves, read before the copy. Refuse an
+                # empty one: `[ "$a" = "$b" ]` on two blanks is true, and a
+                # comparison that cannot fail is the bug being fixed here.
+                want=$(crane digest "$ref")
+                [ -n "$want" ] || { echo "::error::cannot read the digest of $ref"; exit 1; }
+                crane copy "$ref" "$dst"
+                # Read the DESTINATION back. `crane copy` exiting 0 is the
+                # copier's account of a write; the digest the registry answers
+                # with is the fact, and the two disagree whenever a copy is
+                # partial or the tag already names other bytes. Same shape as
+                # the `helm show chart` re-read charts.yml does after a push.
+                got=""
+                for i in 1 2 3 4 5 6; do
+                  got=$(crane digest "$dst" 2>/dev/null || true)
+                  [ "$got" = "$want" ] && break
+                  sleep 5
+                done
+                [ "$got" = "$want" ] \
+                  || { echo "::error::$dst serves ${got:-nothing}, not $want — the copy did not land"; exit 1; }
+                echo "mirrored $ref -> $dst @ $want"
               done
             fi
             echo "::endgroup::"
