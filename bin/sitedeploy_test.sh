@@ -122,13 +122,17 @@ fi
 shim="$tmp/bin"; mkdir -p "$shim"
 cat > "$shim/curl" <<'SHIM'
 #!/usr/bin/env bash
-out=/dev/null url= method=GET body= fields=()
+out=/dev/null url= method=GET body= src= fields=()
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
     -X) method="$2"; shift 2 ;;
     -d) body="$2"; shift 2 ;;
-    --data-binary) body=$(cat "${2#@}"); shift 2 ;;
+    # The FILE, not its contents. `$(cat f)` strips trailing newlines, and the
+    # completion body is the one request whose exact byte COUNT is asserted —
+    # recording it through a command substitution made the record a byte shorter
+    # than the thing sent, which is precisely the error a size test cannot carry.
+    --data-binary) src="${2#@}"; shift 2 ;;
     -F) fields+=("$2"); shift 2 ;;
     http*) url="$1"; shift ;;
     *) shift ;;
@@ -138,7 +142,9 @@ printf '%s %s\n' "$method" "$url" >> "$T_DIR/calls"
 case "$url" in
   # /complete before /deployments: the completion address ends in the collection
   # it belongs to, so the looser pattern would swallow it.
-  */complete)      printf '%s' "$body" > "$T_DIR/complete.body"; printf '%s' "$T_DONE" > "$out"; printf '200' ;;
+  */complete)      if [ -n "$src" ]; then cp "$src" "$T_DIR/complete.body"
+                   else printf '%s' "$body" > "$T_DIR/complete.body"; fi
+                   printf '%s' "$T_DONE" > "$out"; printf '200' ;;
   */deployments)   printf '%s' "$body" > "$T_DIR/enqueue.body";  printf '%s' "$T_ENQ"  > "$out"; printf '202' ;;
   */v1/keys)       printf '200' ;;
   # Counted, and 503 for the first T_5XX calls, so a retry can be OBSERVED
@@ -203,6 +209,65 @@ t "file goes last"  "$(grep -c 'file=@[^|]*$' "$tmp/uploads")"  "6"
 # and does not read the stored header, so a copy of that rule sent from here
 # reaches no reader and is free to drift.
 t "no cache policy is stamped from here"  "$(grep -c 'Cache-Control=' "$tmp/uploads")"  "0"
+
+# --- the edge body limit ------------------------------------------------------
+# The completion manifest is the ONE body this lane still posts through
+# api.hanzo.ai, and it grows with the object count. Cloud caps nothing on that
+# route — apps/projects/deploy.go:388 declares `Keys []string` with no length
+# check — so the only bound is the edge's 16 MiB BodyLimit, and past it fasthttp
+# refuses the POST before any handler runs and answers only "Error when parsing
+# request", which names neither size nor cause.
+#
+# Reaching that as a 400 would be the expensive way to learn it: it is the LAST
+# of the three calls, so every object is already in the bucket and the deployment
+# is already open. Hence measured before the enqueue, and what these cases pin is
+# not only that it fires but that it fires having sent nothing.
+t "the release size is reported, with the limit" \
+  "$(printf '%s' "$out" | grep -c 'of the 16.0 MiB edge limit')"  "1"
+
+# The REAL body the happy path just sent, so the boundary below is measured
+# against the thing itself rather than against an estimate of it.
+exact=$(wc -c < "$tmp/complete.body" | tr -d ' ')
+
+rm -f "$tmp/calls" "$tmp/complete.body"
+out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
+      SITEDEPLOY_JOBS=1 SITEDEPLOY_COMMIT=abc123 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" \
+      GATEWAY_BODY_LIMIT=1 bash "$SD" a-slug "$site" 2>&1); rc=$?
+t "a manifest past the edge limit refuses"   "$rc"  "1"
+t "  ...naming the server's own knob"        "$(printf '%s' "$out" | grep -c GATEWAY_BODY_LIMIT)"           "1"
+t "  ...and where that knob is defined"      "$(printf '%s' "$out" | grep -c 'internal/edge/edge.go')"      "1"
+t "  ...and the opaque answer it replaces"   "$(printf '%s' "$out" | grep -c 'Error when parsing request')" "1"
+t "  ...and what to do about it"             "$(printf '%s' "$out" | grep -c 'Reduce the object count')"    "1"
+# The whole reason it is measured first. A check that fires after the bytes have
+# moved is a slower route to the same outage, and it leaves a deployment open.
+t "  ...having sent nothing at all"          "$(cat "$tmp/calls" 2>/dev/null | wc -l | tr -d ' ')"  "0"
+
+# THE OTHER SIDE OF THE BOUNDARY, and the half that matters more: this check is
+# only ever allowed to turn a failure into a readable one. A publish that would
+# have worked must still work, or the fleet learns to route around the gate.
+rm -f "$tmp/calls"
+out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
+      SITEDEPLOY_JOBS=1 SITEDEPLOY_COMMIT=abc123 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" \
+      GATEWAY_BODY_LIMIT="$exact" bash "$SD" a-slug "$site" 2>&1); rc=$?
+t "a manifest exactly AT the limit publishes"  "$rc"  "0"
+out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
+      SITEDEPLOY_JOBS=1 SITEDEPLOY_COMMIT=abc123 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" \
+      GATEWAY_BODY_LIMIT="$((exact - 1))" bash "$SD" a-slug "$site" 2>&1); rc=$?
+t "one byte past the limit refuses"            "$rc"  "1"
+
+# The shape this was written about: a full prerender multiplied one site's object
+# count until every push failed. That export is 627 objects, and on THIS lane it
+# publishes — the bytes stream per file and the manifest for 627 keys is
+# kilobytes, nowhere near 16 MiB. A guard that refused this would be worse than
+# the failure it replaced.
+wide="$tmp/wide"; mkdir -p "$wide"
+i=0; while [ $i -lt 627 ]; do : > "$wide/page$i.html"; i=$((i + 1)); done
+rm -f "$tmp/calls"
+out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
+      SITEDEPLOY_JOBS=8 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" \
+      bash "$SD" a-slug "$wide" 2>&1); rc=$?
+t "a 627-object export publishes"         "$rc"  "0"
+t "  ...with every key in the manifest"   "$(jq -r '.keys|length' "$tmp/complete.body")"  "627"
 
 # A deploy that cannot upload must leave cloud an honest terminal state rather
 # than a deployment queued forever behind a build that is gone.

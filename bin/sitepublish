@@ -35,7 +35,8 @@
 # replaced.
 #
 # THE SIZE BOUNDARY IS THE SERVER'S, NOT A PREFERENCE. cloud's public edge sets
-# BodyLimit from GATEWAY_BODY_LIMIT, default 16 MiB (cloud config.go:312), and
+# BodyLimit from GATEWAY_BODY_LIMIT, default 16 MiB (cloud internal/edge/edge.go
+# :36, bound to the door's fasthttp socket at cmd/cloud/main.go:124), and
 # fasthttp refuses an oversized POST BEFORE any handler runs — it surfaces as an
 # opaque 400 "Error when parsing request" that reads like a malformed payload
 # rather than a size cap (cloud apps/projects/grant.go:5 tells that story about
@@ -43,13 +44,14 @@
 # number and the alternative, instead of being sent to fail unreadably. Measured
 # across the estate's 24 built exports, 22 fit; hanzo.ai (27.9 MiB zipped, 8536
 # files) and trillerfest.com (76.7 MiB) do not. Those go to bin/sitedeploy,
-# which streams per-file against a presigned grant and has no body limit —
-# hanzo.ai is over the server's own 5000-entry cap anyway, so no transport makes
-# it a Release.
+# which streams per-file against a presigned grant and posts no whole body — only
+# its completion manifest crosses the edge, and that is measured there for the
+# same reason. hanzo.ai is over the server's own 5000-entry cap anyway, so no
+# transport makes it a Release.
 #
 # ENV: HANZO_API_TOKEN  (required) the IAM bearer; the workflow's KMS step mints it
 #      HANZO_API        (https://api.hanzo.ai)
-#      SITEPUBLISH_MAX_ZIP  (16777216) mirror of the server's GATEWAY_BODY_LIMIT
+#      GATEWAY_BODY_LIMIT   (16777216) the edge's own name for its own limit
 #      SITEPUBLISH_PLAN=1   print what it would send and exit; no network. Test seam.
 set -euo pipefail
 
@@ -59,14 +61,21 @@ api="${HANZO_API:-https://api.hanzo.ai}"
 
 # Server-side caps, mirrored so a breach is named in CI instead of arriving as a
 # 413 (or, for the body limit, as an unreadable 400). cloud apps/projects/blob.go
-# :29-31. bin/sitepublish_test.sh pins these numbers; if cloud moves them the
+# :28-32. bin/sitepublish_test.sh pins these numbers; if cloud moves them the
 # test is what catches the drift.
-max_zip="${SITEPUBLISH_MAX_ZIP:-16777216}"   # gateway BodyLimit, 16 MiB
+#
+# The body limit carries the SERVER'S OWN NAME — one value, one name, wherever it
+# travels. bin/sitedeploy reads the same variable for the same edge, so a runner
+# told a different limit is told it once and both lanes obey.
+max_body="${GATEWAY_BODY_LIMIT:-16777216}"    # 16 << 20, cloud internal/edge/edge.go:36
 max_files=5000                                # maxFiles
 max_file_bytes=$((64 << 20))                  # maxFileBytes, 64 MiB
 max_total_bytes=$((512 << 20))                # maxTotalBytes uncompressed, 512 MiB
 
 die() { echo "::error::$*"; exit 1; }
+human() { awk -v b="$1" 'BEGIN{ split("B KiB MiB GiB", u, " "); i = 1
+  while (b >= 1024 && i < 4) { b /= 1024; i++ }
+  printf (i == 1 ? "%d %s" : "%.1f %s"), b, u[i] }'; }
 
 # The slug is a URL path segment AND an S3 key segment, so it is held to the
 # grammar cloud validates project slugs with — checked before anything is built
@@ -83,7 +92,11 @@ echo "$slug" | grep -qE '^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$' \
 # CNAME does not travel: a GitHub Pages artifact that means nothing to S3 and
 # would ship a stale hostname claim into the bucket. Same exclusion bin/sitedeploy
 # makes, for the same reason.
-files=$(cd "$dir" && find . -type f ! -name CNAME | wc -l)
+# `tr -d` because BSD wc pads its count to a fixed width and GNU wc does not, so
+# this is "2" on a runner and "       2" on a dev machine — and the number goes
+# into a message and into the plan line, where the padding is the difference
+# between a readable count and a broken-looking one.
+files=$(cd "$dir" && find . -type f ! -name CNAME | wc -l | tr -d ' ')
 [ "$files" -gt 0 ] || die "'$dir' contains no files — refusing to publish an empty release"
 [ "$files" -le "$max_files" ] \
   || die "'$dir' holds $files files; cloud caps one artifact at $max_files (apps/projects/blob.go maxFiles). Use bin/sitedeploy — but note the Releases plane has the same cap, so this export cannot become a Release."
@@ -95,9 +108,15 @@ bytes=$(cd "$dir" && find . -type f ! -name CNAME -exec wc -c {} + | awk '$2!="t
 # Per-file cap, checked with find rather than a loop so a 9000-file export costs
 # one traversal. -size uses 512-byte blocks with `c` for bytes; +N c is "strictly
 # greater than N bytes", which is the cap's own boundary.
-big=$(cd "$dir" && find . -type f ! -name CNAME -size +${max_file_bytes}c -printf '%P (%s bytes)\n' | head -3)
-[ -z "$big" ] || die "these files exceed cloud's ${max_file_bytes}-byte per-file cap (maxFileBytes):
-$big"
+#
+# No `-printf`: it is a GNU extension, and on BSD find it does not merely skip
+# the check — find exits 1, `set -o pipefail` propagates it, and `set -e` ends the
+# script here, before it has done anything. One path per line is the whole report
+# this needs. `head` runs on the RESULT rather than in the pipeline, so a fourth
+# oversized file cannot SIGPIPE the find that found it.
+big=$(cd "$dir" && find . -type f ! -name CNAME -size +${max_file_bytes}c)
+[ -z "$big" ] || die "these files exceed cloud's $(human "$max_file_bytes") per-file cap (maxFileBytes):
+$(printf '%s\n' "$big" | head -3)"
 
 if [ -n "${SITEPUBLISH_PLAN:-}" ]; then
   printf 'slug=%s dir=%s files=%s bytes=%s api=%s source=%s\n' \
@@ -124,9 +143,11 @@ zbytes=$(wc -c < "$zipf")
 
 # The refusal the whole size story is about. Above this the POST dies at the
 # edge with a 400 that names nothing.
-[ "$zbytes" -le "$max_zip" ] || die "the zipped export is $zbytes bytes, past cloud's ${max_zip}-byte edge BodyLimit (GATEWAY_BODY_LIMIT, cloud config.go). fasthttp refuses the POST before any handler runs and reports only 'Error when parsing request', so this is refused here where the number is visible. Publish this export with bin/sitedeploy, which streams per-file against a presigned grant and has no body limit."
+[ "$zbytes" -le "$max_body" ] || die "publish aborted: the zipped release is $(human "$zbytes") for $files files, over the $(human "$max_body") edge limit (GATEWAY_BODY_LIMIT, cloud internal/edge/edge.go:36). fasthttp refuses the POST before any handler runs and answers only 'Error when parsing request', which names neither size nor cause — so it is refused here, where the number is. Publish this export with bin/sitedeploy, which streams per-file against a presigned grant and posts no whole body."
 
-echo "publishing $slug — $files files, $bytes bytes ($zbytes zipped)"
+# One line, every publish, whether or not it is anywhere near the limit. Same
+# shape bin/sitedeploy prints, because it is the same fact about the same edge.
+echo "release: $(human "$bytes") / $files files; zip $(human "$zbytes") of the $(human "$max_body") edge limit"
 
 # ---- 1. the bytes -----------------------------------------------------------
 # Every response body is KEPT and printed on failure. cloud answers these routes
