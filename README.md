@@ -37,6 +37,39 @@ jobs:
 
 That's it. The build/test/publish logic lives here, once.
 
+### `.hanzo/workflows/`, and nothing left in `.github/workflows/`
+
+The forge collects workflows from the **first** entry of `WORKFLOW_DIRS` that
+exists — not the union. So the moment one file lands in `.hanzo/workflows/`,
+every remaining file under `.github/workflows/` stops running. It stops
+*silently*: the checks that would go red are the ones no longer running, so the
+repo reports green over a pipeline that is not there. A half-finished migration
+runs neither lane.
+
+Find them in any repo:
+
+```bash
+comm -23 <(ls .github/workflows) <(ls .hanzo/workflows)   # anything listed is dead
+```
+
+Moving a file is not reviving it. Two things break on the way across:
+
+- **`runs-on: ubuntu-latest` matches no runner in this fleet**, deliberately —
+  this forge hosts ~1400 mirrored repos whose upstream workflows all ask for it,
+  and advertising it hands the fleet to their CI. An unmatched label does not
+  fail, it **queues until the timeout**. Use `hanzo-build-linux-amd64`, or
+  another label declared in the `git-runner-config` ConfigMap (ns `hanzo`).
+- **Anything reading a GitHub-only surface** — `github.event.pull_request`, PR
+  comments, GH Releases, the compare API, GH App tokens, CodeQL's
+  `security-events` upload, OIDC trusted publishing — has no equivalent here and
+  must be ported deliberately or dropped and said out loud.
+
+In a fork, most files under `.github/workflows/` are the *upstream project's*
+CI: PR labelers, reviewer assignment, stale bots, and release trains for
+packages we do not publish. Moving those runs someone else's automation on our
+fleet. Sort every file into revive / rewrite / drop, then **delete the
+directory** — a dead file cannot accumulate in a directory that does not exist.
+
 ## Deploying
 
 This workflow does not deploy. It builds an image and publishes it.
