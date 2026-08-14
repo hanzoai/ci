@@ -140,6 +140,13 @@ jobs:
         # Every clone attempt REPORTS. This step used to send both to /dev/null and
         # print only "could not fetch", which named neither the ref it derived nor
         # which host refused — so the failure could only be guessed at from source.
+        env:
+          # git.hanzo.ai answers 401 to ANONYMOUS git-over-http — for a PUBLIC repo
+          # too (hanzoai/ci is public; `GET /hanzoai/ci/info/refs?service=git-upload-pack`
+          # returns 401 and the repo page 303s to a login). So the forge attempt
+          # below could only ever fail, and every run fell through to the mirror.
+          # Any signed-in identity satisfies it; the per-job token is one.
+          FORGE_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           echo "GITHUB_WORKFLOW_REF=${GITHUB_WORKFLOW_REF:-<unset>}"
@@ -164,9 +171,33 @@ jobs:
           #
           # The break therefore tests for the TOOL rather than for the clone, so a
           # host that answers with the wrong tree falls through to the next.
+          #
+          # The forge attempt CARRIES A CREDENTIAL, and without one "forge first"
+          # was a comment rather than a behaviour: the anonymous clone 401'd every
+          # time, so the loop reached github.com on every run of every caller and
+          # the fleet built against the MIRROR. The two hosts are not
+          # interchangeable while the mirror lags — measured 2026-08-14,
+          # git.hanzo.ai v1 = a9e13341 and github.com v1 = 3a3f7457, and the run
+          # that failed studio checked out 3a3f7457. A repo that has just
+          # published a ref is unusable until the mirror catches up, which reads
+          # as a broken pin rather than as a stale mirror.
+          #
+          # http.extraheader, not credentials in $url: the URL is echoed above.
+          hdr=()
+          if [ -n "${FORGE_TOKEN:-}" ]; then
+            b64=$(printf 'x-access-token:%s' "$FORGE_TOKEN" | base64 -w0)
+            echo "::add-mask::$b64"
+            hdr=(-c "http.extraheader=Authorization: Basic $b64")
+          else
+            echo "::warning::no per-job token — the git.hanzo.ai attempt will 401 and this run will build against the github.com mirror"
+          fi
           for url in https://git.hanzo.ai/hanzoai/ci https://github.com/hanzoai/ci; do
             echo "::group::clone ${url}@${ref}"
-            if git clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/ci" \
+            # The header goes ONLY to the forge: git sends http.extraheader to
+            # whatever host it is talking to, and a forge token must not be
+            # handed to github.com.
+            a=(); case "$url" in https://git.hanzo.ai/*) a=(${hdr[@]+"${hdr[@]}"}) ;; esac
+            if git ${a[@]+"${a[@]}"} clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/ci" \
                && [ -x "$RUNNER_TEMP/ci/bin/imgver" ]; then
               echo "cloned ${url}@${ref}"; echo "::endgroup::"; break
             fi
