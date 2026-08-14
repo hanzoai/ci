@@ -59,15 +59,34 @@ dir="${2:?usage: sitedeploy <slug> <dir>}"
 api="${HANZO_API:-https://api.hanzo.ai}"
 jobs="${SITEDEPLOY_JOBS:-24}"
 
-# `16 << 20`, quoted from cloud internal/edge/edge.go:36 so a reader can check it
-# against the source rather than trust it. That function is the one definition;
+# `16 << 20`, quoted from cloud internal/edge/edge.go:38 so a reader can check it
+# against the source rather than trust it. That package is the one definition;
 # config.go:312 consumes it and cmd/cloud/main.go:124 binds it to the public
 # door's fasthttp socket, so it is the outermost thing a request meets. The env
 # var carries the SERVER'S OWN NAME: one value, one name, wherever it travels —
 # a runner told a different edge limit is told it once and both lanes obey.
-max_body="${GATEWAY_BODY_LIMIT:-16777216}"
+#
+# READ THE WAY THE SERVER READS IT. edge.envInt (edge.go:40) is TrimSpace, then
+# strconv.Atoi, then `err != nil || n <= 0` falls back to the default — so the
+# server SHRUGS at a malformed value and enforces 16 MiB. Bash does not shrug:
+# `[ "$body" -le "$max_body" ]` with a non-numeric operand is an error, the `||`
+# branch fires, and the publish refuses against a limit that was never in force,
+# printing a number that does not exist. One typo in one variable would stop
+# every publisher, fail-CLOSED. Mirrored here so the two cannot disagree about
+# the value of the same variable.
+max_body="${GATEWAY_BODY_LIMIT-}"
+max_body="${max_body#"${max_body%%[![:space:]]*}"}"    # TrimSpace
+max_body="${max_body%"${max_body##*[![:space:]]}"}"
+max_body="${max_body#+}"                               # Atoi accepts a leading sign
+case "$max_body" in ''|*[!0-9]*) max_body=16777216 ;; esac
+# 18 digits: past that bash's own `-gt` errors, exactly where Atoi returns an
+# error and Go keeps its default. The two agree everywhere below 10^18 bytes.
+{ [ "${#max_body}" -le 18 ] && [ "$max_body" -gt 0 ]; } || max_body=16777216
 
-human() { awk -v b="$1" 'BEGIN{ split("B KiB MiB GiB", u, " "); i = 1
+# LC_ALL=C for the same reason the manifest sort below carries it: under a
+# comma-decimal locale awk renders "16,0 MiB". The number in a refusal is read
+# by people and matched by tests, and neither wants it to depend on the runner.
+human() { LC_ALL=C awk -v b="$1" 'BEGIN{ split("B KiB MiB GiB", u, " "); i = 1
   while (b >= 1024 && i < 4) { b /= 1024; i++ }
   printf (i == 1 ? "%d %s" : "%.1f %s"), b, u[i] }'; }
 # A private scratch dir, not fixed /tmp names: two sites deploying at once on a
@@ -157,7 +176,10 @@ jq -n --arg c "${SITEDEPLOY_COMMIT:-}" --argjson f "$count" --argjson b "${bytes
 body=$(wc -c < "$work/sd-done.json" | tr -d ' ')   # BSD wc pads its count, GNU does not
 
 [ "$body" -le "$max_body" ] || {
-  echo "::error::publish aborted: the completion manifest is $(human "$body") for $count files, over the $(human "$max_body") edge limit (GATEWAY_BODY_LIMIT, cloud internal/edge/edge.go:36). The bytes stream per file and are not the problem — the manifest cloud reconciles the prefix against is one body, and fasthttp refuses an oversized POST before any handler runs, answering only 'Error when parsing request', which names neither size nor cause. Reduce the object count: a full prerender is what makes an export this wide."
+  # Exact bytes beside the human number, because the band where a site FIRST
+  # crosses is the ~100 KiB just above the cap, and there both sides round to
+  # "16.0 MiB" — a refusal that reads as 16.0 over 16.0 explains nothing.
+  echo "::error::publish aborted: the completion manifest is $(human "$body") ($body bytes) for $count files, over the $(human "$max_body") ($max_body bytes) edge limit (GATEWAY_BODY_LIMIT, cloud internal/edge/edge.go:38). The bytes stream per file and are not the problem — the manifest cloud reconciles the prefix against is one body, and fasthttp refuses an oversized POST before any handler runs, answering only 'Error when parsing request', which names neither size nor cause. Reduce the object count: a full prerender is what makes an export this wide."
   exit 1; }
 
 if [ -n "${SITEDEPLOY_PLAN:-}" ]; then

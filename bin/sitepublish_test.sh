@@ -112,6 +112,38 @@ t "a zip exactly AT the limit still publishes" 0 $rc "live: rel-1" "$out"
 out=$(GATEWAY_BODY_LIMIT="$((z - 1))" T_PUBLISH_BODY="$OK_PUB" T_LIST_BODY="$OK_LIST" run "$site"); rc=$?
 t "one byte past the limit is refused" 1 $rc "publish aborted" "$out"
 
+# The refusal has to be readable in the band where an export FIRST crosses, which
+# is the ~100 KiB just above the cap — there both sides round to the same "16.0
+# MiB" and the message says 16.0 is over 16.0. The exact bytes are what settle it.
+t "  ...and the refusal carries the exact bytes" 1 $rc "($((z - 1)) bytes) edge limit" "$out"
+t "  ...on the measured side too"                1 $rc "($z bytes) for" "$out"
+
+# A MALFORMED limit must land where the SERVER lands: edge.envInt is TrimSpace ->
+# Atoi -> `err || n <= 0` -> default, so cloud shrugs and enforces 16 MiB. Bash
+# does not shrug — `-le` against a non-numeric operand is an error and the `||`
+# branch fires, so before this was mirrored a single typo in one variable refused
+# every publish in the fleet, fail-CLOSED, against a limit that was never in
+# force. Each of these is a value Atoi rejects or reads as <= 0.
+for bad in abc 0x10 1e9 0 -1 '1 6' 99999999999999999999999 ''; do
+  out=$(GATEWAY_BODY_LIMIT="$bad" T_PUBLISH_BODY="$OK_PUB" T_LIST_BODY="$OK_LIST" run "$site"); rc=$?
+  t "GATEWAY_BODY_LIMIT='$bad' falls back to 16 MiB and publishes" 0 $rc "of the 16.0 MiB edge limit" "$out"
+done
+# Atoi accepts a leading sign, so this one is VALID and must be honoured, not
+# discarded — a mirror that only ever falls back is not a mirror.
+out=$(GATEWAY_BODY_LIMIT=" +1 " T_PUBLISH_BODY="$OK_PUB" T_LIST_BODY="$OK_LIST" run "$site"); rc=$?
+t "a signed, padded limit is read exactly as Atoi reads it" 1 $rc "(1 bytes) edge limit" "$out"
+
+# awk renders "16,0" under a comma-decimal locale, which changes a number people
+# read and tests match. Skipped where the locale is not installed — a bare runner
+# ships C only — so this fires on a dev machine and never lies on a runner.
+# Not `grep -q`: it exits on the first match, SIGPIPEs `locale`, and this suite
+# runs under `set -o pipefail` — so the pipeline reports 141 and the condition is
+# FALSE no matter what is installed. The block simply never ran.
+if locale -a 2>/dev/null | grep -ix 'de_DE.UTF-8' >/dev/null; then
+  out=$(LC_ALL=de_DE.UTF-8 T_PUBLISH_BODY="$OK_PUB" T_LIST_BODY="$OK_LIST" run "$site"); rc=$?
+  t "the size reads the same under a comma-decimal locale" 0 $rc "16.0 MiB edge limit" "$out"
+fi
+
 # The server caps one artifact at 5000 entries; a 5001-file export can never
 # become a Release by ANY transport, so saying so here beats a 413 later.
 many="$tmp/many"; mkdir -p "$many"; echo x > "$many/index.html"
@@ -125,6 +157,14 @@ t "publish + verified flip succeeds" 0 $rc "live: rel-1" "$out"
 # The size is reported whether or not it is near the limit, so the number that
 # explains a refusal is already in the log of every run that did not have one.
 t "  ...and the release size is reported, with the limit" 0 $rc "of the 16.0 MiB edge limit" "$out"
+
+# The step summary is a markdown TABLE, so a count carrying BSD wc's leading
+# padding renders as `|        331 B |`. Same `tr -d` discipline as the file count.
+sum="$tmp/summary.md"; : > "$sum"
+out=$(GITHUB_STEP_SUMMARY="$sum" T_PUBLISH_BODY="$OK_PUB" T_LIST_BODY="$OK_LIST" run "$site"); rc=$?
+zs=$(cd "$site" && zip -qXr "$tmp/sum.zip" . -x './CNAME' && wc -c < "$tmp/sum.zip" | tr -d ' ')
+t "the step summary names the release" 0 $rc "| \`rel-1\` |" "$(cat "$sum")"
+t "  ...with an unpadded byte cell"    0 $rc "| $zs B |"     "$(cat "$sum")"
 
 # ---- transport failures carry the server's answer ---------------------------
 # Each status is a different fix, so the body is printed rather than swallowed.
