@@ -571,9 +571,18 @@ jobs:
           # (cloud apps/projects/blob.go:60, `sitePrefix(org, slug)`) — which is
           # precisely what makes the prefix unforgeable. CI passing them was CI
           # restating something it could only get wrong.
-          if [ "$SITE_DECL" = '!!map' ]; then
+          if [ "$SITE_DECL" = '!!map' ] || [ "$(yq -r '.sites | type' hanzo.yml 2>/dev/null || echo '!!null')" = '!!seq' ]; then
             echo "::add-mask::$TOKEN"
             echo "HANZO_API_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+            # The Sites plane issues its presigned upload grant to the org of an
+            # `sk-` key, so the JWT above cannot stand in for it. Sealed once per
+            # org at deploy/HANZO_DEPLOY_TOKEN and read here like every other one.
+            dt=$(get HANZO_DEPLOY_TOKEN)
+            if [ -z "$dt" ]; then
+              echo "::error::hanzo.yml declares a site but KMS holds no HANZO_DEPLOY_TOKEN at $ORG/$PATHQ env=$ENV — refusing to publish. Seal it, then rebuild."; exit 1
+            fi
+            echo "::add-mask::$dt"
+            echo "HANZO_DEPLOY_TOKEN=$dt" >> "$GITHUB_ENV"
           fi
           # Build-time secrets → --build-arg. A repo declares per-image
           # `build_secrets: [NAME, ...]` in hanzo.yml; each NAME is fetched from
@@ -1895,22 +1904,22 @@ jobs:
         # prevent, so the fix is not to provision that credential — it is to stop
         # needing it.
         #
-        # The bytes now travel the route console proved: the zip goes to
-        # /v1/projects/<slug>/deploy and the landed prefix is promoted by
-        # /v1/sites/<slug>/publish, both on the IAM bearer the KMS step above
-        # ALREADY minted. CI holds no bucket key, names no bucket and names no
-        # org — the org segment is prepended server-side from the validated
-        # principal, which is what makes the prefix unforgeable. Nothing is left
-        # for an org to be missing.
+        # The bytes travel around the API, not through it: /v1/projects/<slug>/
+        # deployments answers with a presigned, prefix-scoped grant, each file
+        # goes straight to object storage against it, and /complete flips the
+        # pointer. CI holds no bucket key, names no bucket and names no org — the
+        # org segment is prepended server-side from the validated principal,
+        # which is what makes the prefix unforgeable. Nothing is left for an org
+        # to be missing.
         #
-        # THE WORK IS IN bin/sitepublish, NOT HERE. Forty lines of zip → upload →
-        # promote → verify inlined in a workflow is forty lines nobody can run
+        # THE WORK IS IN bin/sitedeploy, NOT HERE. Forty lines of enqueue →
+        # upload → complete inlined in a workflow is forty lines nobody can run
         # offline, and this file already learned that with imgver and gover.
-        # bin/sitepublish_test.sh drives it through a curl shim with no network,
-        # and is weighted toward the REFUSALS — a publish step that reports
-        # success when it verified nothing is worse than one that never verified,
-        # because it is indistinguishable from a working one until a site quietly
-        # stops updating.
+        # bin/sitedeploy_test.sh drives it through SITEDEPLOY_PLAN=1 with no
+        # network, and is weighted toward the REFUSALS — a publish step that
+        # reports success when it verified nothing is worse than one that never
+        # verified, because it is indistinguishable from a working one until a
+        # site quietly stops updating.
         if: inputs.mode != 'delegate' && github.event_name != 'pull_request'
         env:
           API: ${{ vars.API_ENDPOINT || 'https://api.hanzo.ai' }}
@@ -1966,20 +1975,26 @@ jobs:
           # An empty token here means the KMS login did not happen — not that a
           # site credential was never provisioned, which is what the old message
           # said and what sent people looking for a secret that does not exist.
-          if [ -z "${HANZO_API_TOKEN:-}" ]; then
-            echo "::error::hanzo.yml declares site: but the KMS step minted no IAM token for $API — refusing to publish. That is a KMS_CLIENT_ID/KMS_CLIENT_SECRET problem on this repo, not a missing site credential."; exit 1
+          if [ -z "${HANZO_DEPLOY_TOKEN:-}" ]; then
+            echo "::error::hanzo.yml declares a site but the KMS step read no HANZO_DEPLOY_TOKEN for $API — refusing to publish. That is a KMS_CLIENT_ID/KMS_CLIENT_SECRET problem on this repo, not a missing site credential."; exit 1
           fi
-          # Slug grammar, index.html, the server's file/byte caps and the edge
-          # BodyLimit are all checked inside sitepublish, before anything is sent,
-          # so each refusal names its own number instead of arriving as a 4xx.
+          # sitedeploy, not sitepublish: the export goes up FILE BY FILE against a
+          # presigned, prefix-scoped grant, so the bytes never traverse the API and
+          # no body limit applies. sitepublish POSTs the whole zip, which fasthttp
+          # refuses above the edge BodyLimit before any handler runs — reported as
+          # an opaque 400 "Error when parsing request" that reads like a malformed
+          # payload rather than a size cap. That ceiling is not theoretical: the
+          # console export is 116 MB across 627 files, and a static export only
+          # ever grows. One lane, and it is the one that scales.
           # One publish per site, from the one implementation. A file, not a
-          # pipe: sitepublish runs curl, and curl inherits stdin — it would eat
+          # pipe: sitedeploy runs curl, and curl inherits stdin — it would eat
           # the rest of the list and report success for sites it never sent.
           printf '%s\n' "$PAIRS" > "$RUNNER_TEMP/site-pairs"
           while IFS= read -r pair; do
             [ -n "${pair//[[:space:]]/}" ] || continue
             echo "::group::publish ${pair%%=*}"
-            HANZO_API="$API" "$CI_HOME/bin/sitepublish" "${pair%%=*}" "${pair#*=}"
+            HANZO_API="$API" SITEDEPLOY_COMMIT="${{ github.sha }}" SITEDEPLOY_BRANCH="$REF" \
+              "$CI_HOME/bin/sitedeploy" "${pair%%=*}" "${pair#*=}"
             echo "::endgroup::"
           done < "$RUNNER_TEMP/site-pairs"
 
