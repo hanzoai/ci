@@ -1344,6 +1344,10 @@ jobs:
           IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo 1 || echo 0)
           REL="${{ github.ref_name }}"   # the git tag, verbatim: v1.26.19
           VER="${REL#v}"                 # v-stripped alias: 1.26.19
+          # One timestamp for every image in this run, read once: two images
+          # built seconds apart from ONE commit should not disagree about when
+          # they were built.
+          BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           yq -o=json -I=0 '.images' hanzo.yml | jq -c '.[]' | while read -r img; do
             name=$(echo "$img"|jq -r .name); ctx=$(echo "$img"|jq -r .context)
             df=$(echo "$img"|jq -r '.dockerfile // (.context+"/Dockerfile")'); repo=$(echo "$img"|jq -r .repo)
@@ -1444,12 +1448,37 @@ jobs:
               TAGS="$TAGS -t $repo:${ver}${sfx:+-$sfx}"
             fi
             echo "::group::build $name → $repo (${sfx}) [$plats]"
-            # --build-arg assembly: static hanzo.yml `args` (a fixed value, e.g. a
-            # pinned base image tag) + `build_secrets` (KMS values the KMS step
-            # exported into the env above). Empty when a repo declares neither, so
-            # the buildx line is unchanged for every existing repo.
+            # --build-arg assembly: hanzo.yml `args` + `build_secrets` (KMS values
+            # the KMS step exported into the env above). Empty when a repo declares
+            # neither, so the buildx line is unchanged for every existing repo.
+            #
+            # An `args` value may name what only the build knows, by exact
+            # spelling: ${VERSION} ${SHA} ${SHORT_SHA} ${BRANCH} ${BUILD_TIME}.
+            # A Dockerfile that stamps its own version has to be TOLD it — the
+            # value is per-build, so it cannot be a fixed string in hanzo.yml,
+            # and a repo with no way to say it bakes its `ARG VERSION` DEFAULT
+            # instead. That is not cosmetic: hanzoai/o11y ldflags
+            # -X …version=${VERSION} into the binary, so without this its image
+            # lane could not fold in here at all — the gated build would have
+            # published a production observability server reporting `dev` while
+            # the tag on the outside read v1.5.64, and "which build is this" is
+            # the one question an image must be able to answer about itself.
+            # This is the same provenance the run already stamps as an OCI label
+            # a few lines below, offered on the channel a Dockerfile can read.
+            #
+            # Substitution is literal — no eval, no envsubst — so a value can
+            # never reach a shell or read an environment variable this list does
+            # not name: `$(id)`, backticks and $HOME all pass through untouched.
             BUILD_ARGS=""
-            while IFS= read -r kv; do [ -n "$kv" ] && BUILD_ARGS="$BUILD_ARGS --build-arg $kv"; done \
+            while IFS= read -r kv; do
+              [ -n "$kv" ] || continue
+              kv=${kv//'${VERSION}'/${ver:-$VER}}
+              kv=${kv//'${SHA}'/$GITHUB_SHA}
+              kv=${kv//'${SHORT_SHA}'/$SHORT}
+              kv=${kv//'${BRANCH}'/$GITHUB_REF_NAME}
+              kv=${kv//'${BUILD_TIME}'/$BUILD_TIME}
+              BUILD_ARGS="$BUILD_ARGS --build-arg $kv"
+            done \
               < <(echo "$img" | jq -r '(.args // {}) | to_entries[] | "\(.key)=\(.value)"')
             for bs in $(echo "$img" | jq -r '(.build_secrets // [])[]'); do
               v=$(printenv "$bs" 2>/dev/null || true)
