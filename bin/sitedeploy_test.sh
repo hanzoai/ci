@@ -205,7 +205,10 @@ rm -f "$tmp/calls" "$tmp/complete.body"
 out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
       SITEDEPLOY_JOBS=1 T_DIR="$tmp" T_ENQ="${ENQ/https:\/\/s3.test/https:\/\/s3.unknown}" T_DONE="$DONE" \
       bash "$SD" a-slug "$site" 2>&1); rc=$?
-t "a failed upload fails the deploy"     "$rc"  "1"
+# Non-zero, not a number: the upload loop is xargs, and a failed child is exit
+# 123 on GNU and exit 1 on BSD. Pinning either one passes on the machine it was
+# written on and reds on the other.
+t "a failed upload fails the deploy"     "$([ "$rc" != 0 ] && echo failed)"  "failed"
 t "a failed upload is reported as error" "$(jq -r .status "$tmp/complete.body" 2>/dev/null)"  "error"
 
 [ $fail -eq 0 ] && echo "PASS" || echo "FAIL"
