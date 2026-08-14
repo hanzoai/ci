@@ -13,7 +13,7 @@
 #
 # THE THREE STEPS, and why the bytes never pass through the API:
 #
-#   POST /v1/projects/<slug>/deploy            -> 202 {id, bucket, prefix, upload}
+#   POST /v1/projects/<slug>/deployments       -> 202 {id, bucket, prefix, upload}
 #   POST <upload.url> per file                 -> the bytes, straight to S3
 #   POST /v1/projects/<slug>/deployments/<id>/complete
 #
@@ -201,9 +201,10 @@ esac
 # which is why every never-before-deployed site failed its first run. Create it
 # idempotently here instead: 200/201 the first time, 409 every time after, both
 # success. So a new site needs no out-of-band `POST /v1/projects`; committing the
-# workflow is enough. The repo is linked because the git-source enqueue requires
-# a linked project (deployGit rejects an unlinked one); SITEDEPLOY_REPO overrides
-# the origin for a forge checkout whose remote is not the canonical repo.
+# workflow is enough. The repo is linked so the deploy's lifecycle events name a
+# repo and reach the notify subscriptions keyed on it — the enqueue itself no
+# longer requires a link; SITEDEPLOY_REPO overrides the origin for a forge
+# checkout whose remote is not the canonical repo.
 repo="${SITEDEPLOY_REPO:-$(git remote get-url origin 2>/dev/null || true)}"
 pcode=$(curl -sS -o /tmp/sd-proj.json -w '%{http_code}' \
   -X POST "$api/v1/projects" \
@@ -220,12 +221,25 @@ esac
 # and prefix come FROM cloud (sitePrefix(org, slug) is server-side) — never guess
 # them, or the upload lands where nothing is served the moment an org or slug
 # changes.
+#
+# POST on the DEPLOYMENTS COLLECTION, which is the address that opens one. The
+# enqueue used to share the /deploy address with the archive upload, told apart
+# by Content-Type; /deploy is now the archive alone and reads any body as bytes,
+# so this JSON sent there is sniffed as a tar and refused —
+# 400 "invalid artifact: tar: unexpected EOF", with the build and every gate
+# already green above it. The collection is where a deployment is created; the
+# verb is the method and the noun is the resource.
+#
+# `commit` is the whole body. `source` was the Content-Type discriminator the
+# split removed, and `branch` was always discarded server-side — a deployment has
+# no branch column, and the lifecycle event derives it from the project's own
+# linked branch. jq builds it so a commit message can never break the JSON.
 code=$(curl -sS -o /tmp/sd-enq.json -w '%{http_code}' \
-  -X POST "$api/v1/projects/$slug/deploy" \
+  -X POST "$api/v1/projects/$slug/deployments" \
   -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN" -H 'Content-Type: application/json' \
-  -d "{\"source\":\"git\",\"commit\":\"${SITEDEPLOY_COMMIT:-}\",\"branch\":\"${SITEDEPLOY_BRANCH:-main}\"}")
+  -d "$(jq -nc --arg c "${SITEDEPLOY_COMMIT:-}" '{commit:$c}')")
 if [ "$code" != "202" ]; then
-  echo "::error::enqueue $api/v1/projects/$slug/deploy returned HTTP $code"; head -c 600 /tmp/sd-enq.json; echo; exit 1
+  echo "::error::enqueue $api/v1/projects/$slug/deployments returned HTTP $code"; head -c 600 /tmp/sd-enq.json; echo; exit 1
 fi
 dep=$(jq -r '.id' /tmp/sd-enq.json)
 prefix=$(jq -r '.prefix' /tmp/sd-enq.json)
