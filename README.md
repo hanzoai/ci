@@ -240,21 +240,37 @@ bearer is the IAM JWT the workflow already mints from `KMS_CLIENT_ID` /
 no org — the org segment is prepended server-side from the validated principal,
 which is what makes the prefix unforgeable.
 
-The export is zipped and posted to `/v1/projects/<slug>/deploy`, then that prefix
-is promoted by `/v1/sites/<slug>/publish` into an **immutable release** whose id
-digests its object manifest. The site's pointer is flipped to it, and the step
-then re-reads the release list and refuses unless the release it just published
-is the one that is live. Rollback is the same pointer aimed at an older release.
+The export ships through [`bin/sitedeploy`](bin/sitedeploy):
+`POST /v1/projects/<slug>/deployments` answers with a prefix-scoped, 30-minute
+presigned grant, every file goes straight to S3 against it, and the completion
+carries the manifest cloud reconciles the prefix against — deleting whatever the
+build no longer produces. CI never holds a bucket key.
 
 **One size boundary, and it is the server's.** cloud's public edge caps a request
-body at 16 MiB (`GATEWAY_BODY_LIMIT`) and refuses a larger POST before any
-handler runs — reporting only `Error when parsing request`, which names neither
-size nor cause. `bin/sitepublish` therefore measures the zip and refuses *with
-the number* first. Of the 24 built exports in the estate, 22 fit; the two that do
-not (`hanzo.ai` at 27.9 MiB zipped and 8,536 files, `trillerfest.com` at 76.7
-MiB) use [`bin/sitedeploy`](bin/sitedeploy), which streams per-file against a
-presigned grant and has no body limit. `hanzo.ai` is also past the server's own
-5,000-entry cap, so no transport makes that export a release.
+body at 16 MiB (`GATEWAY_BODY_LIMIT`, `internal/edge/edge.go`) and refuses a
+larger POST before any handler runs — answering only `Error when parsing
+request`, which names neither size nor cause. So every body either lane posts is
+measured against that number *first* and refused *with* it, and the size is
+printed on every publish whether or not it is near the limit:
+
+```
+release: 116.2 MiB / 627 files; manifest 13.5 KiB of the 16.0 MiB edge limit
+```
+
+The release bytes are not what the edge bounds here — they stream per file. What
+it bounds is the completion manifest, which grows with the object **count**, so
+a full prerender is what walks a site toward the cap. Measured before the
+enqueue, so a refusal costs nothing and leaves no deployment open.
+
+[`bin/sitepublish`](bin/sitepublish) is the other transport, and there the zip is
+the body, so the cap lands on it directly: it posts the export whole to
+`/v1/projects/<slug>/deploy` and promotes it via `/v1/sites/<slug>/publish` into
+an **immutable release** whose id digests its object manifest, then re-reads the
+release list and refuses unless the release it just published is the one that is
+live. Rollback is the same pointer aimed at an older release. Of the 24 built
+exports in the estate 22 fit that body; the two that do not (`hanzo.ai`, 27.9 MiB
+zipped over 8,536 files, and `trillerfest.com` at 76.7 MiB) can only stream —
+`hanzo.ai` is past the server's own 5,000-entry release cap besides.
 
 ## Runners — our fleet or your own
 

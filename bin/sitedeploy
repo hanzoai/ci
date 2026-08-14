@@ -23,6 +23,14 @@
 # reads like a malformed payload rather than a size cap. The git source is the
 # documented route for exactly this shape.
 #
+# THE ONE BODY THIS LANE STILL POSTS is the completion's `keys` manifest, and it
+# grows with the object count — so the same edge limit still bounds it, and cloud
+# caps nothing on that route (apps/projects/deploy.go:388 declares Keys with no
+# length check). It is therefore built and MEASURED before the enqueue: past the
+# limit this refuses with the number, having sent nothing. Measured at the point
+# it is sent instead, the same refusal arrives as that opaque 400 after every
+# object is already in the bucket and the deployment is already open.
+#
 # NO STANDING S3 CREDENTIAL. The 202 carries `upload`: a presigned POST policy
 # that is prefix-scoped (starts-with $key "<org>/<slug>/", enforced by S3 itself),
 # short-lived (30 min) and size-bounded. That replaced handing every repo the
@@ -40,6 +48,7 @@
 #
 # ENV: HANZO_DEPLOY_TOKEN (required)  the org-scoped `sk-` key; mint at POST /v1/keys
 #      HANZO_API           (https://api.hanzo.ai)
+#      GATEWAY_BODY_LIMIT  (16777216) the edge's own name for its own limit
 #      SITEDEPLOY_JOBS     (24)  parallel uploads
 #      SITEDEPLOY_COMMIT / SITEDEPLOY_BRANCH  recorded on the deployment
 #      SITEDEPLOY_PLAN=1   print the manifest and exit; no network. The test seam.
@@ -49,6 +58,18 @@ slug="${1:?usage: sitedeploy <slug> <dir>}"
 dir="${2:?usage: sitedeploy <slug> <dir>}"
 api="${HANZO_API:-https://api.hanzo.ai}"
 jobs="${SITEDEPLOY_JOBS:-24}"
+
+# `16 << 20`, quoted from cloud internal/edge/edge.go:36 so a reader can check it
+# against the source rather than trust it. That function is the one definition;
+# config.go:312 consumes it and cmd/cloud/main.go:124 binds it to the public
+# door's fasthttp socket, so it is the outermost thing a request meets. The env
+# var carries the SERVER'S OWN NAME: one value, one name, wherever it travels —
+# a runner told a different edge limit is told it once and both lanes obey.
+max_body="${GATEWAY_BODY_LIMIT:-16777216}"
+
+human() { awk -v b="$1" 'BEGIN{ split("B KiB MiB GiB", u, " "); i = 1
+  while (b >= 1024 && i < 4) { b /= 1024; i++ }
+  printf (i == 1 ? "%d %s" : "%.1f %s"), b, u[i] }'; }
 # A private scratch dir, not fixed /tmp names: two sites deploying at once on a
 # runner that is not a container would otherwise share sd-enq.json, and the
 # second grant would send the first site's files into the other's prefix.
@@ -110,12 +131,47 @@ ctype() {
 manifest=$(cd "$dir" && find . -type f ! -name CNAME | sed 's|^\./||' | LC_ALL=C sort)
 count=$(printf '%s' "$manifest" | grep -c . || true)
 [ "$count" -gt 0 ] || { echo "::error::$dir contains no files — refusing to deploy an empty manifest"; exit 1; }
+printf '%s\n' "$manifest" | grep . > "$work/manifest"
+
+# ---- the completion body, built BEFORE anything is sent ----------------------
+# It is the last request of the three and the only one whose size grows with the
+# release, so it is the only one the edge limit can refuse — and refusing it late
+# is the expensive way to learn: the deployment is open, every object is already
+# in the bucket, and the answer is an opaque 400.
+#
+# `wc -c`, not `stat`: the size flag is spelled -f%z on BSD and -c%s on GNU, and a
+# `stat -f%z || stat -c%s` fallback does not work — on Linux the first arm fails
+# INSIDE the pipeline, awk still exits 0, and the `||` never fires, so the byte
+# count silently reports 0. wc is the one spelling both agree on.
+bytes=$(cd "$dir" && find . -type f ! -name CNAME -exec wc -c {} + | awk '$2!="total"{s+=$1} END{print s+0}')
+
+# --rawfile, not --args: `jq --args ... $(cat manifest)` passes every key as an
+# ARGV entry, and execve caps the argument block (~2 MiB on Linux). A wide export
+# would die there first — "Argument list too long", from the tool that builds the
+# body rather than from the size of it — which is the same unreadable failure one
+# layer up, and it would fire before this check could name the real ceiling.
+jq -n --arg c "${SITEDEPLOY_COMMIT:-}" --argjson f "$count" --argjson b "${bytes:-0}" \
+      --rawfile k "$work/manifest" \
+      '{status:"live", commit:$c, files:$f, bytes:$b,
+        keys:($k | rtrimstr("\n") | split("\n"))}' > "$work/sd-done.json"
+body=$(wc -c < "$work/sd-done.json" | tr -d ' ')   # BSD wc pads its count, GNU does not
+
+[ "$body" -le "$max_body" ] || {
+  echo "::error::publish aborted: the completion manifest is $(human "$body") for $count files, over the $(human "$max_body") edge limit (GATEWAY_BODY_LIMIT, cloud internal/edge/edge.go:36). The bytes stream per file and are not the problem — the manifest cloud reconciles the prefix against is one body, and fasthttp refuses an oversized POST before any handler runs, answering only 'Error when parsing request', which names neither size nor cause. Reduce the object count: a full prerender is what makes an export this wide."
+  exit 1; }
 
 if [ -n "${SITEDEPLOY_PLAN:-}" ]; then
   printf 'slug=%s dir=%s files=%s\n' "$slug" "$dir" "$count"
   while IFS= read -r k; do [ -n "$k" ] && printf '%s\t%s\n' "$k" "$(ctype "$k")"; done <<< "$manifest"
   exit 0
 fi
+
+# One line, every publish, whether or not it is anywhere near the limit. The size
+# of a release explains most of what this lane then does, and a build step that
+# reports it only when it refuses leaves the number unknown on the run that
+# introduced it — which is the run where a growing object count is cheapest to
+# see.
+echo "release: $(human "$bytes") / $count files; manifest $(human "$body") of the $(human "$max_body") edge limit"
 
 : "${HANZO_DEPLOY_TOKEN:?HANZO_DEPLOY_TOKEN is unset. It is the ONE credential this needs; set it on the forge (git.hanzo.ai), which is what reads .hanzo/workflows — not on GitHub. Mint: POST /v1/keys {\"type\":\"secret\"}}"
 
@@ -302,18 +358,11 @@ export -f put ctype
 export UP_URL="$upload_url" PREFIX="$prefix" DIR="$dir" work
 
 echo "uploading $count files to s3://$(jq -r .bucket "$work"/sd-enq.json)/$prefix ($jobs parallel)"
-printf '%s\n' "$manifest" | grep . | xargs -P "$jobs" -I{} bash -c 'put "$@"' _ {}
+xargs -P "$jobs" -I{} bash -c 'put "$@"' _ {} < "$work/manifest"
 
 # ---- 3. flip it live --------------------------------------------------------
-# `wc -c`, not `stat`: the size flag is spelled -f%z on BSD and -c%s on GNU, and a
-# `stat -f%z || stat -c%s` fallback does not work — on Linux the first arm fails
-# INSIDE the pipeline, awk still exits 0, and the `||` never fires, so the byte
-# count silently reports 0. wc is the one spelling both agree on.
-bytes=$(cd "$dir" && find . -type f ! -name CNAME -exec wc -c {} + | awk '$2!="total"{s+=$1} END{print s+0}')
-jq -n --arg c "${SITEDEPLOY_COMMIT:-}" --argjson f "$count" --argjson b "${bytes:-0}" \
-      --args '{status:"live",commit:$c,files:$f,bytes:$b,keys:$ARGS.positional}' \
-      $(printf '%s\n' "$manifest" | grep .) > "$work"/sd-done.json
-
+# The body was built and measured at the top, before a single object moved, so
+# there is nothing left to assemble here — only to send it.
 code=$(curl -sS -o "$work"/sd-resp.json -w '%{http_code}' \
   -X POST "$api/v1/projects/$slug/deployments/$dep/complete" \
   -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN" -H 'Content-Type: application/json' \

@@ -91,10 +91,26 @@ t "an empty export is refused" 1 $rc "no index.html" "$out"
 # The size refusal is the whole reason this script measures before it sends:
 # past the edge BodyLimit fasthttp rejects the POST before any handler runs and
 # reports only "Error when parsing request", which names neither size nor cause.
-out=$(SITEPUBLISH_MAX_ZIP=1 PATH="$shim:$PATH" HANZO_API_TOKEN=tok \
+out=$(GATEWAY_BODY_LIMIT=1 PATH="$shim:$PATH" HANZO_API_TOKEN=tok \
       bash "$SP" a-slug "$site" 2>&1); rc=$?
-t "a zip past the edge BodyLimit is refused here" 1 $rc "BodyLimit" "$out"
-t "  ...and the refusal names bin/sitedeploy" 1 $rc "bin/sitedeploy" "$out"
+t "a zip past the edge limit is refused here" 1 $rc "publish aborted" "$out"
+t "  ...and the refusal names the server's own knob" 1 $rc "GATEWAY_BODY_LIMIT" "$out"
+t "  ...and where that knob is defined" 1 $rc "internal/edge/edge.go" "$out"
+t "  ...and the opaque answer it replaces" 1 $rc "Error when parsing request" "$out"
+t "  ...and bin/sitedeploy, the transport that fits" 1 $rc "bin/sitedeploy" "$out"
+
+# THE OTHER SIDE OF THE BOUNDARY, and it is the half that matters more. This
+# check is only ever allowed to turn a failure into a readable one; a publish
+# that would have worked must still work, or the fleet learns to route around
+# the gate. So the boundary is asserted from BOTH sides against the REAL zip:
+# at exactly the limit it publishes, one byte under it refuses. An off-by-one
+# in either direction is the difference between a guard and an outage.
+( cd "$site" && zip -qXr "$tmp/probe.zip" . -x './CNAME' )
+z=$(wc -c < "$tmp/probe.zip" | tr -d ' ')
+out=$(GATEWAY_BODY_LIMIT="$z" T_PUBLISH_BODY="$OK_PUB" T_LIST_BODY="$OK_LIST" run "$site"); rc=$?
+t "a zip exactly AT the limit still publishes" 0 $rc "live: rel-1" "$out"
+out=$(GATEWAY_BODY_LIMIT="$((z - 1))" T_PUBLISH_BODY="$OK_PUB" T_LIST_BODY="$OK_LIST" run "$site"); rc=$?
+t "one byte past the limit is refused" 1 $rc "publish aborted" "$out"
 
 # The server caps one artifact at 5000 entries; a 5001-file export can never
 # become a Release by ANY transport, so saying so here beats a 413 later.
@@ -106,6 +122,9 @@ t "an export past maxFiles=5000 is refused" 1 $rc "cloud caps one artifact at 50
 # ---- the happy path ----------------------------------------------------------
 out=$(T_PUBLISH_BODY="$OK_PUB" T_LIST_BODY="$OK_LIST" run "$site"); rc=$?
 t "publish + verified flip succeeds" 0 $rc "live: rel-1" "$out"
+# The size is reported whether or not it is near the limit, so the number that
+# explains a refusal is already in the log of every run that did not have one.
+t "  ...and the release size is reported, with the limit" 0 $rc "of the 16.0 MiB edge limit" "$out"
 
 # ---- transport failures carry the server's answer ---------------------------
 # Each status is a different fix, so the body is printed rather than swallowed.
