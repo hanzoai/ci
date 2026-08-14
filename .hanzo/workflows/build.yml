@@ -1074,13 +1074,31 @@ jobs:
           SCHEME="${SERVER%%://*}"; HOST="${SERVER#*://}"; HOST="${HOST%/}"
           wrote=0
 
-          if [ -n "${FORGE_TOKEN:-}" ] && [ "$HOST" != "github.com" ]; then
-            GIT_CONFIG_GLOBAL="$CFG" git config --global \
-              url."${SCHEME}://x:${FORGE_TOKEN}@${HOST}/${OWNER}/".insteadOf \
-              "https://github.com/${OWNER}/"
-            echo "${OWNER}/* modules resolve from ${SCHEME}://${HOST}"
-            wrote=1
-          fi
+            if [ -n "${FORGE_TOKEN:-}" ] && [ "$HOST" != "github.com" ]; then
+              # THE OWNER OF THE REPO IS NOT THE OWNER OF ITS MODULES. This rewrote
+              # only github.com/$OWNER/, taking the repository owner as if it also
+              # named the module namespace. That held until a repo changed org: cloud
+              # became hanzo-inc/cloud while every module it requires is still called
+              # github.com/hanzoai/*, so the rewrite stopped matching and said nothing.
+              # The private ones then fell through to the public proxy, which cannot
+              # serve them, and the closure lost 7 packages with no fetch error
+              # anywhere — a rewrite that never fires leaves no trace.
+              #
+              # Rewrite OUR namespaces, not the repo's owner and not every namespace
+              # in go.mod: redirecting golang/ or google/ at our forge would break the
+              # whole graph. Ours are the brands we publish under; the forge is where
+              # they live, and a module path is a name rather than an address.
+              seen=""
+              for o in hanzoai hanzo-inc hanzo-ds hanzokv hanzos3 luxfi luxwallet zooai "$OWNER"; do
+                case " $seen " in *" $o "*) continue ;; esac
+                seen="$seen $o"
+                GIT_CONFIG_GLOBAL="$CFG" git config --global \
+                  url."${SCHEME}://x:${FORGE_TOKEN}@${HOST}/${o}/".insteadOf \
+                  "https://github.com/${o}/"
+              done
+              echo "our namespaces resolve from ${SCHEME}://${HOST}:$seen"
+              wrote=1
+            fi
 
           TOKEN="${GIT_TOKEN:-${GH_PAT:-}}"
           if [ -n "$TOKEN" ]; then
