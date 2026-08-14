@@ -87,5 +87,35 @@ out=$(HANZO_API=http://127.0.0.1:1 HANZO_DEPLOY_TOKEN=sk-unused bash "$SD" a-slu
 t "unreachable API: warns rather than blaming the token"  "$(printf '%s' "$out" | grep -c 'could not reach')"     "1"
 t "unreachable API: claims no revocation"                 "$(printf '%s' "$out" | grep -c 'does not authenticate')" "0"
 
+# A REACHABLE API that refuses the preflight must not stop the deploy either,
+# and that is the case that actually froze the Sites plane: /v1/keys is the
+# session-scoped key-MANAGEMENT route, so it answers a machine `sk-` key and an
+# anonymous caller identically (403 "sign in to manage API keys" — measured
+# against the live API). The old preflight read any non-200 as proof of
+# revocation and exited, so hanzo.ai and hips died there in ~1s on every run
+# with the whole build and every gate green above them.
+#
+# A local server that answers 403 to everything stands in for that shape, so the
+# suite stays offline. Python is already required by nothing else here, so this
+# uses a bash TCP responder: one connection, one canned response, then gone.
+resp="$tmp/403.sh"
+cat > "$resp" <<'EOS'
+while :; do
+  printf 'HTTP/1.1 403 Forbidden
+Content-Length: 2
+Connection: close
+
+{}' | nc -l 127.0.0.1 8731 >/dev/null 2>&1 || break
+done
+EOS
+if command -v nc >/dev/null 2>&1; then
+  bash "$resp" & responder=$!
+  sleep 0.4
+  out=$(HANZO_API=http://127.0.0.1:8731 HANZO_DEPLOY_TOKEN=sk-unused bash "$SD" a-slug "$site" 2>&1)
+  kill "$responder" 2>/dev/null; wait "$responder" 2>/dev/null
+  t "reachable 403: does not claim revocation"  "$(printf '%s' "$out" | grep -c 'does not authenticate')"  "0"
+  t "reachable 403: gets past the preflight"    "$(printf '%s' "$out" | grep -c 'did not read as a live key')"  "1"
+fi
+
 [ $fail -eq 0 ] && echo "PASS" || echo "FAIL"
 exit $fail
