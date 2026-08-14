@@ -1888,24 +1888,46 @@ jobs:
           REF="${{ github.ref_name }}"
           # A caller with no `site:` ships no static export, and reading
           # .site.slug off null would abort the step instead of skipping it.
-          if [ "$(yq -r '.site | type' hanzo.yml 2>/dev/null || echo '!!null')" != '!!map' ]; then
-            echo "::notice::no site: in hanzo.yml — nothing to publish"; exit 0
+          #
+          # `site:` is one, `sites:` is several. A white-labelled product builds
+          # once and ships an export per brand, and a site keys on its HOST, so a
+          # brand per host is a site per host. Both spellings land on the same
+          # slug=dir lines, so everything after this is one path.
+          SITE_T=$(yq -r '.site | type' hanzo.yml 2>/dev/null || echo '!!null')
+          SITES_T=$(yq -r '.sites | type' hanzo.yml 2>/dev/null || echo '!!null')
+          if [ "$SITE_T" != '!!map' ] && [ "$SITES_T" != '!!seq' ]; then
+            echo "::notice::no site:/sites: in hanzo.yml — nothing to publish"; exit 0
+          fi
+          if [ "$SITE_T" = '!!map' ] && [ "$SITES_T" = '!!seq' ]; then
+            echo "::error::hanzo.yml declares BOTH site: and sites:. One list, one spelling."; exit 1
           fi
           # Same branch gate as deploy.on, including the tag case: a tagged release
-          # publishes, a branch publishes only if it is named.
-          ON=$(yq -o=json -I=0 '.site.on // []' hanzo.yml)
+          # publishes, a branch publishes only if it is named. The gate is the
+          # LIST's, so every brand of one product goes live together — a rollout
+          # that reached one brand and not another is the drift this lane removes.
+          if [ "$SITES_T" = '!!seq' ]; then
+            ON=$(yq -o=json -I=0 '.sites[0].on // []' hanzo.yml)
+          else
+            ON=$(yq -o=json -I=0 '.site.on // []' hanzo.yml)
+          fi
           IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo 1 || echo 0)
           if [ "$IS_TAG" != 1 ] && ! echo "$ON" | jq -e --arg b "$REF" 'index($b)' >/dev/null; then
             echo "branch $REF not in site.on — skipping publish"; exit 0
           fi
-          SLUG=$(yq -r '.site.slug // ""' hanzo.yml)
-          DIR=$(yq -r '.site.dir // ""' hanzo.yml)
-          BUILD=$(yq -r '.site.build // ""' hanzo.yml)
-          if [ -z "$SLUG" ] || [ -z "$DIR" ]; then
-            echo "::error::site: needs both slug: (the /v1/sites project) and dir: (the built export)"; exit 1
+          if [ "$SITES_T" = '!!seq' ]; then
+            PAIRS=$(yq -r '.sites[] | "\(.slug)=\(.dir)"' hanzo.yml)
+            BUILD=$(yq -r '.["site-build"] // ""' hanzo.yml)
+          else
+            SLUG=$(yq -r '.site.slug // ""' hanzo.yml)
+            DIR=$(yq -r '.site.dir // ""' hanzo.yml)
+            BUILD=$(yq -r '.site.build // ""' hanzo.yml)
+            PAIRS="$SLUG=$DIR"
+          fi
+          if printf '%s\n' "$PAIRS" | grep -qE '^=|=$'; then
+            echo "::error::every site needs both slug: (the /v1/sites project) and dir: (the built export)"; exit 1
           fi
           if [ -n "$BUILD" ]; then
-            echo "::group::build $SLUG ($BUILD)"
+            echo "::group::build ($BUILD)"
             sh -c "$BUILD"
             echo "::endgroup::"
           fi
@@ -1919,6 +1941,15 @@ jobs:
           # Slug grammar, index.html, the server's file/byte caps and the edge
           # BodyLimit are all checked inside sitepublish, before anything is sent,
           # so each refusal names its own number instead of arriving as a 4xx.
-          HANZO_API="$API" "$CI_HOME/bin/sitepublish" "$SLUG" "$DIR"
+          # One publish per site, from the one implementation. A file, not a
+          # pipe: sitepublish runs curl, and curl inherits stdin — it would eat
+          # the rest of the list and report success for sites it never sent.
+          printf '%s\n' "$PAIRS" > "$RUNNER_TEMP/site-pairs"
+          while IFS= read -r pair; do
+            [ -n "${pair//[[:space:]]/}" ] || continue
+            echo "::group::publish ${pair%%=*}"
+            HANZO_API="$API" "$CI_HOME/bin/sitepublish" "${pair%%=*}" "${pair#*=}"
+            echo "::endgroup::"
+          done < "$RUNNER_TEMP/site-pairs"
 
 
