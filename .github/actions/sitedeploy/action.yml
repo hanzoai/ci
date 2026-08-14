@@ -8,14 +8,23 @@ description: Publish a built static export to the Hanzo PaaS Sites plane.
 #
 #   - uses: hanzoai/ci/.github/actions/sitedeploy@v1
 #     with:  { slug: hanzo-ai, dir: out }
-#     env:   { HANZO_DEPLOY_TOKEN: '${{ secrets.HANZO_DEPLOY_TOKEN }}' }
+#     env:
+#       KMS_CLIENT_ID:     '${{ secrets.KMS_CLIENT_ID }}'
+#       KMS_CLIENT_SECRET: '${{ secrets.KMS_CLIENT_SECRET }}'
 #
 # A SITE IS NOT AN APP. This publishes files and stops: no image, no CR, no
 # replicas, no registry. Building a container so a Go binary can serve /public is
 # the shape the Sites plane exists to retire.
 #
-# ONE credential. The 202 hands back a prefix-scoped, 30-minute presigned POST
-# grant, so CI never holds a bucket key — do NOT add SITES_S3_* here; that is the
+# ONE credential, read from ONE place. The deploy key comes from KMS, which is
+# where a secret lives: it rotates by resealing, and every site that publishes
+# reads the same value the moment it changes. It was `secrets.HANZO_DEPLOY_TOKEN`
+# on the forge — one copy per org that nobody can read back, so nobody could tell
+# it had stopped resolving, and cloud answered 403 on every call for the repos
+# still carrying it while the one repo that had moved to KMS published fine.
+#
+# The 202 hands back a prefix-scoped, 30-minute presigned POST grant on top of
+# that, so CI never holds a bucket key — do NOT add SITES_S3_* here; that is the
 # standing shared-bucket credential the grant replaced.
 inputs:
   slug:
@@ -28,6 +37,10 @@ inputs:
     description: Cloud API base
     required: false
     default: https://api.hanzo.ai
+  kms:
+    description: KMS base, which holds the deploy key
+    required: false
+    default: https://kms.hanzo.ai
   jobs:
     description: Parallel uploads
     required: false
@@ -53,10 +66,36 @@ runs:
         [ -x "$RUNNER_TEMP/sitedeploy-ci/bin/sitedeploy" ] \
           || { echo "::error::could not fetch hanzoai/ci@$ref (bin/sitedeploy)"; exit 1; }
 
+    - name: Read the deploy key
+      id: key
+      shell: bash
+      env:
+        KMS: ${{ inputs.kms }}
+      # No -f: curl's --fail exits 22 and prints nothing an operator can act on,
+      # which is the same silence an absent secret gives. Read the body and test
+      # the field, so a refusal says WHICH of the two it was.
+      #
+      # The read is FLAT. KMS resolves a name at the credential's own scope root,
+      # so `HANZO_DEPLOY_TOKEN` finds the value sealed for this org — while a
+      # path-qualified name like `deploy/HANZO_DEPLOY_TOKEN` finds nothing and
+      # reads exactly like an absent secret.
+      run: |
+        set -euo pipefail
+        val() { jq -r --arg f "$1" '.[$f] // ""'; }
+        kt=$(curl -sS "$KMS/v1/kms/auth/login" -H 'Content-Type: application/json' \
+               -d "{\"clientId\":\"${KMS_CLIENT_ID:-}\",\"clientSecret\":\"${KMS_CLIENT_SECRET:-}\"}" | val accessToken)
+        [ -n "$kt" ] || { echo "::error::KMS login refused at $KMS/v1/kms/auth/login — set KMS_CLIENT_ID and KMS_CLIENT_SECRET on this step (org-level secrets on git.hanzo.ai)"; exit 1; }
+        key=$(curl -sS "$KMS/v1/kms/secrets/HANZO_DEPLOY_TOKEN?env=prod" -H "Authorization: Bearer $kt" | val value)
+        [ -n "$key" ] || { echo "::error::no HANZO_DEPLOY_TOKEN at $KMS/v1/kms/secrets/HANZO_DEPLOY_TOKEN?env=prod — seal a live sk- key there"; exit 1; }
+        # Masked before it is ever an output, so it cannot surface in a log.
+        echo "::add-mask::$key"
+        echo "token=$key" >> "$GITHUB_OUTPUT"
+
     - name: Deploy
       shell: bash
       env:
         HANZO_API: ${{ inputs.api }}
+        HANZO_DEPLOY_TOKEN: ${{ steps.key.outputs.token }}
         SITEDEPLOY_JOBS: ${{ inputs.jobs }}
         SITEDEPLOY_COMMIT: ${{ github.sha }}
         SITEDEPLOY_BRANCH: ${{ github.ref_name }}
