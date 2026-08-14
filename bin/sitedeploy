@@ -49,14 +49,19 @@ slug="${1:?usage: sitedeploy <slug> <dir>}"
 dir="${2:?usage: sitedeploy <slug> <dir>}"
 api="${HANZO_API:-https://api.hanzo.ai}"
 jobs="${SITEDEPLOY_JOBS:-24}"
+# A private scratch dir, not fixed /tmp names: two sites deploying at once on a
+# runner that is not a container would otherwise share sd-enq.json, and the
+# second grant would send the first site's files into the other's prefix.
+work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 
 [ -d "$dir" ] || { echo "::error::$dir is not a directory — the build produced no export"; exit 1; }
 
 # ---- content type -----------------------------------------------------------
-# The presigned POST carries no Content-Type condition, so whatever CI sends is
-# what the object stores — and what it stores is what the edge serves. Send
-# nothing and every page is application/octet-stream, which a browser DOWNLOADS
-# instead of rendering: a green deploy that serves an unusable site.
+# What the object STORES, which is what a reader of the S3 origin gets. The
+# serving path names the type from the key and falls back to the stored one only
+# for an extension it does not know, so this is the fallback rather than the
+# authority — and an object stored as application/octet-stream is one a browser
+# DOWNLOADS instead of rendering.
 ctype() {
   case "${1##*.}" in
     html|htm) echo 'text/html; charset=utf-8' ;;
@@ -84,36 +89,17 @@ ctype() {
   esac
 }
 
-# ---- cache control ----------------------------------------------------------
-# Mirrors cloud's apps/sites.CacheControlFor so a site cached the same whichever
-# route its bytes took. bin/sitedeploy_test.sh pins these strings; if the server
-# changes its policy the test is what catches the drift.
+# ---- cache control is the server's -------------------------------------------
+# Nothing here computes one. The serving path composes CacheControlFor(key,
+# site.CacheControl) on every request and deliberately does NOT read the stored
+# object's header (cloud apps/sites/sites.go), so a Cache-Control stamped here
+# reaches no reader.
 #
-# A fingerprinted asset (Vite/Next/webpack emit app.4f3a9c21.js) is immutable: a
-# new build changes the hash, so the old URL can be cached forever.
-#
-# The class is written `[._-]` with the dash LAST and the pattern held in a
-# variable. Go's regexp spells the same set `[.\-_]`, and transcribing that
-# literally into `[[ =~ ]]` is a silent defect twice over: a backslash is literal
-# inside a POSIX bracket expression, so `\-_` reads as the RANGE \…_ and the shell
-# rejects it as "invalid character range" — and because the `if` merely evaluates
-# false, every fingerprinted asset quietly fell back to max-age=3600 instead of
-# immutable. An unquoted inline pattern also has its own quoting hazards; the
-# variable form is the one that is read as a regex rather than a glob.
-fingerprint_re='[._-][0-9a-fA-F]{8,}\.[a-z0-9]+$'
-cachectl() {
-  local k="$1" base="${1##*/}"
-  case "${k##*.}" in
-    html|htm) echo 'public, max-age=60, s-maxage=86400' ;;
-    js|mjs|css|woff|woff2|png|jpg|jpeg|gif|svg|webp|avif|ico|ttf|otf|wasm|data|pck|unityweb|mem)
-      if [[ "$base" =~ $fingerprint_re ]]; then
-        echo 'public, max-age=31536000, immutable'
-      else
-        echo 'public, max-age=3600'
-      fi ;;
-    *) echo 'public, max-age=3600' ;;
-  esac
-}
+# It was a copy of the server's policy, and it had drifted exactly as a second
+# copy does: this script matched hashed BASENAMES only, while the server also
+# treats the build-output PREFIXES (`_next/static/`, `assets/`) as immutable —
+# so every unhashed-but-immutable asset in every Next export carried max-age=3600
+# where the rule says a year. One rule, one place, and the place is what serves.
 
 # ---- the manifest -----------------------------------------------------------
 # Paths RELATIVE to the export root, which is exactly what the completion's
@@ -127,7 +113,7 @@ count=$(printf '%s' "$manifest" | grep -c . || true)
 
 if [ -n "${SITEDEPLOY_PLAN:-}" ]; then
   printf 'slug=%s dir=%s files=%s\n' "$slug" "$dir" "$count"
-  while IFS= read -r k; do [ -n "$k" ] && printf '%s\t%s\t%s\n' "$k" "$(ctype "$k")" "$(cachectl "$k")"; done <<< "$manifest"
+  while IFS= read -r k; do [ -n "$k" ] && printf '%s\t%s\n' "$k" "$(ctype "$k")"; done <<< "$manifest"
   exit 0
 fi
 
@@ -206,14 +192,14 @@ esac
 # longer requires a link; SITEDEPLOY_REPO overrides the origin for a forge
 # checkout whose remote is not the canonical repo.
 repo="${SITEDEPLOY_REPO:-$(git remote get-url origin 2>/dev/null || true)}"
-pcode=$(curl -sS -o /tmp/sd-proj.json -w '%{http_code}' \
+pcode=$(curl -sS -o "$work"/sd-proj.json -w '%{http_code}' \
   -X POST "$api/v1/projects" \
   -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN" -H 'Content-Type: application/json' \
   -d "$(jq -nc --arg s "$slug" --arg u "$repo" --arg b "${SITEDEPLOY_BRANCH:-main}" \
         '{slug:$s, name:$s} + (if $u=="" then {} else {repo:{url:$u, branch:$b}} end)')")
 case "$pcode" in
   200|201|409) : ;;  # created now, or already there — either is the state we need
-  *) echo "::error::ensure project $slug returned HTTP $pcode"; head -c 400 /tmp/sd-proj.json; echo; exit 1 ;;
+  *) echo "::error::ensure project $slug returned HTTP $pcode"; head -c 400 "$work"/sd-proj.json; echo; exit 1 ;;
 esac
 
 # ---- 1. enqueue -------------------------------------------------------------
@@ -234,22 +220,22 @@ esac
 # split removed, and `branch` was always discarded server-side — a deployment has
 # no branch column, and the lifecycle event derives it from the project's own
 # linked branch. jq builds it so a commit message can never break the JSON.
-code=$(curl -sS -o /tmp/sd-enq.json -w '%{http_code}' \
+code=$(curl -sS -o "$work"/sd-enq.json -w '%{http_code}' \
   -X POST "$api/v1/projects/$slug/deployments" \
   -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN" -H 'Content-Type: application/json' \
   -d "$(jq -nc --arg c "${SITEDEPLOY_COMMIT:-}" '{commit:$c}')")
 if [ "$code" != "202" ]; then
-  echo "::error::enqueue $api/v1/projects/$slug/deployments returned HTTP $code"; head -c 600 /tmp/sd-enq.json; echo; exit 1
+  echo "::error::enqueue $api/v1/projects/$slug/deployments returned HTTP $code"; head -c 600 "$work"/sd-enq.json; echo; exit 1
 fi
-dep=$(jq -r '.id' /tmp/sd-enq.json)
-prefix=$(jq -r '.prefix' /tmp/sd-enq.json)
-upload_url=$(jq -r '.upload.url // empty' /tmp/sd-enq.json)
+dep=$(jq -r '.id' "$work"/sd-enq.json)
+prefix=$(jq -r '.prefix' "$work"/sd-enq.json)
+upload_url=$(jq -r '.upload.url // empty' "$work"/sd-enq.json)
 if [ -z "$upload_url" ]; then
   echo "::error::the 202 carried no upload grant, so there is no way to write the bytes."
   echo "         cloud mints one only when presigning is configured (S3_ADMIN_* on the cloud deployment)."
   exit 1
 fi
-jq -c '{id,version,status,bucket,prefix}' /tmp/sd-enq.json
+jq -c '{id,version,status,bucket,prefix}' "$work"/sd-enq.json
 
 # A build that dies after this point would leave the deployment "queued" and the
 # project stuck "building" forever. Report the failure so cloud records an honest
@@ -272,7 +258,7 @@ trap 'fail' ERR
 # answers 400 for every object. That is the whole of the first end-to-end run:
 # 8403 files, 8403 400s. Everything else in the map (bucket, policy, x-amz-*) is
 # covered by the signature and must travel untouched.
-jq -r '.upload.fields | to_entries[] | select(.key != "key") | "-F\n\(.key)=\(.value)"' /tmp/sd-enq.json > /tmp/sd-fields
+jq -r '.upload.fields | to_entries[] | select(.key != "key") | "-F\n\(.key)=\(.value)"' "$work"/sd-enq.json > "$work"/sd-fields
 put() {
   local rel="$1" args=() line
   # A read loop, NOT `mapfile`: mapfile is bash 4+, and macOS ships bash 3.2, so
@@ -280,18 +266,18 @@ put() {
   # upload goes out with no policy or signature at all. S3 then rejects it for a
   # malformed X-Amz-Credential — an error that points at the credential rather
   # than at the array that never got built.
-  while IFS= read -r line; do args+=("$line"); done < /tmp/sd-fields
+  while IFS= read -r line; do args+=("$line"); done < "$work"/sd-fields
   curl -sS --fail-with-body -o /dev/null \
     -X POST "$UP_URL" \
     -F "key=$PREFIX/$rel" "${args[@]}" \
-    -F "Content-Type=$(ctype "$rel")" -F "Cache-Control=$(cachectl "$rel")" \
+    -F "Content-Type=$(ctype "$rel")" \
     -F "file=@$DIR/$rel" \
     || { echo "::error::upload failed: $rel"; return 1; }
 }
-export -f put ctype cachectl
-export UP_URL="$upload_url" PREFIX="$prefix" DIR="$dir" fingerprint_re
+export -f put ctype
+export UP_URL="$upload_url" PREFIX="$prefix" DIR="$dir" work
 
-echo "uploading $count files to s3://$(jq -r .bucket /tmp/sd-enq.json)/$prefix ($jobs parallel)"
+echo "uploading $count files to s3://$(jq -r .bucket "$work"/sd-enq.json)/$prefix ($jobs parallel)"
 printf '%s\n' "$manifest" | grep . | xargs -P "$jobs" -I{} bash -c 'put "$@"' _ {}
 
 # ---- 3. flip it live --------------------------------------------------------
@@ -302,14 +288,14 @@ printf '%s\n' "$manifest" | grep . | xargs -P "$jobs" -I{} bash -c 'put "$@"' _ 
 bytes=$(cd "$dir" && find . -type f ! -name CNAME -exec wc -c {} + | awk '$2!="total"{s+=$1} END{print s+0}')
 jq -n --arg c "${SITEDEPLOY_COMMIT:-}" --argjson f "$count" --argjson b "${bytes:-0}" \
       --args '{status:"live",commit:$c,files:$f,bytes:$b,keys:$ARGS.positional}' \
-      $(printf '%s\n' "$manifest" | grep .) > /tmp/sd-done.json
+      $(printf '%s\n' "$manifest" | grep .) > "$work"/sd-done.json
 
-code=$(curl -sS -o /tmp/sd-resp.json -w '%{http_code}' \
+code=$(curl -sS -o "$work"/sd-resp.json -w '%{http_code}' \
   -X POST "$api/v1/projects/$slug/deployments/$dep/complete" \
   -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN" -H 'Content-Type: application/json' \
-  --data-binary @/tmp/sd-done.json)
+  --data-binary @"$work"/sd-done.json)
 trap - ERR
 if [ "$code" != "200" ]; then
-  echo "::error::complete returned HTTP $code"; head -c 600 /tmp/sd-resp.json; echo; fail; exit 1
+  echo "::error::complete returned HTTP $code"; head -c 600 "$work"/sd-resp.json; echo; fail; exit 1
 fi
-jq -c '{status,liveUrl,version,files,bytes}' /tmp/sd-resp.json
+jq -c '{status,liveUrl,version,files,bytes}' "$work"/sd-resp.json
