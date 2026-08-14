@@ -141,7 +141,12 @@ case "$url" in
   */complete)      printf '%s' "$body" > "$T_DIR/complete.body"; printf '%s' "$T_DONE" > "$out"; printf '200' ;;
   */deployments)   printf '%s' "$body" > "$T_DIR/enqueue.body";  printf '%s' "$T_ENQ"  > "$out"; printf '202' ;;
   */v1/keys)       printf '200' ;;
-  */v1/projects)   printf '{}' > "$out"; printf '200' ;;
+  # Counted, and 503 for the first T_5XX calls, so a retry can be OBSERVED
+  # rather than inferred. T_5XX is unset for every case above, which leaves this
+  # a plain 200.
+  */v1/projects)   n=$(cat "$T_DIR/n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$T_DIR/n"
+                   printf '{}' > "$out"
+                   if [ "$n" -le "${T_5XX:-0}" ]; then printf '503'; else printf '200'; fi ;;
   https://s3.test/*) printf '%s\n' "$(IFS='|'; printf '%s' "${fields[*]}")" >> "$T_DIR/uploads" ;;
   *) echo "shim: unexpected url $url" >&2; exit 9 ;;
 esac
@@ -210,6 +215,31 @@ out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
 # written on and reds on the other.
 t "a failed upload fails the deploy"     "$([ "$rc" != 0 ] && echo failed)"  "failed"
 t "a failed upload is reported as error" "$(jq -r .status "$tmp/complete.body" 2>/dev/null)"  "error"
+
+# --- 5xx is asked again, 4xx is not ------------------------------------------
+# The Sites plane answers 5xx intermittently and a publish that died on one threw
+# away a green build: hanzo.ai alternated failed/published/failed across one hour
+# on `ensure project ... 503`, with sign and insights flapping beside it. What
+# has to hold is the DISTINCTION — a 503 is "not now" and is worth repeating, a
+# 403 is "no" and repeating it just spends four sleeps to print the same refusal.
+#
+# This shim counts calls to /v1/projects and answers 503 for the first two, so a
+# pass proves the retry ran rather than that the first call happened to work.
+rm -f "$tmp/calls" "$tmp/n"
+out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
+      SITEDEPLOY_JOBS=1 SITEDEPLOY_COMMIT=abc123 SITEDEPLOY_REPO= \
+      T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_5XX=2 bash "$SD" a-slug "$site" 2>&1); rc=$?
+t "two 503s do not lose the build"      "$rc"  "0"
+t "the 503s were retried, not ignored"  "$(cat "$tmp/n")"  "3"
+
+# The other half. Without it "retry on 5xx" and "retry on anything" both pass,
+# and the second spends four sleeps before printing a refusal it had at once.
+rm -f "$tmp/calls" "$tmp/n"
+out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
+      SITEDEPLOY_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_5XX=9 \
+      bash "$SD" a-slug "$site" 2>&1); rc=$?
+t "a plane that never recovers fails"   "$([ "$rc" != 0 ] && echo failed)"  "failed"
+t "it gives up rather than hammering"   "$(cat "$tmp/n")"  "5"
 
 [ $fail -eq 0 ] && echo "PASS" || echo "FAIL"
 exit $fail

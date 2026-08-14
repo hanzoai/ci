@@ -182,6 +182,34 @@ case "$kcode" in
     echo ".hanzo/workflows, not GitHub." ;;
 esac
 
+# ---- POST, with 5xx asked again ---------------------------------------------
+# 5xx is the plane saying "not now"; 4xx is it saying "no". Only the first is
+# worth repeating, and repeating it is worth a lot here: every gate has already
+# passed by this point, so a publish lost to one transient 503 throws away a
+# whole green build. hanzo.ai spent an hour alternating — 16:21 failed, 16:24
+# and 16:28 published, 16:41 failed twice, 16:54 through 17:04 published, 17:21
+# failed — on `ensure project ... 503`, with sign and insights flapping beside
+# it. Nothing was wrong with any of those builds.
+#
+# A curl that cannot speak at all reports 000, which retries for the same reason
+# and then falls through to the caller's own error path.
+#
+# Both callers below are idempotent, which is what makes a retry safe rather
+# than merely convenient: creating a project answers 409 the second time, and an
+# enqueue that never returned its 202 created no deployment to duplicate.
+post() {
+  local out=$1 url=$2 body=$3 code attempt
+  for attempt in 1 2 3 4 5; do
+    code=$(curl -sS -o "$out" -w '%{http_code}' -X POST "$url" \
+      -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN" -H 'Content-Type: application/json' \
+      -d "$body" || printf '000')
+    case "$code" in 5??|000) ;; *) break ;; esac
+    [ "$attempt" -lt 5 ] || break
+    sleep $((attempt * 4))
+  done
+  printf '%s' "$code"
+}
+
 # ---- 0b. ensure the project exists (self-provision) --------------------------
 # A brand-new slug has no project, and the enqueue below 404s on a missing one —
 # which is why every never-before-deployed site failed its first run. Create it
@@ -192,10 +220,8 @@ esac
 # longer requires a link; SITEDEPLOY_REPO overrides the origin for a forge
 # checkout whose remote is not the canonical repo.
 repo="${SITEDEPLOY_REPO:-$(git remote get-url origin 2>/dev/null || true)}"
-pcode=$(curl -sS -o "$work"/sd-proj.json -w '%{http_code}' \
-  -X POST "$api/v1/projects" \
-  -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN" -H 'Content-Type: application/json' \
-  -d "$(jq -nc --arg s "$slug" --arg u "$repo" --arg b "${SITEDEPLOY_BRANCH:-main}" \
+pcode=$(post "$work"/sd-proj.json "$api/v1/projects" \
+  "$(jq -nc --arg s "$slug" --arg u "$repo" --arg b "${SITEDEPLOY_BRANCH:-main}" \
         '{slug:$s, name:$s} + (if $u=="" then {} else {repo:{url:$u, branch:$b}} end)')")
 case "$pcode" in
   200|201|409) : ;;  # created now, or already there — either is the state we need
@@ -220,10 +246,8 @@ esac
 # split removed, and `branch` was always discarded server-side — a deployment has
 # no branch column, and the lifecycle event derives it from the project's own
 # linked branch. jq builds it so a commit message can never break the JSON.
-code=$(curl -sS -o "$work"/sd-enq.json -w '%{http_code}' \
-  -X POST "$api/v1/projects/$slug/deployments" \
-  -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN" -H 'Content-Type: application/json' \
-  -d "$(jq -nc --arg c "${SITEDEPLOY_COMMIT:-}" '{commit:$c}')")
+code=$(post "$work"/sd-enq.json "$api/v1/projects/$slug/deployments" \
+  "$(jq -nc --arg c "${SITEDEPLOY_COMMIT:-}" '{commit:$c}')")
 if [ "$code" != "202" ]; then
   echo "::error::enqueue $api/v1/projects/$slug/deployments returned HTTP $code"; head -c 600 "$work"/sd-enq.json; echo; exit 1
 fi
