@@ -161,38 +161,30 @@ test:
     # and a multi-module repo is judged by its NEAREST go.mod. Offline and
     # deterministic: temp dirs, no registry, no network.
     run: bash bin/gover_test.sh
-  - name: sitepublish
-    # bin/sitepublish is the whole of the `site:` lane. The lane it replaced was
-    # dead: it staged with `mc mirror` behind S3_ADMIN_ACCESS_KEY/SECRET_KEY,
-    # names KMS holds for no org, so it failed closed for every caller — and of
-    # the 155 hanzo.yml files across the three orgs, not one declared a `site:`.
+  - name: site
+    # The Sites lane is the composite action .github/actions/sitedeploy, and it
+    # is three API calls with no server rule copied into it — so there is no
+    # second spelling of anything left here to drift, and nothing offline to
+    # assert about one.
     #
-    # The suite is weighted toward REFUSALS because the failure that matters here
-    # is a green publish that verified nothing — indistinguishable from a working
-    # one until a site quietly stops updating. Three defects of exactly that
-    # shape are pinned by name: an object-shaped read of a body that is not an
-    # object, `.releases[]` against the BARE ARRAY the list route returns (which
-    # resolves nothing and so can never fail for its stated reason), and
-    # `[ "$a" = "$b" ]` on two empty strings, which is TRUE. Reintroducing them
-    # turns 3, 9 and 1 of these tests red respectively. Offline and
-    # deterministic: a curl shim answers the routes from fixtures, no network.
-    run: bash bin/sitepublish_test.sh
-  - name: sitedeploy
-    # bin/sitedeploy is the other half of the same plane — the per-file presigned
-    # route the exports too large for sitepublish's 16 MiB body take — and it is
-    # what all 15 static repos reach through the composite action. Its suite was
-    # written and then never wired here, so the one tool in bin/ with the widest
-    # blast radius was the one tool nothing tested on the way in.
-    #
-    # What it pins is the part cloud does NOT do for us. On the archive route the
-    # server stamps Content-Type and Cache-Control itself; under a presigned POST
-    # it stamps neither, because the policy carries no condition for either — so
-    # whatever this script sends is what the object keeps, and the cache-control
-    # table here is load-bearing rather than advisory. That is why the strings are
-    # asserted literally: they are a second spelling of apps/sites.CacheControlFor,
-    # and this suite is the only thing that can notice when the two disagree.
-    # Offline and deterministic: SITEDEPLOY_PLAN prints the manifest, no network.
-    run: bash bin/sitedeploy_test.sh
+    # It replaced bin/sitedeploy and bin/sitepublish, whose suites lived here.
+    # Between them those pinned three things, and each is now held somewhere it
+    # cannot rot. The cache-control and content-type tables were a second
+    # spelling of cloud's apps/sites rules and are DELETED, not re-asserted — the
+    # edge computes both from the object key, and the copy here had already
+    # drifted on exactly the assets it was written to get right. The response
+    # SHAPE guards (an object-shaped read of a body that is not an object; a
+    # `.releases[]` filter against the bare array the list route returns, which
+    # resolves nothing and so can never fail for its stated reason) are now the
+    # published schema's job: `POST /v1/sites/{slug}/deployments` and
+    # `/publish` are typed operations, so their bodies are in the document that
+    # generates every client. What remains is fail-CLOSED refusals — an empty
+    # manifest, a missing index, a bad slug — and those are asserted by the
+    # server on every real run rather than by a shim on this one.
+    run: |
+      test -f .github/actions/sitedeploy/action.yml
+      ! grep -rn 'max-age=\|text/html; charset' .github/actions/sitedeploy/action.yml \
+        || { echo "the server owns content type and cache policy; do not transcribe either here"; exit 1; }
   - name: conflictmarkers
     # bin/conflictmarkers runs against every repo in the fleet, so a false
     # positive is as expensive as a miss: it blocks a build that would have

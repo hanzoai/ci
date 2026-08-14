@@ -1934,70 +1934,73 @@ jobs:
             kc -n "$NS" rollout status "deployment/$svc" --timeout="$RTO"
           done
 
-      - name: Publish site (per hanzo.yml)
+      - name: Resolve site (per hanzo.yml)
+        id: site
         # The site lane. `images:` ships an OCI image a CLUSTER runs; `binaries:`
         # ships an executable a HOST installs; neither describes a static export
         # that an EDGE serves, which is why this is a third verb and not a flag on
         # one of those two.
         #
-        # The plane it publishes onto is hanzoai/cloud's Projects/sites API,
-        # whose model is VALUES PLUS A POINTER: a build output is promoted into an
-        # immutable Release whose id is a digest of its object manifest, and the
-        # site's pointer is flipped to it. `publish` is promote+activate in one
-        # call — the 99% path — and rollback is the same pointer aimed at an older
-        # release.
+        # THIS STEP DECIDES, THE NEXT STEP PUBLISHES, and the split is the point.
+        # Publishing lives in ONE place — the composite action next door — which
+        # is also what the 15 static repos call directly. A lane that re-inlined
+        # the calls would be a second implementation of one contract, which is the
+        # exact defect this lane was just cleaned of: it used to shell out to
+        # bin/sitepublish while the action shelled out to bin/sitedeploy, two
+        # scripts hand-rolling one API, each with its own credential and its own
+        # transcription of the server's cache rules. Both are deleted.
         #
-        # WHY THIS LANE CHANGED. It used to stage the export with `mc mirror`
-        # against hanzoai/s3, gated on S3_ADMIN_ACCESS_KEY + S3_ADMIN_SECRET_KEY
-        # read from KMS. Those names are in KMS for NO org, and the step fails
-        # closed without them — so `site:` refused every caller that declared one
-        # and was dead code no repo could use. Measured before this change: of
-        # the 155 hanzo.yml files across the three orgs, NOT ONE carried a
-        # `site:` block, and hanzoai/console had grown its own build→zip→publish
-        # workflow to ship at all. Per-repo build logic is the one thing this contract exists to
-        # prevent, so the fix is not to provision that credential — it is to stop
-        # needing it.
-        #
-        # The bytes now travel the route console proved: the zip goes to
-        # /v1/projects/<slug>/deploy and the landed prefix is promoted by
-        # /v1/sites/<slug>/publish, both on the IAM bearer the KMS step above
-        # ALREADY minted. CI holds no bucket key, names no bucket and names no
-        # org — the org segment is prepended server-side from the validated
-        # principal, which is what makes the prefix unforgeable. Nothing is left
-        # for an org to be missing.
-        #
-        # THE WORK IS IN bin/sitepublish, NOT HERE. Forty lines of zip → upload →
-        # promote → verify inlined in a workflow is forty lines nobody can run
-        # offline, and this file already learned that with imgver and gover.
-        # bin/sitepublish_test.sh drives it through a curl shim with no network,
-        # and is weighted toward the REFUSALS — a publish step that reports
-        # success when it verified nothing is worse than one that never verified,
-        # because it is indistinguishable from a working one until a site quietly
-        # stops updating.
+        # There is no size threshold left to choose between them. The bytes go
+        # straight to storage against a short-lived prefix-scoped grant, so the
+        # 16 MiB edge body limit that used to decide which script a repo needed
+        # is not on the path at all.
         if: inputs.mode != 'delegate' && github.event_name != 'pull_request'
-        env:
-          API: ${{ vars.API_ENDPOINT || 'https://api.hanzo.ai' }}
         run: |
           set -euo pipefail
           REF="${{ github.ref_name }}"
           # Same guard shape the deploy step uses for a missing `deploy:`: a caller
           # with no `site:` ships no static export, and reading .site.slug off null
           # would abort the step instead of skipping it.
-          if [ "$(yq -r '.site | type' hanzo.yml 2>/dev/null || echo '!!null')" != '!!map' ]; then
-            echo "::notice::no site: in hanzo.yml — nothing to publish"; exit 0
+          # `site:` is one, `sites:` is several. A white-labelled product builds
+          # once and ships an export per brand, and a site keys on its HOST, so a
+          # brand per host is a site per host. Both spellings land on the same
+          # `slug=dir` lines below, so everything after this point is one path.
+          SITE_TYPE=$(yq -r '.site | type' hanzo.yml 2>/dev/null || echo '!!null')
+          SITES_TYPE=$(yq -r '.sites | type' hanzo.yml 2>/dev/null || echo '!!null')
+          if [ "$SITE_TYPE" != '!!map' ] && [ "$SITES_TYPE" != '!!seq' ]; then
+            echo "::notice::no site:/sites: in hanzo.yml — nothing to publish"; exit 0
+          fi
+          if [ "$SITE_TYPE" = '!!map' ] && [ "$SITES_TYPE" = '!!seq' ]; then
+            echo "::error::hanzo.yml declares BOTH site: and sites:. One list, one spelling."; exit 1
+          fi
+          if [ "$SITES_TYPE" = '!!seq' ]; then
+            # The branch gate is the list's, so every brand of one product goes
+            # live together — a partial rollout across brands is the drift this
+            # whole lane exists to avoid.
+            ON=$(yq -o=json -I=0 '.sites[0].on // []' hanzo.yml)
+            PAIRS=$(yq -r '.sites[] | "\(.slug)=\(.dir)"' hanzo.yml)
+            if printf '%s\n' "$PAIRS" | grep -qE '^=|=$'; then
+              echo "::error::every sites: entry needs both slug: and dir:"; exit 1
+            fi
+            BUILD=$(yq -r '.["site-build"] // ""' hanzo.yml)
           fi
           # Same branch gate as deploy.on, including the tag case: a tagged release
           # publishes, a branch publishes only if it is named.
-          ON=$(yq -o=json -I=0 '.site.on // []' hanzo.yml)
+          if [ "$SITE_TYPE" = '!!map' ]; then
+            ON=$(yq -o=json -I=0 '.site.on // []' hanzo.yml)
+          fi
           IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo 1 || echo 0)
           if [ "$IS_TAG" != 1 ] && ! echo "$ON" | jq -e --arg b "$REF" 'index($b)' >/dev/null; then
             echo "branch $REF not in site.on — skipping publish"; exit 0
           fi
-          SLUG=$(yq -r '.site.slug // ""' hanzo.yml)
-          DIR=$(yq -r '.site.dir // ""' hanzo.yml)
-          BUILD=$(yq -r '.site.build // ""' hanzo.yml)
-          if [ -z "$SLUG" ] || [ -z "$DIR" ]; then
-            echo "::error::site: needs both slug: (the /v1/sites project) and dir: (the built export)"; exit 1
+          if [ "$SITE_TYPE" = '!!map' ]; then
+            SLUG=$(yq -r '.site.slug // ""' hanzo.yml)
+            DIR=$(yq -r '.site.dir // ""' hanzo.yml)
+            BUILD=$(yq -r '.site.build // ""' hanzo.yml)
+            if [ -z "$SLUG" ] || [ -z "$DIR" ]; then
+              echo "::error::site: needs both slug: (the /v1/sites site) and dir: (the built export)"; exit 1
+            fi
+            PAIRS="$SLUG=$DIR"
           fi
           if [ -n "$BUILD" ]; then
             echo "::group::build $SLUG ($BUILD)"
@@ -2009,11 +2012,29 @@ jobs:
           # site credential was never provisioned, which is what the old message
           # said and what sent people looking for a secret that does not exist.
           if [ -z "${HANZO_API_TOKEN:-}" ]; then
-            echo "::error::hanzo.yml declares site: but the KMS step minted no IAM token for $API — refusing to publish. That is a KMS_CLIENT_ID/KMS_CLIENT_SECRET problem on this repo, not a missing site credential."; exit 1
+            echo "::error::hanzo.yml declares site: but the KMS step minted no IAM token — refusing to publish. That is a KMS_CLIENT_ID/KMS_CLIENT_SECRET problem on this repo, not a missing site credential."; exit 1
           fi
-          # Slug grammar, index.html, the server's file/byte caps and the edge
-          # BodyLimit are all checked inside sitepublish, before anything is sent,
-          # so each refusal names its own number instead of arriving as a 4xx.
-          HANZO_API="$API" "$CI_HOME/bin/sitepublish" "$SLUG" "$DIR"
+          {
+            echo 'pairs<<HANZO_SITES'
+            printf '%s\n' "$PAIRS"
+            echo HANZO_SITES
+          } >> "$GITHUB_OUTPUT"
 
-
+      - name: Publish site
+        # A `site:` declaration promotes to an immutable RELEASE (publish: true),
+        # not just to the mutable prefix: the id is a digest of the object
+        # manifest, so re-publishing identical bytes is idempotent by
+        # construction and rollback is the same pointer aimed at an older
+        # release — no rebuild, no re-upload.
+        #
+        # The bearer is the IAM token the KMS step above ALREADY minted, so this
+        # lane seals no credential of its own. cloud mints the org from that
+        # token's owner claim, so CI names no org and no bucket and the storage
+        # prefix is unforgeable.
+        if: steps.site.outputs.pairs != ''
+        uses: hanzoai/ci/.github/actions/sitedeploy@v1
+        with:
+          sites: ${{ steps.site.outputs.pairs }}
+          api: ${{ vars.API_ENDPOINT || 'https://api.hanzo.ai' }}
+          token: ${{ env.HANZO_API_TOKEN }}
+          publish: 'true'
