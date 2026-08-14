@@ -191,6 +191,12 @@ test:
     # table here is load-bearing rather than advisory. That is why the strings are
     # asserted literally: they are a second spelling of apps/sites.CacheControlFor,
     # and this suite is the only thing that can notice when the two disagree.
+    #
+    # It also pins the edge body limit from BOTH sides, which is the only way a
+    # size check earns its place: over it, the completion manifest is refused
+    # before a single request goes out; at exactly it, the publish still happens.
+    # A guard that can only refuse is a guard that eventually blocks a build that
+    # would have worked, and those are the ones people learn to route around.
     # Offline and deterministic: SITEDEPLOY_PLAN prints the manifest, no network.
     run: bash bin/sitedeploy_test.sh
   - name: conflictmarkers
