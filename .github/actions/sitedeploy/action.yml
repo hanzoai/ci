@@ -29,10 +29,21 @@ description: Publish a built static export to the Hanzo PaaS Sites plane.
 inputs:
   slug:
     description: The project slug on the Sites plane (POST /v1/projects/<slug>/deployments)
-    required: true
+    required: false
+    default: ''
   dir:
     description: The built export directory
-    required: true
+    required: false
+    default: ''
+  sites:
+    description: >-
+      Several sites from one build, one `slug=dir` pair per line. A white-labelled
+      product is one codebase and several hosts, and a site keys on its HOST — so
+      a brand per host is a site per host, and one build writes an export per
+      brand. bin/sitedeploy stays single-site: a publish IS one site, and which
+      sites to publish is orchestration, which is what this file is.
+    required: false
+    default: 
   api:
     description: Cloud API base
     required: false
@@ -101,4 +112,23 @@ runs:
         SITEDEPLOY_BRANCH: ${{ github.ref_name }}
       run: |
         set -euo pipefail
-        bash "$RUNNER_TEMP/sitedeploy-ci/bin/sitedeploy" '${{ inputs.slug }}' '${{ inputs.dir }}'
+        pairs='${{ inputs.sites }}'
+        [ -n "${pairs//[[:space:]]/}" ] || pairs='${{ inputs.slug }}=${{ inputs.dir }}'
+        if [ "${pairs//[[:space:]]/}" = "=" ]; then
+          echo "::error::nothing to publish: pass slug: and dir:, or sites: with one slug=dir per line."
+          exit 1
+        fi
+        # A file, not a pipe. The loop body runs curl, curl inherits stdin, and
+        # it would swallow the rest of the list — publishing the first site and
+        # reporting success for all of them.
+        printf '%s\n' "$pairs" > "$RUNNER_TEMP/site-pairs"
+        n=0
+        while IFS= read -r pair; do
+          [ -n "${pair//[[:space:]]/}" ] || continue
+          case "$pair" in *=*) ;; *) echo "::error::sites: entry '$pair' is not slug=dir"; exit 1 ;; esac
+          echo "::group::publish ${pair%%=*}"
+          bash "$RUNNER_TEMP/sitedeploy-ci/bin/sitedeploy" "${pair%%=*}" "${pair#*=}"
+          echo "::endgroup::"
+          n=$((n + 1))
+        done < "$RUNNER_TEMP/site-pairs"
+        [ "$n" -gt 0 ] || { echo "::error::sites: named no site"; exit 1; }
