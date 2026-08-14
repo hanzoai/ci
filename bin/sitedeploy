@@ -146,10 +146,32 @@ fi
 # Verified against the live API — no auth, a bogus `sk-`, and a revoked key are
 # byte-identical on /v1/projects.
 #
-# /v1/keys refuses in a DIFFERENT voice ("sign in to manage API keys") and 200s
-# for a live key, so it separates the two failures this script cannot otherwise
-# tell apart: a bearer that does not authenticate, versus one that authenticates
-# and has no org. Name which, and say what to do about it.
+# /v1/keys refuses in a DIFFERENT voice ("sign in to manage API keys"), so it
+# still separates the two failures this script cannot otherwise tell apart: a
+# bearer that does not authenticate, versus one that authenticates and has no
+# org. Name which, and say what to do about it.
+#
+# ADVISORY, NOT FATAL — and that is the whole point of this block.
+#
+# It used to `exit 1` on any non-200, on the premise that /v1/keys "200s for a
+# live key". That premise is not something this script can rely on: /v1/keys is
+# the SESSION-scoped key-MANAGEMENT route, and a machine `sk-` key is not
+# supposed to manage keys. Measured against the live API: an anonymous request
+# and a bogus `sk-` are byte-identical there — both 403
+# `{"code":"forbidden","error":"sign in to manage API keys"}`. A probe that
+# answers the same for a valid and an invalid credential cannot decide anything,
+# and this one was deciding whether the site ships.
+#
+# It froze the Sites plane. hanzo.ai and hips both died here in ~1s, every run,
+# with the whole build and every gate already green above it — and the message
+# said the credential was revoked, which is a claim this probe is not entitled
+# to make.
+#
+# So the preflight keeps its diagnosis and loses its veto. The operations below
+# are the authority: they are the ones that actually need the credential, they
+# already report their own status precisely, and unlike this one they cannot be
+# wrong about what they measured. A credential that is genuinely dead still
+# fails the deploy — one step later, from the call that means something.
 #
 # `|| true`, not `|| echo 000`: curl ALREADY writes 000 to stdout when it cannot
 # connect, so appending another made kcode `000000`, which matched no case and
@@ -161,14 +183,17 @@ case "$kcode" in
   200) : ;;
   000|"") echo "::warning::could not reach $api/v1/keys to preflight the credential; continuing" ;;
   *)
-    echo "::error::HANZO_DEPLOY_TOKEN does not authenticate ($api/v1/keys -> HTTP $kcode)."
-    echo "The token is present but resolves to no principal — absent from this repo's"
-    echo "scope, expired, or revoked. This is NOT a missing X-Org-Id header: CI cannot"
-    echo "set that header, cloud derives it from this bearer. Mint a replacement with"
-    echo "POST $api/v1/keys {\"type\":\"secret\"} as a member of the owning org, then set"
-    echo "it as the ORG-level Actions secret HANZO_DEPLOY_TOKEN on git.hanzo.ai — the"
-    echo "forge is what reads .hanzo/workflows, not GitHub."
-    exit 1 ;;
+    echo "::warning::the credential did not read as a live key at $api/v1/keys (HTTP $kcode)."
+    echo "That route is session-scoped key MANAGEMENT, which a machine key is not"
+    echo "expected to hold, so this is a hint and not a verdict — continuing, and the"
+    echo "calls below will say for certain."
+    echo "If one of them refuses the credential: the token resolves to no principal —"
+    echo "absent from this repo's scope, expired, or revoked. It is NOT a missing"
+    echo "X-Org-Id header; CI cannot set that header, cloud derives it from this"
+    echo "bearer. Mint a replacement with POST $api/v1/keys {\"type\":\"secret\"} as a"
+    echo "member of the owning org, then set it as the ORG-level Actions secret"
+    echo "HANZO_DEPLOY_TOKEN on git.hanzo.ai — the forge is what reads"
+    echo ".hanzo/workflows, not GitHub." ;;
 esac
 
 # ---- 0b. ensure the project exists (self-provision) --------------------------
