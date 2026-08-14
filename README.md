@@ -192,21 +192,22 @@ bearer is the IAM JWT the workflow already mints from `KMS_CLIENT_ID` /
 no org — the org segment is prepended server-side from the validated principal,
 which is what makes the prefix unforgeable.
 
-The export is zipped and posted to `/v1/projects/<slug>/deploy`, then that prefix
-is promoted by `/v1/sites/<slug>/publish` into an **immutable release** whose id
-digests its object manifest. The site's pointer is flipped to it, and the step
-then re-reads the release list and refuses unless the release it just published
-is the one that is live. Rollback is the same pointer aimed at an older release.
+The export is uploaded FILE BY FILE, straight to storage, against a short-lived
+prefix-scoped grant the API hands back — then the prefix is promoted by
+`/v1/sites/<slug>/publish` into an **immutable release** whose id digests its
+object manifest. The site's pointer is flipped to it, and the publish response
+states which release is live. Rollback is the same pointer aimed at an older
+release, so it needs no rebuild and no re-upload.
 
-**One size boundary, and it is the server's.** cloud's public edge caps a request
-body at 16 MiB (`GATEWAY_BODY_LIMIT`) and refuses a larger POST before any
-handler runs — reporting only `Error when parsing request`, which names neither
-size nor cause. `bin/sitepublish` therefore measures the zip and refuses *with
-the number* first. Of the 24 built exports in the estate, 22 fit; the two that do
-not (`hanzo.ai` at 27.9 MiB zipped and 8,536 files, `trillerfest.com` at 76.7
-MiB) use [`bin/sitedeploy`](bin/sitedeploy), which streams per-file against a
-presigned grant and has no body limit. `hanzo.ai` is also past the server's own
-5,000-entry cap, so no transport makes that export a release.
+**There is no size boundary to choose.** There used to be: cloud's public edge
+caps a request body at 16 MiB (`GATEWAY_BODY_LIMIT`) and refuses a larger POST
+before any handler runs, reporting only `Error when parsing request`, which names
+neither size nor cause. So the estate had TWO tools — one that zipped the export
+into a single request and one that streamed per-file — and the CALLER had to know
+which side of 16 MiB it was on. Both are gone. The bytes never traverse the API
+at all now, so `hanzo.ai` (27.9 MiB zipped, 8,536 files) and a 3 KiB landing page
+take the identical path. The server's own 5,000-entry cap on a *release* still
+stands, and is the one limit a very large export can still meet.
 
 ## Runners — our fleet or your own
 

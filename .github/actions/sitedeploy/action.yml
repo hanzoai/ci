@@ -1,10 +1,7 @@
 name: sitedeploy
-description: Publish a built static export to the Hanzo PaaS Sites plane.
+description: Publish a built static export to the Hanzo Sites plane.
 # For every repo whose deploy is "a static export goes live" — hanzo.ai, hanzo.app,
-# hips, computer and the ones after them. Those were each about to carry their own
-# copy of enqueue → upload → complete, which is how one contract becomes N
-# transcriptions that drift (see the imgver action next door for the same story
-# told about image tags).
+# hips, computer and the ones after them.
 #
 #   - uses: hanzoai/ci/.github/actions/sitedeploy@v1
 #     with:  { slug: hanzo-ai, dir: out }
@@ -14,16 +11,72 @@ description: Publish a built static export to the Hanzo PaaS Sites plane.
 # replicas, no registry. Building a container so a Go binary can serve /public is
 # the shape the Sites plane exists to retire.
 #
-# ONE credential. The 202 hands back a prefix-scoped, 30-minute presigned POST
-# grant, so CI never holds a bucket key — do NOT add SITES_S3_* here; that is the
-# standing shared-bucket credential the grant replaced.
+# THIS IS THE ONLY IMPLEMENTATION, and it is three API calls. It used to be two
+# shell scripts — bin/sitedeploy (496 lines with its suite) and bin/sitepublish
+# (389 with its own) — because the API had ONE address, POST
+# /v1/projects/<slug>/deploy, that was really TWO operations chosen by
+# Content-Type: an archive body answered 200, a JSON descriptor answered 202 with
+# a write grant. Nothing typed could describe that, so the endpoint published no
+# request schema, no response schema and no CLI command, and each script
+# hand-rolled the half it wanted, with its own credential and its own copy of the
+# server's rules. They drifted, exactly where a copy always does.
+#
+# Cloud split them. `POST /v1/sites/<slug>/deployments` is a typed operation now,
+# so the shapes below come from the published document rather than from a
+# transcription, and the whole lifecycle answers under ONE noun.
+#
+#   POST /v1/sites/<slug>/deployments               -> 202 {id, bucket, prefix, upload}
+#   POST <upload.url>  per file                     -> the bytes, straight to storage
+#   POST /v1/sites/<slug>/deployments/<id>/complete -> 200, live
+#   POST /v1/sites/<slug>/publish                   -> 200, an immutable release  (publish: true)
+#
+# THE BYTES NEVER PASS THROUGH THE API, and that is why there is no size cliff
+# left to explain. A real export is large — hanzo.ai is 128 MB across 8403 files —
+# against a 16 MiB edge body limit, and an oversized POST is refused before any
+# handler runs, surfacing as an opaque 400 that names neither the size nor the
+# cause. The old pair made the CALLER choose between them on a 16 MiB threshold it
+# had to know. This lane has no threshold: every site goes the same way.
+#
+# NO STANDING BUCKET KEY. The 202 carries `upload`: a presigned POST policy that
+# is prefix-scoped (starts-with $key "<org>/<slug>/", enforced by storage itself),
+# short-lived (30 min) and size-bounded. Do not reintroduce SITES_S3_*; a standing
+# shared-bucket credential is what the grant replaced, and it could overwrite
+# every org's site.
+#
+# DELETION IS THE SERVER'S. The grant authorizes writes only, so CI cannot remove
+# a file; `keys` in the completion is the manifest cloud reconciles the prefix
+# against, and it deletes what the build no longer produces. That is where
+# `aws s3 sync --delete` went. It fails CLOSED on an empty manifest, and so does
+# this — a build that enumerated nothing has failed, and honouring it literally
+# would delete the live site.
+#
+# CONTENT TYPE AND CACHE POLICY ARE THE SERVER'S, and this sends neither. Both
+# used to be computed here, per object, from tables transcribed out of cloud's
+# apps/sites — and the cache table had already drifted: cloud treats everything
+# under `_next/static/` and `assets/` as immutable BY PREFIX, while the copy here
+# only matched hashed BASENAMES, so every unhashed-but-immutable asset in every
+# Next export was stamped max-age=3600 and re-fetched hourly forever. The edge
+# computes both from the object key on the way out, so the tables are gone rather
+# than corrected: a second copy of a rule is a second thing to keep right.
 inputs:
   slug:
-    description: The project slug on the Sites plane (POST /v1/projects/<slug>/deploy)
-    required: true
+    description: The site slug on the Sites plane
+    required: false
+    default: ''
   dir:
     description: The built export directory
-    required: true
+    required: false
+    default: ''
+  sites:
+    description: >-
+      Several sites from one build, one `slug=dir` pair per line. A repo whose
+      product is white-labelled builds once and publishes an export per brand,
+      and a site keys on its HOST — so a brand per host is a site per host.
+      Looping HERE and not in the caller is the point: this file is the only
+      implementation, and a caller that called it twice would be a second copy
+      of the decision about what a publish is.
+    required: false
+    default: 
   api:
     description: Cloud API base
     required: false
@@ -32,34 +85,219 @@ inputs:
     description: Parallel uploads
     required: false
     default: '24'
+  token:
+    description: >-
+      The bearer cloud validates. Defaults to $HANZO_DEPLOY_TOKEN, which is what
+      every consuming repo already sets. Any org-scoped bearer works — cloud
+      mints the org from its owner claim — so a job that already holds an IAM
+      token from its KMS step passes that instead of sealing a second secret.
+    required: false
+    default: ''
+  publish:
+    description: >-
+      Also promote the upload into an immutable, content-addressed release and
+      flip the site to it (POST /v1/sites/<slug>/publish). Rollback is then
+      activating an earlier release, which costs no rebuild. Without it the site
+      serves from its mutable prefix, which is the older behaviour.
+    required: false
+    default: 'false'
 runs:
   using: composite
   steps:
-    - name: Fetch sitedeploy
-      shell: bash
-      # The action ref is the script ref: an action pinned to @v1 runs v1's
-      # sitedeploy. Both forges, because this repo is served from each.
-      run: |
-        set -euo pipefail
-        ref="${GITHUB_ACTION_REF:-v1}"
-        # The break tests for the TOOL, not for the clone: a host that answers
-        # with a tree carrying no bin/sitedeploy must fall through to the next
-        # one rather than break and dead-end the job on it.
-        for url in https://git.hanzo.ai/hanzoai/ci https://github.com/hanzoai/ci; do
-          git clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/sitedeploy-ci" 2>/dev/null \
-            && [ -x "$RUNNER_TEMP/sitedeploy-ci/bin/sitedeploy" ] && break
-          rm -rf "$RUNNER_TEMP/sitedeploy-ci"
-        done
-        [ -x "$RUNNER_TEMP/sitedeploy-ci/bin/sitedeploy" ] \
-          || { echo "::error::could not fetch hanzoai/ci@$ref (bin/sitedeploy)"; exit 1; }
-
-    - name: Deploy
+    - name: Publish to the Sites plane
       shell: bash
       env:
         HANZO_API: ${{ inputs.api }}
-        SITEDEPLOY_JOBS: ${{ inputs.jobs }}
-        SITEDEPLOY_COMMIT: ${{ github.sha }}
-        SITEDEPLOY_BRANCH: ${{ github.ref_name }}
+        SITE_SLUG: ${{ inputs.slug }}
+        SITE_DIR: ${{ inputs.dir }}
+        SITE_SITES: ${{ inputs.sites }}
+        SITE_JOBS: ${{ inputs.jobs }}
+        SITE_COMMIT: ${{ github.sha }}
+        SITE_PUBLISH: ${{ inputs.publish }}
+        SITE_TOKEN: ${{ inputs.token }}
       run: |
         set -euo pipefail
-        bash "$RUNNER_TEMP/sitedeploy-ci/bin/sitedeploy" '${{ inputs.slug }}' '${{ inputs.dir }}'
+        api="$HANZO_API"
+        tok="${SITE_TOKEN:-${HANZO_DEPLOY_TOKEN:-}}"
+        # A plain if, NOT "${tok:?message}". That form runs command substitution
+        # on a backtick and opens a quoted section on an apostrophe, both INSIDE
+        # the message — so a readable sentence turns into `command not found` or
+        # into a syntax error reported at end-of-file, nowhere near its cause.
+        # The predecessor carried a comment about the apostrophe half and still
+        # had the backtick half.
+        if [ -z "$tok" ]; then
+          echo "::error::no bearer. Set HANZO_DEPLOY_TOKEN on the forge (git.hanzo.ai is what"
+          echo "reads .hanzo/workflows, not GitHub), or pass token: explicitly. Mint one with"
+          echo "POST $api/v1/keys with body {\"type\":\"secret\"} as a member of the owning org."
+          exit 1
+        fi
+
+        # One publish, named once. Everything below is per-site; the list of
+        # sites is resolved first so a repo publishing one and a repo publishing
+        # five take the same path through this file.
+        pairs="${SITE_SITES:-}"
+        if [ -z "$pairs" ]; then
+          pairs="$SITE_SLUG=$SITE_DIR"
+        fi
+        if [ "$pairs" = "=" ]; then
+          echo "::error::nothing to publish: pass slug: and dir:, or sites: with one slug=dir per line."
+          exit 1
+        fi
+
+        publish_one() {
+        slug="$1"; dir="$2"
+        echo "::group::publish $slug from $dir"
+
+        # The slug is a URL path segment AND a storage key segment, so it is held
+        # to cloud's own project-slug grammar here — a bad slug is a typo to fix,
+        # not a 404 to interpret.
+        echo "$slug" | grep -qE '^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$' \
+          || { echo "::error::slug '$slug' is not a project slug"; exit 1; }
+        [ -d "$dir" ] || { echo "::error::'$dir' is not a directory — the build produced no export"; exit 1; }
+
+        # The manifest: paths RELATIVE to the export root, which is exactly what
+        # the completion's `keys` must carry. CNAME does not travel — a GitHub
+        # Pages artifact that means nothing to storage and would ship a stale
+        # hostname claim into the bucket.
+        manifest=$(cd "$dir" && find . -type f ! -name CNAME | sed 's|^\./||' | LC_ALL=C sort)
+        count=$(printf '%s' "$manifest" | grep -c . || true)
+        [ "$count" -gt 0 ] || { echo "::error::'$dir' contains no files — refusing to deploy an empty manifest"; exit 1; }
+
+        # A site is a thing with an index. cloud enforces it whichever way the
+        # bytes arrive; checking here turns a failed build into a failed deploy
+        # with a readable cause rather than a live site that 404s at its own root.
+        [ -f "$dir/index.html" ] || { echo "::error::'$dir' has no index.html at its root"; exit 1; }
+
+        # Ensure the site exists. 200/201 the first time, 409 every time after —
+        # both are the state we need, so a brand-new slug needs no out-of-band
+        # call and committing the workflow is enough.
+        pcode=$(curl -sS -o /tmp/site-proj.json -w '%{http_code}' \
+          -X POST "$api/v1/projects" -H "Authorization: Bearer $tok" \
+          -H 'Content-Type: application/json' \
+          -d "$(jq -nc --arg s "$slug" '{slug:$s, name:$s}')")
+        case "$pcode" in
+          200|201|409) : ;;
+          401|403)
+            echo "::error::the bearer does not resolve to an org ($api/v1/projects -> HTTP $pcode)."
+            echo "It is present but resolves to no principal — absent from this repo's scope,"
+            echo "expired, or revoked. This is NOT a missing X-Org-Id header: CI cannot set that"
+            echo "header, cloud derives it from this bearer. Mint a replacement with"
+            echo "POST $api/v1/keys {\"type\":\"secret\"} as a member of the owning org."
+            head -c 400 /tmp/site-proj.json; echo; exit 1 ;;
+          *) echo "::error::ensure site $slug -> HTTP $pcode"; head -c 400 /tmp/site-proj.json; echo; exit 1 ;;
+        esac
+
+        # 1. Open the deployment. 202 is the success code: queued, not live.
+        # bucket and prefix come FROM cloud — never guess them, or the upload
+        # lands where nothing is served the moment an org or slug changes.
+        code=$(curl -sS -o /tmp/site-dep.json -w '%{http_code}' \
+          -X POST "$api/v1/sites/$slug/deployments" -H "Authorization: Bearer $tok" \
+          -H 'Content-Type: application/json' \
+          -d "$(jq -nc --arg c "${SITE_COMMIT:-}" '{commit:$c}')")
+        [ "$code" = 202 ] || { echo "::error::open deployment -> HTTP $code"; head -c 600 /tmp/site-dep.json; echo; exit 1; }
+        dep=$(jq -r '.id' /tmp/site-dep.json)
+        prefix=$(jq -r '.prefix' /tmp/site-dep.json)
+        upload_url=$(jq -r '.upload.url // empty' /tmp/site-dep.json)
+        [ -n "$upload_url" ] || {
+          echo "::error::the 202 carried no upload grant, so there is no way to write the bytes."
+          echo "         cloud mints one only when presigning is configured (S3_ADMIN_* on the deployment)."
+          exit 1; }
+        jq -c '{id,version,status,bucket,prefix}' /tmp/site-dep.json
+
+        # A build that dies past this point would leave the deployment queued and
+        # the site "building" forever. Report the failure so cloud records an
+        # honest terminal state instead of a lie by omission.
+        fail() {
+          curl -sS -X POST "$api/v1/sites/$slug/deployments/$dep/complete" \
+            -H "Authorization: Bearer $tok" -H 'Content-Type: application/json' \
+            -d '{"status":"error","message":"CI upload failed"}' >/dev/null 2>&1 || true
+          echo "::error::marked deployment $dep as error"
+        }
+        trap 'fail' ERR
+
+        # 2. The bytes. `file` goes LAST: storage ignores every field after the
+        # file part, so a grant field trailing it is silently dropped and the
+        # signature check fails. `key` is DROPPED from the grant's fields and
+        # re-sent per object — the grant carries the starts-with PLACEHOLDER, not
+        # a destination, and forwarding it verbatim posts `key` twice, which is a
+        # 400 for every object. Everything else is covered by the signature and
+        # travels untouched.
+        jq -r '.upload.fields | to_entries[] | select(.key != "key") | "-F\n\(.key)=\(.value)"' \
+          /tmp/site-dep.json > /tmp/site-fields
+        put() {
+          local rel="$1" args=() line
+          # A read loop, NOT `mapfile`: mapfile is bash 4+, macOS ships bash 3.2,
+          # and there it fails as command-not-found, the array stays EMPTY, and
+          # every upload goes out with no policy or signature at all.
+          while IFS= read -r line; do args+=("$line"); done < /tmp/site-fields
+          curl -sS --fail-with-body -o /dev/null -X POST "$UP_URL" \
+            -F "key=$PREFIX/$rel" "${args[@]}" -F "file=@$DIR/$rel" \
+            || { echo "::error::upload failed: $rel"; return 1; }
+        }
+        export -f put
+        export UP_URL="$upload_url" PREFIX="$prefix" DIR="$dir"
+        echo "uploading $count files to $prefix ($SITE_JOBS parallel)"
+        printf '%s\n' "$manifest" | grep . | xargs -P "$SITE_JOBS" -I{} bash -c 'put "$@"' _ {}
+
+        # 3. Flip it live. `wc -c`, not `stat`: the size flag is -f%z on BSD and
+        # -c%s on GNU, and a `stat -f%z || stat -c%s` fallback does not work —
+        # the first arm fails INSIDE the pipeline, awk still exits 0, the `||`
+        # never fires, and the byte count silently reports 0.
+        bytes=$(cd "$dir" && find . -type f ! -name CNAME -exec wc -c {} + | awk '$2!="total"{s+=$1} END{print s+0}')
+        jq -n --arg c "${SITE_COMMIT:-}" --argjson f "$count" --argjson b "${bytes:-0}" \
+              --args '{status:"live",commit:$c,files:$f,bytes:$b,keys:$ARGS.positional}' \
+              $(printf '%s\n' "$manifest" | grep .) > /tmp/site-done.json
+        code=$(curl -sS -o /tmp/site-resp.json -w '%{http_code}' \
+          -X POST "$api/v1/sites/$slug/deployments/$dep/complete" \
+          -H "Authorization: Bearer $tok" -H 'Content-Type: application/json' \
+          --data-binary @/tmp/site-done.json)
+        trap - ERR
+        [ "$code" = 200 ] || { echo "::error::complete -> HTTP $code"; head -c 600 /tmp/site-resp.json; echo; fail; exit 1; }
+        jq -c '{status,liveUrl,version,files,bytes}' /tmp/site-resp.json
+
+        # 4. Optionally promote to an immutable release and flip to it. `source`
+        # is ORG-RELATIVE: the org segment is prepended server-side from the
+        # validated principal, which is why the slug is the whole of it and why a
+        # caller cannot address another tenant's bytes by writing a longer path.
+        [ "$SITE_PUBLISH" = true ] || exit 0
+        code=$(curl -sS -o /tmp/site-rel.json -w '%{http_code}' \
+          -X POST "$api/v1/sites/$slug/publish" -H "Authorization: Bearer $tok" \
+          -H 'Content-Type: application/json' -d "$(jq -nc --arg s "$slug" '{source:$s}')")
+        [ "$code" = 200 ] || { echo "::error::publish -> HTTP $code"; head -c 800 /tmp/site-rel.json; echo; exit 1; }
+
+        # Guard the SHAPE before reading a field out of it: `.releaseId // empty`
+        # on an error body, an array or a null yields "" and every later test on
+        # it passes vacuously — which is a whole class of assertion that cannot
+        # fail for the reason it was written.
+        #
+        # `active` is asserted from THIS body rather than by listing the releases
+        # back and comparing ids. The predecessor did that, on the stated grounds
+        # that "a 200 says the request was accepted, not that this release is
+        # serving" — but that is no longer true of the typed operation: publish is
+        # promote-then-activate, and an activation that does not take returns 404
+        # or 410 rather than 200. The response says which release is live because
+        # it is the one that just went live, so one request answers what three did.
+        jq -e 'type == "object" and (.releaseId | type) == "string"
+               and (.releaseId | length) > 0 and .active == true' \
+          /tmp/site-rel.json >/dev/null \
+          || { echo "::error::publish answered $code but the body is not an ACTIVE release object:"; head -c 800 /tmp/site-rel.json; echo; exit 1; }
+        rid=$(jq -r '.releaseId' /tmp/site-rel.json)
+        objs=$(jq -r '.objects' /tmp/site-rel.json)
+        url=$(jq -r '.url // ""' /tmp/site-rel.json)
+        echo "live: $rid ($objs objects) -> ${url:-no public host — that slug is claimed; rename the site or bind a domain}"
+        echo "::endgroup::"
+        }
+
+        # A file, not a pipe: the loop body runs curl, and curl inherits stdin —
+        # it would eat the rest of the list and publish only the first site.
+        printf '%s\n' "$pairs" > /tmp/site-pairs
+        published=0
+        while IFS= read -r pair; do
+          [ -n "${pair// /}" ] || continue
+          case "$pair" in *=*) ;; *)
+            echo "::error::sites: entry '$pair' is not slug=dir"; exit 1 ;;
+          esac
+          publish_one "${pair%%=*}" "${pair#*=}"
+          published=$((published + 1))
+        done < /tmp/site-pairs
+        [ "$published" -gt 0 ] || { echo "::error::sites: named no site"; exit 1; }
