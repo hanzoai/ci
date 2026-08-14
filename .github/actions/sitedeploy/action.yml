@@ -19,7 +19,7 @@ description: Publish a built static export to the Hanzo PaaS Sites plane.
 # standing shared-bucket credential the grant replaced.
 inputs:
   slug:
-    description: The project slug on the Sites plane (POST /v1/projects/<slug>/deploy)
+    description: The project slug on the Sites plane (POST /v1/projects/<slug>/deployments)
     required: true
   dir:
     description: The built export directory
