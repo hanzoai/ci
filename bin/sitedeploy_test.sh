@@ -223,7 +223,7 @@ t "no cache policy is stamped from here"  "$(grep -c 'Cache-Control=' "$tmp/uplo
 # is already open. Hence measured before the enqueue, and what these cases pin is
 # not only that it fires but that it fires having sent nothing.
 t "the release size is reported, with the limit" \
-  "$(printf '%s' "$out" | grep -c 'of the 16.0 MiB edge limit')"  "1"
+  "$(printf '%s' "$out" | grep -cF 'of the 16.0 MiB edge limit')"  "1"
 
 # The REAL body the happy path just sent, so the boundary below is measured
 # against the thing itself rather than against an estimate of it.
@@ -235,7 +235,7 @@ out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
       GATEWAY_BODY_LIMIT=1 bash "$SD" a-slug "$site" 2>&1); rc=$?
 t "a manifest past the edge limit refuses"   "$rc"  "1"
 t "  ...naming the server's own knob"        "$(printf '%s' "$out" | grep -c GATEWAY_BODY_LIMIT)"           "1"
-t "  ...and where that knob is defined"      "$(printf '%s' "$out" | grep -c 'internal/edge/edge.go')"      "1"
+t "  ...and where that knob is defined"      "$(printf '%s' "$out" | grep -cF 'internal/edge/edge.go')"      "1"
 t "  ...and the opaque answer it replaces"   "$(printf '%s' "$out" | grep -c 'Error when parsing request')" "1"
 t "  ...and what to do about it"             "$(printf '%s' "$out" | grep -c 'Reduce the object count')"    "1"
 # The whole reason it is measured first. A check that fires after the bytes have
@@ -250,10 +250,51 @@ out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
       SITEDEPLOY_JOBS=1 SITEDEPLOY_COMMIT=abc123 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" \
       GATEWAY_BODY_LIMIT="$exact" bash "$SD" a-slug "$site" 2>&1); rc=$?
 t "a manifest exactly AT the limit publishes"  "$rc"  "0"
+# The size the release line reports must not depend on the runner's locale: awk
+# renders "16,0 MiB" under a comma-decimal one, and that number is both read by
+# people and matched by this suite. Skipped where the locale is not installed —
+# a bare runner ships C only — so it fires on a dev machine and never lies.
+#
+# `grep -cF`, and that is the whole assertion: as a REGEX, `16.0` matches `16,0`,
+# so the un-anchored form passes under exactly the locale it exists to catch.
+# Not `grep -q`: it exits on the first match, SIGPIPEs `locale`, and this suite
+# runs under `set -o pipefail` — so the pipeline reports 141 and the condition is
+# FALSE no matter what is installed. The block simply never ran.
+if locale -a 2>/dev/null | grep -ix 'de_DE.UTF-8' >/dev/null; then
+  o=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
+      SITEDEPLOY_JOBS=1 SITEDEPLOY_COMMIT=abc123 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" \
+      LC_ALL=de_DE.UTF-8 bash "$SD" a-slug "$site" 2>&1)
+  t "the size reads the same under a comma locale" "$(printf '%s' "$o" | grep -cF '16.0 MiB edge limit')" "1"
+fi
 out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
       SITEDEPLOY_JOBS=1 SITEDEPLOY_COMMIT=abc123 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" \
       GATEWAY_BODY_LIMIT="$((exact - 1))" bash "$SD" a-slug "$site" 2>&1); rc=$?
 t "one byte past the limit refuses"            "$rc"  "1"
+# Readable in the band where a site FIRST crosses, which is the ~100 KiB just
+# above the cap: there both sides round to "16.0 MiB" and the message would say
+# 16.0 is over 16.0. The exact bytes are what settle it.
+t "  ...and the refusal carries exact bytes"   "$(printf '%s' "$out" | grep -cF "($((exact - 1)) bytes) edge limit")"  "1"
+t "  ...on the measured side too"              "$(printf '%s' "$out" | grep -cF "($exact bytes) for")"                 "1"
+
+# A MALFORMED limit must land where the SERVER lands. edge.envInt is TrimSpace ->
+# Atoi -> `err || n <= 0` -> default, so cloud shrugs and enforces 16 MiB. Bash
+# does not shrug: `-le` against a non-numeric operand is an error and the `||`
+# branch fires, so before this was mirrored one typo in one variable refused
+# every publish in the fleet, fail-CLOSED, against a limit never in force.
+for bad in abc 0x10 1e9 0 -1 '1 6' 99999999999999999999999 ''; do
+  rm -f "$tmp/calls"
+  o=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
+      SITEDEPLOY_JOBS=1 SITEDEPLOY_COMMIT=abc123 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" \
+      GATEWAY_BODY_LIMIT="$bad" bash "$SD" a-slug "$site" 2>&1)
+  t "GATEWAY_BODY_LIMIT='$bad' -> 16 MiB, publishes" \
+    "$(printf '%s' "$o" | grep -cF 'of the 16.0 MiB edge limit')"  "1"
+done
+# Atoi accepts a leading sign, so this one is VALID and must be honoured rather
+# than discarded — a mirror that only ever falls back is not a mirror.
+o=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
+    SITEDEPLOY_JOBS=1 SITEDEPLOY_COMMIT=abc123 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" \
+    GATEWAY_BODY_LIMIT=" +1 " bash "$SD" a-slug "$site" 2>&1)
+t "a signed, padded limit is read as Atoi reads it" "$(printf '%s' "$o" | grep -cF '(1 bytes) edge limit')"  "1"
 
 # The shape this was written about: a full prerender multiplied one site's object
 # count until every push failed. That export is 627 objects, and on THIS lane it
