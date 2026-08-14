@@ -837,6 +837,29 @@ jobs:
         if: hashFiles('Cargo.toml', '**/Cargo.toml') != ''
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Provision libclang (crates that bind C headers)
+        # rustup is not the whole Rust toolchain for a tree that binds C. bindgen
+        # dlopens libclang at BUILD-SCRIPT time to parse the headers, so without
+        # it the build script panics — `Unable to find libclang` — and the gate
+        # reports a compile failure for code that compiles. hanzoai/evm's
+        # mdbx-sys is the case in the fleet today.
+        #
+        # The guard is the lock, not the language: `cargo check` resolves the
+        # same graph the lock records, so a lock naming bindgen is exactly the
+        # set of trees that need this, and every other Rust repo pays nothing.
+        # hanzoai/cli, the other Rust caller, does not appear.
+        if: hashFiles('Cargo.lock') != ''
+        run: |
+          set -euo pipefail
+          grep -q '^name = "bindgen"' Cargo.lock || { echo "no bindgen in the lock — skipping libclang"; exit 0; }
+          ldconfig -p 2>/dev/null | grep -q 'libclang\.so' && { echo "libclang already present"; exit 0; }
+          sudo apt-get update -qq || {
+            sudo find /etc/apt -name '*.list' -o -name '*.sources' | \
+              xargs -r sudo sed -i 's|https\?://archive.ubuntu.com/ubuntu|http://mirrors.digitalocean.com/ubuntu|g'
+            sudo apt-get update -qq
+          }
+          sudo apt-get install -y -qq libclang-dev
+
       - name: Provision Java toolchain (client codegen)
         # openapi-generator is a Java jar, so the `client:` lane below cannot run
         # without a JDK. Guarded on the lane, not on a file: a repo with a
