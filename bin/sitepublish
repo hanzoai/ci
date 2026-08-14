@@ -36,7 +36,7 @@
 #
 # THE SIZE BOUNDARY IS THE SERVER'S, NOT A PREFERENCE. cloud's public edge sets
 # BodyLimit from GATEWAY_BODY_LIMIT, default 16 MiB (cloud internal/edge/edge.go
-# :36, bound to the door's fasthttp socket at cmd/cloud/main.go:124), and
+# :38, bound to the door's fasthttp socket at cmd/cloud/main.go:124), and
 # fasthttp refuses an oversized POST BEFORE any handler runs — it surfaces as an
 # opaque 400 "Error when parsing request" that reads like a malformed payload
 # rather than a size cap (cloud apps/projects/grant.go:5 tells that story about
@@ -67,13 +67,32 @@ api="${HANZO_API:-https://api.hanzo.ai}"
 # The body limit carries the SERVER'S OWN NAME — one value, one name, wherever it
 # travels. bin/sitedeploy reads the same variable for the same edge, so a runner
 # told a different limit is told it once and both lanes obey.
-max_body="${GATEWAY_BODY_LIMIT:-16777216}"    # 16 << 20, cloud internal/edge/edge.go:36
+#
+# READ THE WAY THE SERVER READS IT. edge.envInt (edge.go:40) is TrimSpace, then
+# strconv.Atoi, then `err != nil || n <= 0` falls back to the default — so the
+# server SHRUGS at a malformed value and enforces 16 MiB. Bash does not shrug:
+# `[ "$zbytes" -le "$max_body" ]` with a non-numeric operand is an error, the
+# `||` branch fires, and the publish refuses against a limit that was never in
+# force, printing a number that does not exist. One typo in one variable would
+# stop every publisher, fail-CLOSED. Mirrored so the two cannot disagree about
+# the value of the same variable.
+max_body="${GATEWAY_BODY_LIMIT-}"             # 16 << 20, cloud internal/edge/edge.go:38
+max_body="${max_body#"${max_body%%[![:space:]]*}"}"    # TrimSpace
+max_body="${max_body%"${max_body##*[![:space:]]}"}"
+max_body="${max_body#+}"                               # Atoi accepts a leading sign
+case "$max_body" in ''|*[!0-9]*) max_body=16777216 ;; esac
+# 18 digits: past that bash's own `-gt` errors, exactly where Atoi returns an
+# error and Go keeps its default. The two agree everywhere below 10^18 bytes.
+{ [ "${#max_body}" -le 18 ] && [ "$max_body" -gt 0 ]; } || max_body=16777216
 max_files=5000                                # maxFiles
 max_file_bytes=$((64 << 20))                  # maxFileBytes, 64 MiB
 max_total_bytes=$((512 << 20))                # maxTotalBytes uncompressed, 512 MiB
 
 die() { echo "::error::$*"; exit 1; }
-human() { awk -v b="$1" 'BEGIN{ split("B KiB MiB GiB", u, " "); i = 1
+# LC_ALL=C because under a comma-decimal locale awk renders "16,0 MiB". The
+# number in a refusal is read by people and matched by tests, and neither wants
+# it to depend on the runner's locale.
+human() { LC_ALL=C awk -v b="$1" 'BEGIN{ split("B KiB MiB GiB", u, " "); i = 1
   while (b >= 1024 && i < 4) { b /= 1024; i++ }
   printf (i == 1 ? "%d %s" : "%.1f %s"), b, u[i] }'; }
 
@@ -139,11 +158,14 @@ zipf="$tmp/site.zip"
 # or ".."-escaping names (blob.go:362-370), and strips a common top-level prefix
 # if one exists, so a flat archive is what it expects and what this sends.
 ( cd "$dir" && zip -qXr "$zipf" . -x './CNAME' ) || die "zip of '$dir' failed"
-zbytes=$(wc -c < "$zipf")
+zbytes=$(wc -c < "$zipf" | tr -d ' ')   # BSD wc pads its count, GNU does not
 
 # The refusal the whole size story is about. Above this the POST dies at the
 # edge with a 400 that names nothing.
-[ "$zbytes" -le "$max_body" ] || die "publish aborted: the zipped release is $(human "$zbytes") for $files files, over the $(human "$max_body") edge limit (GATEWAY_BODY_LIMIT, cloud internal/edge/edge.go:36). fasthttp refuses the POST before any handler runs and answers only 'Error when parsing request', which names neither size nor cause — so it is refused here, where the number is. Publish this export with bin/sitedeploy, which streams per-file against a presigned grant and posts no whole body."
+# Exact bytes beside the human number, because the band where an export FIRST
+# crosses is the ~100 KiB just above the cap, and there both sides round to
+# "16.0 MiB" — a refusal that reads as 16.0 over 16.0 explains nothing.
+[ "$zbytes" -le "$max_body" ] || die "publish aborted: the zipped release is $(human "$zbytes") ($zbytes bytes) for $files files, over the $(human "$max_body") ($max_body bytes) edge limit (GATEWAY_BODY_LIMIT, cloud internal/edge/edge.go:38). fasthttp refuses the POST before any handler runs and answers only 'Error when parsing request', which names neither size nor cause — so it is refused here, where the number is. Publish this export with bin/sitedeploy, which streams per-file against a presigned grant and posts no whole body."
 
 # One line, every publish, whether or not it is anywhere near the limit. Same
 # shape bin/sitedeploy prints, because it is the same fact about the same edge.
