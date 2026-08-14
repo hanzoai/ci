@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
-# Tests for bin/sitedeploy. Runs OFFLINE: SITEDEPLOY_PLAN=1 stops the script
-# before the first network call and prints the manifest it would upload, so every
-# case here is deterministic and needs no token, no bucket and no cluster.
-# Run: bash bin/sitedeploy_test.sh
+# Tests for bin/sitedeploy. Runs OFFLINE two ways: SITEDEPLOY_PLAN=1 stops the
+# script before the first network call and prints the manifest it would upload,
+# and a `curl` shim on PATH records every request and answers it from a fixture.
+# So every case here is deterministic and needs no token, no bucket and no
+# cluster. Run: bash bin/sitedeploy_test.sh
+#
+# THE ADDRESSES ARE THE POINT of the shim half. They were described in a comment
+# and asserted nowhere, and when cloud split the deploy route in two — /deploy
+# became the archive upload alone, reading any body as BYTES — this script went
+# on sending its JSON enqueue there. Every static site in the estate stopped
+# publishing at once, each build green to the last step, and the whole suite
+# stayed PASS throughout. A wire nobody asserts is a wire that moves.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 SD="$PWD/bin/sitedeploy"
@@ -38,24 +46,13 @@ t "CNAME does not travel"             "$(plan "$site" | awk -F'\t' '$1=="CNAME"{
 t "file count excludes CNAME"         "$(plan "$site" | head -1 | grep -o 'files=[0-9]*')" "files=6"
 
 # --- content type ------------------------------------------------------------
-# The presigned POST carries no Content-Type condition, so what CI sends is what
-# the object stores and what the edge serves. Send nothing and a browser
-# DOWNLOADS every page instead of rendering it.
+# What the object stores, and the fallback the serving path uses for a key whose
+# extension it does not recognise. An object stored as application/octet-stream
+# is one a browser DOWNLOADS instead of rendering.
 t "html"  "$(field "$site" index.html 2)"              "text/html; charset=utf-8"
 t "css"   "$(field "$site" assets/plain.css 2)"        "text/css; charset=utf-8"
 t "js"    "$(field "$site" assets/chunk-AB12CD34.js 2)" "text/javascript; charset=utf-8"
 t "json"  "$(field "$site" data.json 2)"               "application/json; charset=utf-8"
-
-# --- cache control: mirrors cloud apps/sites.CacheControlFor -----------------
-# These strings are the SERVER's policy, pinned here so the two cannot drift
-# apart silently. If cloud changes CacheControlFor, this is what goes red.
-t "html is short-lived, long at the edge" "$(field "$site" index.html 3)"        "public, max-age=60, s-maxage=86400"
-t "unfingerprinted asset is an hour"      "$(field "$site" assets/plain.css 3)"  "public, max-age=3600"
-# The regression this pins: Go spells the class [.\-_], and transcribing that
-# into [[ =~ ]] makes the shell reject it as an invalid character range. The `if`
-# then merely evaluates false, so every hashed asset silently lost `immutable`.
-t "fingerprinted .hash. is immutable"  "$(field "$site" assets/app.4f3a9c21.css 3)"   "public, max-age=31536000, immutable"
-t "fingerprinted -HASH- is immutable"  "$(field "$site" assets/chunk-AB12CD34.js 3)"  "public, max-age=31536000, immutable"
 
 # --- fail closed -------------------------------------------------------------
 # reconcilePrefix deletes whatever the manifest omits, so an empty manifest is a
@@ -116,6 +113,100 @@ if command -v nc >/dev/null 2>&1; then
   t "reachable 403: does not claim revocation"  "$(printf '%s' "$out" | grep -c 'does not authenticate')"  "0"
   t "reachable 403: gets past the preflight"    "$(printf '%s' "$out" | grep -c 'did not read as a live key')"  "1"
 fi
+
+# --- the wire ----------------------------------------------------------------
+# A curl shim that RECORDS every request and answers it from a fixture, so the
+# three addresses, the two bodies and the fields on a per-object POST are all
+# asserted rather than described. The shim refuses an address it does not know,
+# which is what turns a moved route into a red test instead of a live outage.
+shim="$tmp/bin"; mkdir -p "$shim"
+cat > "$shim/curl" <<'SHIM'
+#!/usr/bin/env bash
+out=/dev/null url= method=GET body= fields=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -X) method="$2"; shift 2 ;;
+    -d) body="$2"; shift 2 ;;
+    --data-binary) body=$(cat "${2#@}"); shift 2 ;;
+    -F) fields+=("$2"); shift 2 ;;
+    http*) url="$1"; shift ;;
+    *) shift ;;
+  esac
+done
+printf '%s %s\n' "$method" "$url" >> "$T_DIR/calls"
+case "$url" in
+  # /complete before /deployments: the completion address ends in the collection
+  # it belongs to, so the looser pattern would swallow it.
+  */complete)      printf '%s' "$body" > "$T_DIR/complete.body"; printf '%s' "$T_DONE" > "$out"; printf '200' ;;
+  */deployments)   printf '%s' "$body" > "$T_DIR/enqueue.body";  printf '%s' "$T_ENQ"  > "$out"; printf '202' ;;
+  */v1/keys)       printf '200' ;;
+  */v1/projects)   printf '{}' > "$out"; printf '200' ;;
+  https://s3.test/*) printf '%s\n' "$(IFS='|'; printf '%s' "${fields[*]}")" >> "$T_DIR/uploads" ;;
+  *) echo "shim: unexpected url $url" >&2; exit 9 ;;
+esac
+SHIM
+chmod +x "$shim/curl"
+
+ENQ='{"id":"dep_x","version":7,"status":"queued","bucket":"hanzo-sites","prefix":"acme/a-slug",
+      "upload":{"url":"https://s3.test/hanzo-sites","prefix":"acme/a-slug",
+                "fields":{"key":"acme/a-slug/","policy":"POLICY","x-amz-signature":"SIG"}}}'
+DONE='{"status":"live","liveUrl":"https://a-slug.hanzo.app","version":7,"files":6,"bytes":42}'
+out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
+      SITEDEPLOY_JOBS=1 SITEDEPLOY_COMMIT=abc123 SITEDEPLOY_REPO= \
+      T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" bash "$SD" a-slug "$site" 2>&1); rc=$?
+calls="$tmp/calls"
+t "a full deploy succeeds"  "$rc"  "0"
+
+# THE regression: the enqueue opens a deployment where deployments are created.
+t "enqueue POSTs the deployments collection" \
+  "$(grep -c '^POST https://api.test/v1/projects/a-slug/deployments$' "$calls")"  "1"
+t "nothing JSON is sent to the archive address" \
+  "$(grep -c '/v1/projects/a-slug/deploy$' "$calls")"  "0"
+t "the completion names the deployment" \
+  "$(grep -c '^POST https://api.test/v1/projects/a-slug/deployments/dep_x/complete$' "$calls")"  "1"
+
+# `commit` is the whole enqueue body. `source` was the Content-Type discriminator
+# the split removed and `branch` is discarded server-side; a field the server
+# does not read is one this script must not claim to send.
+t "the enqueue body is commit and nothing else" \
+  "$(jq -r 'keys|join(",")' "$tmp/enqueue.body")"  "commit"
+t "the commit travels"  "$(jq -r .commit "$tmp/enqueue.body")"  "abc123"
+
+# The completion carries the manifest cloud prunes against, so a short one
+# deletes live pages. It is the same six keys the plan enumerated.
+t "the completion reports live"        "$(jq -r .status "$tmp/complete.body")"        "live"
+t "the completion carries every key"   "$(jq -r '.keys|length' "$tmp/complete.body")" "6"
+t "the manifest is relative"           "$(jq -r '.keys|index("nested/deep/page.html")|type' "$tmp/complete.body")" "number"
+t "the completion counts the files"    "$(jq -r .files "$tmp/complete.body")"         "6"
+
+# One object POST per file, each carrying the grant verbatim EXCEPT `key`: the
+# grant's key is the starts-with placeholder, and forwarding it alongside the
+# real one posts `key` twice, which S3 answers 400 for every object — the whole
+# of the first end-to-end run, 8403 files and 8403 400s.
+t "one upload per file"  "$(wc -l < "$tmp/uploads" | tr -d ' ')"  "6"
+t "the real key is sent, once" \
+  "$(grep -c 'key=acme/a-slug/index\.html' "$tmp/uploads")"  "1"
+t "the placeholder key is dropped" \
+  "$(grep -c 'key=acme/a-slug/|' "$tmp/uploads")"  "0"
+t "the signed fields travel untouched" \
+  "$(grep -c 'policy=POLICY' "$tmp/uploads")"  "6"
+# S3 ignores every field after the file part, so a grant field trailing the body
+# is silently dropped and the signature check fails.
+t "file goes last"  "$(grep -c 'file=@[^|]*$' "$tmp/uploads")"  "6"
+# The cache policy is the server's: it composes CacheControlFor on every request
+# and does not read the stored header, so a copy of that rule sent from here
+# reaches no reader and is free to drift.
+t "no cache policy is stamped from here"  "$(grep -c 'Cache-Control=' "$tmp/uploads")"  "0"
+
+# A deploy that cannot upload must leave cloud an honest terminal state rather
+# than a deployment queued forever behind a build that is gone.
+rm -f "$tmp/calls" "$tmp/complete.body"
+out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
+      SITEDEPLOY_JOBS=1 T_DIR="$tmp" T_ENQ="${ENQ/https:\/\/s3.test/https:\/\/s3.unknown}" T_DONE="$DONE" \
+      bash "$SD" a-slug "$site" 2>&1); rc=$?
+t "a failed upload fails the deploy"     "$rc"  "1"
+t "a failed upload is reported as error" "$(jq -r .status "$tmp/complete.body" 2>/dev/null)"  "error"
 
 [ $fail -eq 0 ] && echo "PASS" || echo "FAIL"
 exit $fail
