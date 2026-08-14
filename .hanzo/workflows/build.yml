@@ -1067,6 +1067,7 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
           FORGE_TOKEN: ${{ secrets.FORGE_TOKEN }}
           OWNER: ${{ github.repository_owner }}
+          GOMOD: ${{ steps.gomod.outputs.file }}
         run: |
           set -uo pipefail
           CFG="$RUNNER_TEMP/gitconfig-go-test"; : > "$CFG"
@@ -1110,6 +1111,41 @@ jobs:
 
           [ "$wrote" = 1 ] || { echo "no git credential — public modules only"; exit 0; }
           { echo "GIT_CONFIG_GLOBAL=$CFG"; echo "GIT_CONFIG_NOSYSTEM=1"; } >> "$GITHUB_ENV"
+
+          # WHERE to get a module and whether to BELIEVE it are different questions,
+          # and the rewrite above only answers the first. Go fetches our bytes from
+          # the forge, then verifies them against sum.golang.org — which never heard
+          # of a module that was never published to the proxy, and answers 404. The
+          # fetch succeeds and the build dies a step later saying only that a package
+          # could not be placed. Measured: `go mod download
+          # github.com/hanzoai/plans@v1.4.14` exits 1 on "verifying go.mod: reading
+          # https://sum.golang.org/lookup/...", and 0 with GOPRIVATE naming it.
+          #
+          # It hid behind the module cache. A runner that already verified a module
+          # never asks again, so one commit passed on a warm runner and failed on a
+          # cold one, which reads as flake rather than as a missing setting.
+          #
+          # The blanket answer is wrong, and the step above says why: nearly all of
+          # our modules ARE public, and the sumdb pins immutable hashes precisely so
+          # a force-moved tag cannot change bytes under a build. GOPRIVATE over a
+          # whole namespace gives that up for every one of them. So ask the proxy
+          # which it actually serves and name only the rest — 83 of cloud's 88 are
+          # public, and the 5 that are not are exactly the ones that could not be
+          # placed.
+          if [ -n "${GOMOD:-}" ] && [ -f "$GOMOD" ] && [ -n "${seen:-}" ]; then
+            priv=""
+            for ns in $seen; do
+              for mv in $(grep -oE "github[.]com/${ns}/[a-z0-9._-]+ v[0-9][^ ]*" "$GOMOD" | tr ' ' '@' | sort -u); do
+                m="${mv%@*}"; v="${mv##*@}"
+                code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://proxy.golang.org/${m}/@v/${v}.info" || echo 000)
+                [ "$code" = 200 ] || priv="${priv:+$priv,}${m}"
+              done
+            done
+            if [ -n "$priv" ]; then
+              echo "GOPRIVATE=$priv" >> "$GITHUB_ENV"
+              echo "not on the public proxy, so fetched direct and unverified: $priv"
+            fi
+          fi
           echo "runner git authenticated for private Go modules"
 
       - name: Test (per hanzo.yml)
