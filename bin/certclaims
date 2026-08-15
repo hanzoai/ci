@@ -72,8 +72,14 @@ audited='(audited|certified|accredited) by [^.]{0,40}(independent|third.?party|e
 fail=0
 while IFS= read -r file; do
   # Dated records are history; see above.
+  # A dated filename IS the exemption -- 2020-03-18-hanzo-cloud.mdx is a record
+  # of what was said in 2020, wherever it happens to be filed. Keying on the
+  # containing directory missed posts/ and _offbrand/ holding the same file.
+  case "$(basename "$file")" in
+    CHANGELOG*|changelog*|20[0-9][0-9]-[01][0-9]-[0-3][0-9]-*) continue ;;
+  esac
   case "$file" in
-    */CHANGELOG*|*/changelog*|*content/20[0-9][0-9]-*|*/blog/content/*) continue ;;
+    */CHANGELOG*|*/changelog*) continue ;;
   esac
 
   while IFS=: read -r lineno line; do
