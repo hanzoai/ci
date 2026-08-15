@@ -1,4 +1,4 @@
-name: sitedeploy
+name: site
 description: Publish a built static export to the Hanzo PaaS Sites plane.
 # For every repo whose deploy is "a static export goes live" — hanzo.ai, hanzo.app,
 # hips, computer and the ones after them. Those were each about to carry their own
@@ -6,7 +6,7 @@ description: Publish a built static export to the Hanzo PaaS Sites plane.
 # transcriptions that drift (see the imgver action next door for the same story
 # told about image tags).
 #
-#   - uses: hanzoai/ci/.github/actions/sitedeploy@v1
+#   - uses: hanzoai/ci/.github/actions/site@v1
 #     with:  { slug: hanzo-ai, dir: out }
 #     env:
 #       KMS_CLIENT_ID:     '${{ secrets.KMS_CLIENT_ID }}'
@@ -40,7 +40,7 @@ inputs:
       Several sites from one build, one `slug=dir` pair per line. A white-labelled
       product is one codebase and several hosts, and a site keys on its HOST — so
       a brand per host is a site per host, and one build writes an export per
-      brand. bin/sitedeploy stays single-site: a publish IS one site, and which
+      brand. bin/site stays single-site: a publish IS one site, and which
       sites to publish is orchestration, which is what this file is.
     required: false
     default: 
@@ -59,23 +59,23 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Fetch sitedeploy
+    - name: Fetch site
       shell: bash
       # The action ref is the script ref: an action pinned to @v1 runs v1's
-      # sitedeploy. Both forges, because this repo is served from each.
+      # site. Both forges, because this repo is served from each.
       run: |
         set -euo pipefail
         ref="${GITHUB_ACTION_REF:-v1}"
         # The break tests for the TOOL, not for the clone: a host that answers
-        # with a tree carrying no bin/sitedeploy must fall through to the next
+        # with a tree carrying no bin/site must fall through to the next
         # one rather than break and dead-end the job on it.
         for url in https://git.hanzo.ai/hanzoai/ci https://github.com/hanzoai/ci; do
-          git clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/sitedeploy-ci" 2>/dev/null \
-            && [ -x "$RUNNER_TEMP/sitedeploy-ci/bin/sitedeploy" ] && break
-          rm -rf "$RUNNER_TEMP/sitedeploy-ci"
+          git clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/site-ci" 2>/dev/null \
+            && [ -x "$RUNNER_TEMP/site-ci/bin/site" ] && break
+          rm -rf "$RUNNER_TEMP/site-ci"
         done
-        [ -x "$RUNNER_TEMP/sitedeploy-ci/bin/sitedeploy" ] \
-          || { echo "::error::could not fetch hanzoai/ci@$ref (bin/sitedeploy)"; exit 1; }
+        [ -x "$RUNNER_TEMP/site-ci/bin/site" ] \
+          || { echo "::error::could not fetch hanzoai/ci@$ref (bin/site)"; exit 1; }
 
     - name: Read the deploy key
       id: key
@@ -107,9 +107,9 @@ runs:
       env:
         HANZO_API: ${{ inputs.api }}
         HANZO_DEPLOY_TOKEN: ${{ steps.key.outputs.token }}
-        SITEDEPLOY_JOBS: ${{ inputs.jobs }}
-        SITEDEPLOY_COMMIT: ${{ github.sha }}
-        SITEDEPLOY_BRANCH: ${{ github.ref_name }}
+        SITE_JOBS: ${{ inputs.jobs }}
+        SITE_COMMIT: ${{ github.sha }}
+        SITE_BRANCH: ${{ github.ref_name }}
       run: |
         set -euo pipefail
         pairs='${{ inputs.sites }}'
@@ -127,7 +127,7 @@ runs:
           [ -n "${pair//[[:space:]]/}" ] || continue
           case "$pair" in *=*) ;; *) echo "::error::sites: entry '$pair' is not slug=dir"; exit 1 ;; esac
           echo "::group::publish ${pair%%=*}"
-          bash "$RUNNER_TEMP/sitedeploy-ci/bin/sitedeploy" "${pair%%=*}" "${pair#*=}"
+          bash "$RUNNER_TEMP/site-ci/bin/site" "${pair%%=*}" "${pair#*=}"
           echo "::endgroup::"
           n=$((n + 1))
         done < "$RUNNER_TEMP/site-pairs"
