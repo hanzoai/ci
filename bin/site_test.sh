@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Tests for bin/sitedeploy. Runs OFFLINE two ways: SITEDEPLOY_PLAN=1 stops the
+# Tests for bin/site. Runs OFFLINE two ways: SITE_PLAN=1 stops the
 # script before the first network call and prints the manifest it would upload,
 # and a `curl` shim on PATH records every request and answers it from a fixture.
 # So every case here is deterministic and needs no token, no bucket and no
-# cluster. Run: bash bin/sitedeploy_test.sh
+# cluster. Run: bash bin/site_test.sh
 #
 # THE ADDRESSES ARE THE POINT of the shim half. They were described in a comment
 # and asserted nowhere, and when cloud split the deploy route in two — /deploy
@@ -13,11 +13,11 @@
 # stayed PASS throughout. A wire nobody asserts is a wire that moves.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-SD="$PWD/bin/sitedeploy"
+SD="$PWD/bin/site"
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail=0
 
-plan() { SITEDEPLOY_PLAN=1 bash "$SD" a-slug "$1" 2>&1; }
+plan() { SITE_PLAN=1 bash "$SD" a-slug "$1" 2>&1; }
 t() { # t <name> <got> <want>
   if [ "$2" = "$3" ]; then printf 'ok    %-56s -> %s\n' "$1" "$2"
   else printf 'FAIL  %-56s -> %s (want %s)\n' "$1" "$2" "$3"; fail=1; fi
@@ -164,7 +164,7 @@ ENQ='{"id":"dep_x","version":7,"status":"queued","bucket":"hanzo-sites","prefix"
                 "fields":{"key":"acme/a-slug/","policy":"POLICY","x-amz-signature":"SIG"}}}'
 DONE='{"status":"live","liveUrl":"https://a-slug.hanzo.app","version":7,"files":6,"bytes":42}'
 out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
-      SITEDEPLOY_JOBS=1 SITEDEPLOY_COMMIT=abc123 SITEDEPLOY_REPO= \
+      SITE_JOBS=1 SITE_COMMIT=abc123 SITE_REPO= \
       T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" bash "$SD" a-slug "$site" 2>&1); rc=$?
 calls="$tmp/calls"
 t "a full deploy succeeds"  "$rc"  "0"
@@ -231,7 +231,7 @@ exact=$(wc -c < "$tmp/complete.body" | tr -d ' ')
 
 rm -f "$tmp/calls" "$tmp/complete.body"
 out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
-      SITEDEPLOY_JOBS=1 SITEDEPLOY_COMMIT=abc123 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" \
+      SITE_JOBS=1 SITE_COMMIT=abc123 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" \
       GATEWAY_BODY_LIMIT=1 bash "$SD" a-slug "$site" 2>&1); rc=$?
 t "a manifest past the edge limit refuses"   "$rc"  "1"
 t "  ...naming the server's own knob"        "$(printf '%s' "$out" | grep -c GATEWAY_BODY_LIMIT)"           "1"
@@ -247,7 +247,7 @@ t "  ...having sent nothing at all"          "$(cat "$tmp/calls" 2>/dev/null | w
 # have worked must still work, or the fleet learns to route around the gate.
 rm -f "$tmp/calls"
 out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
-      SITEDEPLOY_JOBS=1 SITEDEPLOY_COMMIT=abc123 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" \
+      SITE_JOBS=1 SITE_COMMIT=abc123 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" \
       GATEWAY_BODY_LIMIT="$exact" bash "$SD" a-slug "$site" 2>&1); rc=$?
 t "a manifest exactly AT the limit publishes"  "$rc"  "0"
 # The size the release line reports must not depend on the runner's locale: awk
@@ -262,12 +262,12 @@ t "a manifest exactly AT the limit publishes"  "$rc"  "0"
 # FALSE no matter what is installed. The block simply never ran.
 if locale -a 2>/dev/null | grep -ix 'de_DE.UTF-8' >/dev/null; then
   o=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
-      SITEDEPLOY_JOBS=1 SITEDEPLOY_COMMIT=abc123 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" \
+      SITE_JOBS=1 SITE_COMMIT=abc123 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" \
       LC_ALL=de_DE.UTF-8 bash "$SD" a-slug "$site" 2>&1)
   t "the size reads the same under a comma locale" "$(printf '%s' "$o" | grep -cF '16.0 MiB edge limit')" "1"
 fi
 out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
-      SITEDEPLOY_JOBS=1 SITEDEPLOY_COMMIT=abc123 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" \
+      SITE_JOBS=1 SITE_COMMIT=abc123 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" \
       GATEWAY_BODY_LIMIT="$((exact - 1))" bash "$SD" a-slug "$site" 2>&1); rc=$?
 t "one byte past the limit refuses"            "$rc"  "1"
 # Readable in the band where a site FIRST crosses, which is the ~100 KiB just
@@ -284,7 +284,7 @@ t "  ...on the measured side too"              "$(printf '%s' "$out" | grep -cF 
 for bad in abc 0x10 1e9 0 -1 '1 6' 99999999999999999999999 ''; do
   rm -f "$tmp/calls"
   o=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
-      SITEDEPLOY_JOBS=1 SITEDEPLOY_COMMIT=abc123 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" \
+      SITE_JOBS=1 SITE_COMMIT=abc123 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" \
       GATEWAY_BODY_LIMIT="$bad" bash "$SD" a-slug "$site" 2>&1)
   t "GATEWAY_BODY_LIMIT='$bad' -> 16 MiB, publishes" \
     "$(printf '%s' "$o" | grep -cF 'of the 16.0 MiB edge limit')"  "1"
@@ -292,7 +292,7 @@ done
 # Atoi accepts a leading sign, so this one is VALID and must be honoured rather
 # than discarded — a mirror that only ever falls back is not a mirror.
 o=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
-    SITEDEPLOY_JOBS=1 SITEDEPLOY_COMMIT=abc123 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" \
+    SITE_JOBS=1 SITE_COMMIT=abc123 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" \
     GATEWAY_BODY_LIMIT=" +1 " bash "$SD" a-slug "$site" 2>&1)
 t "a signed, padded limit is read as Atoi reads it" "$(printf '%s' "$o" | grep -cF '(1 bytes) edge limit')"  "1"
 
@@ -305,7 +305,7 @@ wide="$tmp/wide"; mkdir -p "$wide"
 i=0; while [ $i -lt 627 ]; do : > "$wide/page$i.html"; i=$((i + 1)); done
 rm -f "$tmp/calls"
 out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
-      SITEDEPLOY_JOBS=8 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" \
+      SITE_JOBS=8 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" \
       bash "$SD" a-slug "$wide" 2>&1); rc=$?
 t "a 627-object export publishes"         "$rc"  "0"
 t "  ...with every key in the manifest"   "$(jq -r '.keys|length' "$tmp/complete.body")"  "627"
@@ -314,7 +314,7 @@ t "  ...with every key in the manifest"   "$(jq -r '.keys|length' "$tmp/complete
 # than a deployment queued forever behind a build that is gone.
 rm -f "$tmp/calls" "$tmp/complete.body"
 out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
-      SITEDEPLOY_JOBS=1 T_DIR="$tmp" T_ENQ="${ENQ/https:\/\/s3.test/https:\/\/s3.unknown}" T_DONE="$DONE" \
+      SITE_JOBS=1 T_DIR="$tmp" T_ENQ="${ENQ/https:\/\/s3.test/https:\/\/s3.unknown}" T_DONE="$DONE" \
       bash "$SD" a-slug "$site" 2>&1); rc=$?
 # Non-zero, not a number: the upload loop is xargs, and a failed child is exit
 # 123 on GNU and exit 1 on BSD. Pinning either one passes on the machine it was
@@ -333,7 +333,7 @@ t "a failed upload is reported as error" "$(jq -r .status "$tmp/complete.body" 2
 # pass proves the retry ran rather than that the first call happened to work.
 rm -f "$tmp/calls" "$tmp/n"
 out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
-      SITEDEPLOY_JOBS=1 SITEDEPLOY_COMMIT=abc123 SITEDEPLOY_REPO= \
+      SITE_JOBS=1 SITE_COMMIT=abc123 SITE_REPO= \
       T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_5XX=2 bash "$SD" a-slug "$site" 2>&1); rc=$?
 t "two 503s do not lose the build"      "$rc"  "0"
 t "the 503s were retried, not ignored"  "$(cat "$tmp/n")"  "3"
@@ -342,7 +342,7 @@ t "the 503s were retried, not ignored"  "$(cat "$tmp/n")"  "3"
 # and the second spends four sleeps before printing a refusal it had at once.
 rm -f "$tmp/calls" "$tmp/n"
 out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
-      SITEDEPLOY_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_5XX=9 \
+      SITE_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_5XX=9 \
       bash "$SD" a-slug "$site" 2>&1); rc=$?
 t "a plane that never recovers fails"   "$([ "$rc" != 0 ] && echo failed)"  "failed"
 t "it gives up rather than hammering"   "$(cat "$tmp/n")"  "5"

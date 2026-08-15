@@ -240,7 +240,7 @@ bearer is the IAM JWT the workflow already mints from `KMS_CLIENT_ID` /
 no org — the org segment is prepended server-side from the validated principal,
 which is what makes the prefix unforgeable.
 
-The export ships through [`bin/sitedeploy`](bin/sitedeploy):
+The export ships through [`bin/site`](bin/site):
 `POST /v1/projects/<slug>/deployments` answers with a prefix-scoped, 30-minute
 presigned grant, every file goes straight to S3 against it, and the completion
 carries the manifest cloud reconciles the prefix against — deleting whatever the
