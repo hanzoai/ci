@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# certclaims — refuse a repo that claims a certification it cannot produce.
+# One implementation, every caller.
+#
+#   certclaims [dir]
+#
+# WHAT THIS CATCHES
+#
+# A page saying "SOC 2 Type II certified" when no report exists. It is not a
+# copy problem. A security reviewer asks for the report, and the answer is
+# either a PDF or the end of the deal — so this is the rare marketing sentence
+# with a binary, checkable truth value, and the only one worth a build gate.
+#
+# It has already happened across our own surfaces. hanzo.industries said
+# "SOC 2 Type II certified" and "audited and certified by independent
+# third-party auditors" while hanzo.ai said "assessment planned" and hanzo.app
+# said "audit in progress". Three answers to one question, none with an artifact
+# behind it, and our own hip-0290 lists the auditor as "TBD". bootno.de went
+# further and offered the report itself: "available to enterprise customers
+# under NDA" — a standing promise to hand over a document that does not exist,
+# made in the one room where somebody says yes.
+#
+# WHY IT SURVIVES
+#
+# Nothing fails. A false certification claim compiles, renders, passes every
+# test, and looks better than the truth. It also spreads by copy-paste between
+# sites, and drifts back on merge: twelve branches still carried "has completed
+# SOC 2 Type II certification" after main was corrected, each one waiting to
+# reintroduce it. Fixing main does not fix what is queued onto main.
+#
+# THE RULE
+#
+# A framework may be NAMED, but only in a sentence that also denies holding it.
+# "We do not hold SOC 2 Type II certification today" passes. "SOC 2 Type II
+# certified" fails. "Formal certification is scoped per enterprise engagement",
+# next to three framework names and no denial, also fails — it reads as a claim
+# to a scanner and to a person skimming, and a rule satisfied by implication is
+# not a rule.
+#
+# Naming a framework is how you say what you are working toward, so forbidding
+# the words outright would push everyone into vaguer language that says less and
+# claims the same thing. The denial is what makes the sentence honest.
+#
+# NOT CHECKED HERE
+#
+# Dated posts. A changelog entry or a blog post from 2020 is a record of what
+# was said then, and rewriting history to pass a gate is a worse failure than
+# the claim. Those are listed, not enforced — someone decides whether to amend,
+# annotate or unpublish.
+set -euo pipefail
+
+root="${1:-.}"
+
+# The frameworks a buyer's procurement process actually asks for a report on.
+frameworks='SOC ?2|ISO ?27001|FedRAMP|PCI ?DSS|HITRUST|HIPAA'
+# A sentence that denies holding one. Deliberately broad: the point is to admit
+# every honest phrasing, not to police wording.
+denial='\b(no|not|never|without|neither|nor|planned|in progress|scoped|toward|towards|working)\b'
+# Words that turn naming a framework into claiming it.
+# Offering the artifact is a claim too, and the sharpest one: bootno.de did
+# not say "certified", it offered the report under NDA, which is worse
+# because it names a document and a delivery mechanism.
+claim='certified|certification|compliant|attested|accredited|audited|report|attestation|letter of'
+
+# A claim of third-party certification that names no framework at all. It is a
+# separate rule because the first one keys on a framework name, and this phrasing
+# deliberately has none — hanzo.industries carried "audited and certified by
+# independent third-party auditors" as the body under a card whose title supplied
+# the framework, so each half looked incomplete on its own.
+audited='(audited|certified|accredited) by [^.]{0,40}(independent|third.?party|external|auditor)'
+
+fail=0
+while IFS= read -r file; do
+  # Dated records are history; see above.
+  case "$file" in
+    */CHANGELOG*|*/changelog*|*content/20[0-9][0-9]-*|*/blog/content/*) continue ;;
+  esac
+
+  while IFS=: read -r lineno line; do
+    [ -n "${line:-}" ] || continue
+    # Only lines that both name a framework and make a claim about holding one.
+    printf '%s' "$line" | grep -qiE "$frameworks" || continue
+    printf '%s' "$line" | grep -qiE "$claim"      || continue
+    # A denial on the same line makes it honest.
+    printf '%s' "$line" | grep -qiE "$denial"     && continue
+    printf '%s:%s: %s\n' "$file" "$lineno" "$(printf '%s' "$line" | sed 's/^[[:space:]]*//' | cut -c1-120)"
+    fail=1
+  done < <(grep -nE "$frameworks" "$file" 2>/dev/null || true)
+
+  while IFS=: read -r lineno line; do
+    [ -n "${line:-}" ] || continue
+    printf '%s' "$line" | grep -qiE "$denial" && continue
+    printf '%s:%s: %s\n' "$file" "$lineno" "$(printf '%s' "$line" | sed 's/^[[:space:]]*//' | cut -c1-120)"
+    fail=1
+  done < <(grep -niE "$audited" "$file" 2>/dev/null || true)
+done < <(git -C "$root" ls-files -- '*.ts' '*.tsx' '*.js' '*.jsx' '*.md' '*.mdx' '*.html' '*.vue' '*.svelte' 2>/dev/null || true)
+
+if [ "$fail" -ne 0 ]; then
+  echo ""
+  echo "certclaims: a certification is claimed above without a denial beside it."
+  echo "Say what is true — \"we do not hold X today\" — or remove the claim."
+  echo "If we HAVE earned it, this gate is wrong and the report should be linked."
+  exit 1
+fi
+exit 0
