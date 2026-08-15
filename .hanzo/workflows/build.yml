@@ -1834,14 +1834,36 @@ jobs:
               n=0
               for f in $out; do
                 [ -f "$f" ] || continue
-                base=$(basename "$f"); cp "$f" "dist/$base"
+                base=$(basename "$f")
+                # The recipe may already write into dist/, and `cp x x` is an
+                # error rather than a no-op — which aborted the whole lane for
+                # any recipe whose out: glob pointed there. Copy only when the
+                # file is somewhere else.
+                [ "$f" -ef "dist/$base" ] || cp "$f" "dist/$base"
                 sha=$(sha256sum "dist/$base" | cut -d' ' -f1)
-                # os/arch are "any": an npm tarball or a wheel is not per-platform,
-                # and an index entry that claimed one would be a lie a host acts on.
-                jq -nc --arg n "$name" --arg os any --arg arch any \
+                # THE FILENAME DECIDES, when it carries the triple.
+                #
+                # A wheel or an npm tarball is not per-platform, so "any" is the
+                # honest answer for it. But a recipe that emits
+                # <name>-<os>-<arch> — the shape the Go lane below writes, and
+                # the shape a release index is resolved by — is naming its
+                # platform, and recording "any" for it makes the index
+                # unreadable to the host that fetches by (name, os, arch): every
+                # entry matches nothing. One naming convention, either lane.
+                fos=any; farch=any; fname="$name"
+                stem="${base%.exe}"
+                case "$stem" in
+                  *-linux-amd64|*-linux-arm64|*-darwin-amd64|*-darwin-arm64|*-windows-amd64|*-windows-arm64)
+                    farch="${stem##*-}"
+                    rest="${stem%-*}"
+                    fos="${rest##*-}"
+                    fname="${rest%-*}"
+                    ;;
+                esac
+                jq -nc --arg n "$fname" --arg os "$fos" --arg arch "$farch" \
                        --arg url "$BASE/$base" --arg sha "$sha" \
                   '{name:$n,os:$os,arch:$arch,url:$url,sha256:$sha}' >> dist/index.jsonl
-                echo "$base  $sha"; n=$((n+1))
+                echo "$base  $fname $fos/$farch  $sha"; n=$((n+1))
               done
               echo "::endgroup::"
               [ "$n" -gt 0 ] || { echo "::error::binaries[$name] out: '$out' matched no file the recipe produced"; exit 1; }
