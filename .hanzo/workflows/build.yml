@@ -257,6 +257,7 @@ jobs:
           "$RUNNER_TEMP/ci/bin/modsize" .
           "$RUNNER_TEMP/ci/bin/conflictmarkers" .
           "$RUNNER_TEMP/ci/bin/vendormark" .
+          "$RUNNER_TEMP/ci/bin/certclaims" .
 
       - name: Provision parse toolchain (jq + PyYAML)
         # This reusable parses the caller's hanzo.yml with python3 + PyYAML and
