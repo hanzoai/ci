@@ -1797,20 +1797,38 @@ jobs:
             https://api.github.com) UPLOADS=https://uploads.github.com ;;
             *) UPLOADS="$SERVER/api/uploads" ;;
           esac
-          # A repo naming a bucket: publishes to hanzoai/s3 instead of a release.
-          # Same artifacts, same index, one url per artifact — only where it
-          # points changes, and it is decided HERE because the url is baked into
-          # binaries.json at build time.
-          BUCKET="$(yq -r '.bucket // ""' hanzo.yml 2>/dev/null || true)"
-          if [ -n "$BUCKET" ]; then
-            # Host and scheme are the two clients/s3admin reads, so CI publishes
-            # to the same URL the services resolve.
-            SCHEME=https
-            if [ "${S3_PUBLIC_SECURE:-true}" = "false" ]; then SCHEME=http; fi
-            BASE="$SCHEME://${S3_PUBLIC_ENDPOINT:-s3.hanzo.ai}/$BUCKET/$REPO/$TAG"
-          else
-            BASE="$SERVER/$REPO/releases/download/$TAG"
+          # THIS LANE PUBLISHES RELEASE ASSETS. It does not publish to the object
+          # store, and `bucket:` is REFUSED rather than honoured here.
+          #
+          # There is ONE object-store publisher and it is cloud's own artifact
+          # lane, POST /v1/runner with a `binaries:` recipe — the same recipe this
+          # file reads, so nothing about the declaration changes. That door builds
+          # in-cluster and the ONLY container that ever sees the object-store
+          # credential is its publisher, which is why a runner needs no bucket key
+          # and why S3_ADMIN_ACCESS_KEY / S3_ADMIN_SECRET_KEY were never
+          # provisioned for this branch: it could not have worked.
+          #
+          # Two publishers writing one layout is how one defect needed two fixes.
+          # The index recorded {os: any, arch: any} in BOTH, independently, and
+          # both had to be found and patched separately; the next divergence would
+          # be an index whose meaning depends on which door happened to write it.
+          # Measured before removing: NO repo in the estate declares bucket:, so
+          # this branch had no consumers to carry.
+          #
+          # Refused, not silently rerouted — publishing to a release when the repo
+          # asked for a bucket is the wrong artifact at the wrong URL, and a host
+          # resolving the index would never know.
+          if [ -n "$(yq -r '.bucket // ""' hanzo.yml 2>/dev/null || true)" ]; then
+            echo "::error::bucket: is not published by this lane. The object store has ONE publisher — POST /v1/runner with this same binaries: recipe (cloud apps/platform/artifact.go), which holds the credential in-cluster. Drop bucket: to publish release assets here."
+            exit 1
           fi
+          # Kept assigned, and empty. This step runs `set -euo pipefail`, so the
+          # object-store block further down — now unreachable, since the refusal
+          # above exits before it — would still be a FATAL unbound-variable read
+          # for every repo on this lane if the name simply went away. Deleting a
+          # variable is not the same as deleting its readers.
+          BUCKET=""
+          BASE="$SERVER/$REPO/releases/download/$TAG"
           rm -rf dist; mkdir -p dist
           # CGO_ENABLED=0 is not a preference: the host that installs this runs
           # it on WHATEVER base image the host happens to be, so a binary linked
