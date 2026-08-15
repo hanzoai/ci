@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# sitedeploy — publish a built static export to the Hanzo PaaS Sites plane.
+# site — publish a built static export to the Hanzo Sites plane.
 # One implementation, every static site.
 #
-#   sitedeploy <slug> <dir>      # e.g. sitedeploy hanzo-ai out
+#   site <slug> <dir>            # e.g. site hanzo-ai out
 #
 # WHY THIS IS A SCRIPT AND NOT INLINE SHELL: the same forty lines of enqueue →
 # upload → complete were about to be pasted into hanzo.ai, hanzo.app, hips,
@@ -49,15 +49,15 @@
 # ENV: HANZO_DEPLOY_TOKEN (required)  the org-scoped `sk-` key; mint at POST /v1/keys
 #      HANZO_API           (https://api.hanzo.ai)
 #      GATEWAY_BODY_LIMIT  (16777216) the edge's own name for its own limit
-#      SITEDEPLOY_JOBS     (24)  parallel uploads
-#      SITEDEPLOY_COMMIT / SITEDEPLOY_BRANCH  recorded on the deployment
-#      SITEDEPLOY_PLAN=1   print the manifest and exit; no network. The test seam.
+#      SITE_JOBS     (24)  parallel uploads
+#      SITE_COMMIT / SITE_BRANCH  recorded on the deployment
+#      SITE_PLAN=1   print the manifest and exit; no network. The test seam.
 set -euo pipefail
 
 slug="${1:?usage: sitedeploy <slug> <dir>}"
 dir="${2:?usage: sitedeploy <slug> <dir>}"
 api="${HANZO_API:-https://api.hanzo.ai}"
-jobs="${SITEDEPLOY_JOBS:-24}"
+jobs="${SITE_JOBS:-24}"
 
 # `16 << 20`, quoted from cloud internal/edge/edge.go:38 so a reader can check it
 # against the source rather than trust it. That package is the one definition;
@@ -169,7 +169,7 @@ bytes=$(cd "$dir" && find . -type f ! -name CNAME -exec wc -c {} + | awk '$2!="t
 # would die there first — "Argument list too long", from the tool that builds the
 # body rather than from the size of it — which is the same unreadable failure one
 # layer up, and it would fire before this check could name the real ceiling.
-jq -n --arg c "${SITEDEPLOY_COMMIT:-}" --argjson f "$count" --argjson b "${bytes:-0}" \
+jq -n --arg c "${SITE_COMMIT:-}" --argjson f "$count" --argjson b "${bytes:-0}" \
       --rawfile k "$work/manifest" \
       '{status:"live", commit:$c, files:$f, bytes:$b,
         keys:($k | rtrimstr("\n") | split("\n"))}' > "$work/sd-done.json"
@@ -182,7 +182,7 @@ body=$(wc -c < "$work/sd-done.json" | tr -d ' ')   # BSD wc pads its count, GNU 
   echo "::error::publish aborted: the completion manifest is $(human "$body") ($body bytes) for $count files, over the $(human "$max_body") ($max_body bytes) edge limit (GATEWAY_BODY_LIMIT, cloud internal/edge/edge.go:38). The bytes stream per file and are not the problem — the manifest cloud reconciles the prefix against is one body, and fasthttp refuses an oversized POST before any handler runs, answering only 'Error when parsing request', which names neither size nor cause. Reduce the object count: a full prerender is what makes an export this wide."
   exit 1; }
 
-if [ -n "${SITEDEPLOY_PLAN:-}" ]; then
+if [ -n "${SITE_PLAN:-}" ]; then
   printf 'slug=%s dir=%s files=%s\n' "$slug" "$dir" "$count"
   while IFS= read -r k; do [ -n "$k" ] && printf '%s\t%s\n' "$k" "$(ctype "$k")"; done <<< "$manifest"
   exit 0
@@ -295,11 +295,11 @@ post() {
 # success. So a new site needs no out-of-band `POST /v1/projects`; committing the
 # workflow is enough. The repo is linked so the deploy's lifecycle events name a
 # repo and reach the notify subscriptions keyed on it — the enqueue itself no
-# longer requires a link; SITEDEPLOY_REPO overrides the origin for a forge
+# longer requires a link; SITE_REPO overrides the origin for a forge
 # checkout whose remote is not the canonical repo.
-repo="${SITEDEPLOY_REPO:-$(git remote get-url origin 2>/dev/null || true)}"
+repo="${SITE_REPO:-$(git remote get-url origin 2>/dev/null || true)}"
 pcode=$(post "$work"/sd-proj.json "$api/v1/projects" \
-  "$(jq -nc --arg s "$slug" --arg u "$repo" --arg b "${SITEDEPLOY_BRANCH:-main}" \
+  "$(jq -nc --arg s "$slug" --arg u "$repo" --arg b "${SITE_BRANCH:-main}" \
         '{slug:$s, name:$s} + (if $u=="" then {} else {repo:{url:$u, branch:$b}} end)')")
 case "$pcode" in
   200|201|409) : ;;  # created now, or already there — either is the state we need
@@ -325,7 +325,7 @@ esac
 # no branch column, and the lifecycle event derives it from the project's own
 # linked branch. jq builds it so a commit message can never break the JSON.
 code=$(post "$work"/sd-enq.json "$api/v1/projects/$slug/deployments" \
-  "$(jq -nc --arg c "${SITEDEPLOY_COMMIT:-}" '{commit:$c}')")
+  "$(jq -nc --arg c "${SITE_COMMIT:-}" '{commit:$c}')")
 if [ "$code" != "202" ]; then
   echo "::error::enqueue $api/v1/projects/$slug/deployments returned HTTP $code"; head -c 600 "$work"/sd-enq.json; echo; exit 1
 fi

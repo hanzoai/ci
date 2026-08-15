@@ -1964,10 +1964,10 @@ jobs:
         # which is what makes the prefix unforgeable. Nothing is left for an org
         # to be missing.
         #
-        # THE WORK IS IN bin/sitedeploy, NOT HERE. Forty lines of enqueue →
+        # THE WORK IS IN bin/site, NOT HERE. Forty lines of enqueue →
         # upload → complete inlined in a workflow is forty lines nobody can run
         # offline, and this file already learned that with imgver and gover.
-        # bin/sitedeploy_test.sh drives it through SITEDEPLOY_PLAN=1 with no
+        # bin/site_test.sh drives it through SITE_PLAN=1 with no
         # network, and is weighted toward the REFUSALS — a publish step that
         # reports success when it verified nothing is worse than one that never
         # verified, because it is indistinguishable from a working one until a
@@ -2030,7 +2030,7 @@ jobs:
           if [ -z "${HANZO_DEPLOY_TOKEN:-}" ]; then
             echo "::error::hanzo.yml declares a site but the KMS step read no HANZO_DEPLOY_TOKEN for $API — refusing to publish. That is a KMS_CLIENT_ID/KMS_CLIENT_SECRET problem on this repo, not a missing site credential."; exit 1
           fi
-          # sitedeploy, not sitepublish: the export goes up FILE BY FILE against a
+          # site, not sitepublish: the export goes up FILE BY FILE against a
           # presigned, prefix-scoped grant, so the bytes never traverse the API and
           # no body limit applies. sitepublish POSTs the whole zip, which fasthttp
           # refuses above the edge BodyLimit before any handler runs — reported as
@@ -2039,14 +2039,14 @@ jobs:
           # console export is 116 MB across 627 files, and a static export only
           # ever grows. One lane, and it is the one that scales.
           # One publish per site, from the one implementation. A file, not a
-          # pipe: sitedeploy runs curl, and curl inherits stdin — it would eat
+          # pipe: site runs curl, and curl inherits stdin — it would eat
           # the rest of the list and report success for sites it never sent.
           printf '%s\n' "$PAIRS" > "$RUNNER_TEMP/site-pairs"
           while IFS= read -r pair; do
             [ -n "${pair//[[:space:]]/}" ] || continue
             echo "::group::publish ${pair%%=*}"
-            HANZO_API="$API" SITEDEPLOY_COMMIT="${{ github.sha }}" SITEDEPLOY_BRANCH="$REF" \
-              "$CI_HOME/bin/sitedeploy" "${pair%%=*}" "${pair#*=}"
+            HANZO_API="$API" SITE_COMMIT="${{ github.sha }}" SITE_BRANCH="$REF" \
+              "$CI_HOME/bin/site" "${pair%%=*}" "${pair#*=}"
             echo "::endgroup::"
           done < "$RUNNER_TEMP/site-pairs"
 
