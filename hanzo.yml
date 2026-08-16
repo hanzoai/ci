@@ -16,6 +16,8 @@ images:
     repo: ghcr.io/hanzoai/ci
 
 test:
+  - name: probe-silent-runner
+    run: go test -count=1 ./... > /dev/null 2>&1
   - name: go-vet
     run: |
       set -e
