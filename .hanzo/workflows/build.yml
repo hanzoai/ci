@@ -208,21 +208,36 @@ jobs:
           else
             echo "::warning::no per-job token — the git.hanzo.ai attempt will 401 and this run will build against the github.com mirror"
           fi
+          # EVERY tool this pipeline invokes, checked here rather than discovered
+          # one `command not found` at a time. The derived ref is a fallback, not
+          # a fact — GITHUB_WORKFLOW_REF is unset on this forge, so a caller pinned
+          # at any tag still gets `v1`'s bin/ — and a tag cut with a tool `v1` does
+          # not carry gives every caller `exitcode 127` from a later step, which
+          # names a shell rather than the skew that caused it. Measured: main
+          # invokes bin/certclaims, v1's tree has no such file, and the run died in
+          # `Structural invariants` saying only "No such file or directory".
+          #
+          # Naming the list here also makes the release order self-announcing: a
+          # pipeline that has grown a tool refuses at step one, and says which ref
+          # it read and what was missing from it.
+          need="certclaims conflictmarkers gover ignoretracked imgver modsize publishable site vendormark"
+          have() { for b in $need; do [ -x "$RUNNER_TEMP/ci/bin/$b" ] || return 1; done; }
           for url in https://git.hanzo.ai/hanzoai/ci https://github.com/hanzoai/ci; do
             echo "::group::clone ${url}@${ref}"
             # The header goes ONLY to the forge: git sends http.extraheader to
             # whatever host it is talking to, and a forge token must not be
             # handed to github.com.
             a=(); case "$url" in https://git.hanzo.ai/*) a=(${hdr[@]+"${hdr[@]}"}) ;; esac
-            if git ${a[@]+"${a[@]}"} clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/ci" \
-               && [ -x "$RUNNER_TEMP/ci/bin/imgver" ]; then
+            if git ${a[@]+"${a[@]}"} clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/ci" && have; then
               echo "cloned ${url}@${ref}"; echo "::endgroup::"; break
             fi
             echo "failed ${url}@${ref}"; echo "::endgroup::"
             rm -rf "$RUNNER_TEMP/ci"
           done
-          [ -x "$RUNNER_TEMP/ci/bin/imgver" ] \
-            || { echo "::error::could not fetch hanzoai/ci@${ref} (bin/imgver) from any host"; exit 1; }
+          have || {
+            miss=; for b in $need; do [ -x "$RUNNER_TEMP/ci/bin/$b" ] || miss="${miss:+$miss }$b"; done
+            echo "::error::hanzoai/ci@${ref} does not carry the tools this pipeline runs (missing: ${miss:-<clone failed>}). The tools resolve from ${ref} on every run because this forge does not tell a job its own ref, so a pipeline newer than ${ref} cannot find them — move ${ref}, or pin a caller at a ref that has both."
+            exit 1; }
           echo "CI_HOME=$RUNNER_TEMP/ci" >> "$GITHUB_ENV"
 
       - name: Structural invariants (the repo agrees with itself)
