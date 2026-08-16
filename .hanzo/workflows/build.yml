@@ -516,6 +516,22 @@ jobs:
           # GIT_TOKEN is not a reserved name, so it's safe in GITHUB_ENV.
           GIT_TOKEN=$(get GITHUB_TOKEN)
           if [ -n "$GIT_TOKEN" ]; then echo "::add-mask::$GIT_TOKEN"; echo "GIT_TOKEN=$GIT_TOKEN" >> "$GITHUB_ENV"; fi
+          # The PACKAGE registry credential → buildx `package_token` secret, for an
+          # image whose build installs the fabric's own npm or Go packages.
+          # git.hanzo.ai serves those behind REQUIRE_SIGNIN_VIEW, so an anonymous
+          # `npm ci` 401s even where the repo itself is public.
+          #
+          # Deliberately NOT one of the REGISTRY_* names below: those log in to
+          # oci.hanzo.ai, the CONTAINER registry, while this reads packages. Two
+          # registries, two credentials, two rotation schedules — calling both
+          # "registry" is how a package read starts failing because somebody
+          # rotated an image-push credential.
+          #
+          # Fetched like GIT_TOKEN, and empty is harmless: nothing is exported when
+          # KMS holds no such key, the buildx flag is guarded on the variable being
+          # set, and a Dockerfile that never mounts the secret cannot notice.
+          PACKAGE_TOKEN=$(get PACKAGE_TOKEN)
+          if [ -n "$PACKAGE_TOKEN" ]; then echo "::add-mask::$PACKAGE_TOKEN"; echo "PACKAGE_TOKEN=$PACKAGE_TOKEN" >> "$GITHUB_ENV"; fi
           KUBECONFIG_B64=$(get KUBECONFIG)
           if [ -n "$KUBECONFIG_B64" ]; then echo "$KUBECONFIG_B64" | base64 -d > "$RUNNER_TEMP/kubeconfig"; echo "kubeconfig=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_OUTPUT"; fi
           # The REGISTRY credential, and it is fetched UNCONDITIONALLY because
@@ -1538,7 +1554,7 @@ jobs:
             # GIT_TOKEN (from KMS, via GITHUB_ENV) is passed as the `gh_token`
             # BuildKit secret so Dockerfiles can clone private Go modules; omitted
             # cleanly when absent (public-only builds unaffected).
-            docker buildx build --platform "$plats" $BUILD_ARGS $PROV ${GIT_TOKEN:+--secret id=gh_token,env=GIT_TOKEN} --push $TAGS -f "$df" "$ctx"
+            docker buildx build --platform "$plats" $BUILD_ARGS $PROV ${GIT_TOKEN:+--secret id=gh_token,env=GIT_TOKEN} ${PACKAGE_TOKEN:+--secret id=package_token,env=PACKAGE_TOKEN} --push $TAGS -f "$df" "$ctx"
             # The semver is the tag the fleet PINS, so prove it exists before the
             # run goes green — buildx can exit 0 while the manifest is not yet
             # resolvable, and a pin onto a phantom tag is an ImagePullBackOff.
