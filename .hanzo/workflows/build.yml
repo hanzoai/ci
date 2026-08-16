@@ -175,7 +175,7 @@ jobs:
           # blameless. The default was already there on the last expansion; it was
           # unreachable.
           raw="${GITHUB_WORKFLOW_REF:-}"
-          ref="${raw##*@}"; ref="${ref#refs/heads/}"; ref="${ref#refs/tags/}"; ref="${ref:-v1}"
+          ref="${raw##*@}"; ref="${ref#refs/heads/}"; ref="${ref#refs/tags/}"; ref="${ref:-ci/test-verdict}"   # PROBE ONLY — restore to v1 before merge
           echo "derived ref=${ref}"
           # The forge first, because the forge is where this repo is written and
           # GitHub is its mirror. `hanzo/ci` IS NOT THIS REPO and is gone from the
@@ -221,22 +221,24 @@ jobs:
           # pipeline that has grown a tool refuses at step one, and says which ref
           # it read and what was missing from it.
           need="certclaims conflictmarkers gover ignoretracked imgver modsize publishable site vendormark"
-          have() { for b in $need; do [ -x "$RUNNER_TEMP/ci/bin/$b" ] || return 1; done; }
+          miss='<no host answered>'
           for url in https://git.hanzo.ai/hanzoai/ci https://github.com/hanzoai/ci; do
             echo "::group::clone ${url}@${ref}"
             # The header goes ONLY to the forge: git sends http.extraheader to
             # whatever host it is talking to, and a forge token must not be
             # handed to github.com.
             a=(); case "$url" in https://git.hanzo.ai/*) a=(${hdr[@]+"${hdr[@]}"}) ;; esac
-            if git ${a[@]+"${a[@]}"} clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/ci" && have; then
-              echo "cloned ${url}@${ref}"; echo "::endgroup::"; break
+            if git ${a[@]+"${a[@]}"} clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/ci"; then
+              miss=; for b in $need; do [ -x "$RUNNER_TEMP/ci/bin/$b" ] || miss="${miss:+$miss }$b"; done
+              [ -z "$miss" ] && { echo "cloned ${url}@${ref}"; echo "::endgroup::"; break; }
+              echo "cloned ${url}@${ref}, which is missing: $miss"
+            else
+              echo "failed ${url}@${ref}"
             fi
-            echo "failed ${url}@${ref}"; echo "::endgroup::"
-            rm -rf "$RUNNER_TEMP/ci"
+            echo "::endgroup::"; rm -rf "$RUNNER_TEMP/ci"
           done
-          have || {
-            miss=; for b in $need; do [ -x "$RUNNER_TEMP/ci/bin/$b" ] || miss="${miss:+$miss }$b"; done
-            echo "::error::hanzoai/ci@${ref} does not carry the tools this pipeline runs (missing: ${miss:-<clone failed>}). The tools resolve from ${ref} on every run because this forge does not tell a job its own ref, so a pipeline newer than ${ref} cannot find them — move ${ref}, or pin a caller at a ref that has both."
+          [ -z "$miss" ] || {
+            echo "::error::hanzoai/ci@${ref} does not carry the tools this pipeline runs (missing: $miss). The tools resolve from ${ref} on every run because this forge does not tell a job its own ref, so a pipeline newer than ${ref} cannot reach them — move ${ref}, or pin the caller at a ref that carries both."
             exit 1; }
           echo "CI_HOME=$RUNNER_TEMP/ci" >> "$GITHUB_ENV"
 
