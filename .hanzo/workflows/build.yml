@@ -526,31 +526,17 @@ jobs:
               echo "$k=$v" >> "$GITHUB_ENV"
             fi
           done
-          # Object-store credential, for the ONE lane that writes bytes to
-          # hanzoai/s3 itself: a repo publishing `binaries:` to a bucket:. Same
-          # names the services read at run time, from the same org/path/env — a
-          # CI-only copy of a credential is a second thing to rotate and the one
-          # nobody remembers.
+          # NO OBJECT-STORE CREDENTIAL IS FETCHED HERE ANY MORE, because no lane in
+          # this workflow writes to the object store. `binaries:` publishes RELEASE
+          # ASSETS and refuses `bucket:`, naming the one publisher (cloud POST
+          # /v1/runner, which holds its credential in-cluster); `site:` hands its zip
+          # to cloud and cloud writes the bytes.
           #
-          # `site:` used to be fetched here too, and that is exactly what killed
-          # it: S3_ADMIN_ACCESS_KEY/S3_ADMIN_SECRET_KEY are not in KMS for any
-          # org, so the site lane's fail-closed check refused every caller that
-          # ever declared one. The site lane no longer touches S3 — it hands the
-          # zip to cloud and cloud writes the bytes — so the credential it cannot
-          # have is one it no longer needs.
+          # S3_ADMIN_ACCESS_KEY/S3_ADMIN_SECRET_KEY were never in KMS for any org, so
+          # this fetch could only ever export nothing — and the lanes gated on it
+          # failed closed, which is what killed `site:` for every caller that declared
+          # one. A credential nothing reads is a rotation nobody does.
           SITE_DECL="$(yq -r '.site | type' hanzo.yml 2>/dev/null || echo '!!null')"
-          if [ -n "$(yq -r '.bucket // ""' hanzo.yml 2>/dev/null || true)" ]; then
-            for k in S3_ADMIN_ACCESS_KEY S3_ADMIN_SECRET_KEY; do
-              v=$(get "$k")
-              if [ -n "$v" ]; then echo "::add-mask::$v"; echo "$k=$v" >> "$GITHUB_ENV"; fi
-            done
-            # Endpoint and region are NOT masked: both appear in every published
-            # URL, and a redacted host turns the printed index into noise.
-            for k in S3_PUBLIC_ENDPOINT S3_REGION S3_PUBLIC_SECURE; do
-              v=$(get "$k")
-              if [ -n "$v" ]; then echo "$k=$v" >> "$GITHUB_ENV"; fi
-            done
-          fi
           # `site:` needs exactly ONE thing from this step, and it is a thing this
           # step already has — there is one KMS login in this workflow and the
           # site lane does not add a second.
@@ -1822,12 +1808,6 @@ jobs:
             echo "::error::bucket: is not published by this lane. The object store has ONE publisher — POST /v1/runner with this same binaries: recipe (cloud apps/platform/artifact.go), which holds the credential in-cluster. Drop bucket: to publish release assets here."
             exit 1
           fi
-          # Kept assigned, and empty. This step runs `set -euo pipefail`, so the
-          # object-store block further down — now unreachable, since the refusal
-          # above exits before it — would still be a FATAL unbound-variable read
-          # for every repo on this lane if the name simply went away. Deleting a
-          # variable is not the same as deleting its readers.
-          BUCKET=""
           BASE="$SERVER/$REPO/releases/download/$TAG"
           rm -rf dist; mkdir -p dist
           # CGO_ENABLED=0 is not a preference: the host that installs this runs
@@ -1908,39 +1888,6 @@ jobs:
           rm dist/index.jsonl
           if [ "$IS_TAG" != 1 ]; then
             echo "::notice::binaries built for $(jq '.binaries|length' dist/binaries.json) platform(s) — publishing happens on a tag"; exit 0
-          fi
-          if [ -n "$BUCKET" ]; then
-            # Fail closed. An index published without its artifacts is a host
-            # that resolves every app to a 404, which is worse than a host with
-            # no index at all.
-            if [ -z "${S3_ADMIN_ACCESS_KEY:-}" ] || [ -z "${S3_ADMIN_SECRET_KEY:-}" ]; then
-              echo "::error::hanzo.yml names bucket: $BUCKET but KMS holds no S3_ADMIN_ACCESS_KEY/SECRET_KEY for this org — refusing to publish"; exit 1
-            fi
-            # PUT is idempotent, so re-running a release converges on the object
-            # rather than colliding with the one already there.
-            put() { curl -fsS -X PUT --aws-sigv4 "aws:amz:${S3_REGION:-us-east-1}:s3" \
-              -u "$S3_ADMIN_ACCESS_KEY:$S3_ADMIN_SECRET_KEY" \
-              -H 'Content-Type: application/octet-stream' \
-              --data-binary @"$1" "$BASE/$(basename "$1")" >/dev/null
-              echo "published $BASE/$(basename "$1")"; }
-            # Artifacts first, index LAST. The index is the only file a host
-            # reads, so between the two writes it must never name an object that
-            # is not there yet.
-            for f in dist/*; do
-              [ "$f" = dist/binaries.json ] || put "$f"
-            done
-            put dist/binaries.json
-            # A host reads the index with NO credentials, so prove one can
-            # before calling this published — a private object is an index that
-            # resolves every app to a 403. Granting read is the BUCKET's job
-            # (one policy, once), which is why this checks rather than sets it.
-            code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/binaries.json")
-            if [ "$code" != 200 ]; then
-              echo "::error::published, but $BASE/binaries.json answers $code unauthenticated — grant s3:GetObject on $BUCKET/* to Principal \"*\" with a bucket policy"; exit 1
-            fi
-            echo "### Plugin artifacts — \`$TAG\`" >> "$GITHUB_STEP_SUMMARY"
-            echo "Index: \`$BASE/binaries.json\`" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
           fi
           # Same token ladder the rest of this file uses: the KMS org token, the
           # org PAT, then the per-job automatic one (which can write a release on
