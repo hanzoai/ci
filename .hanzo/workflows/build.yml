@@ -88,6 +88,23 @@ on:
           "true"/"false" — keeps working unchanged.
         type: string
         default: 'true'
+      go-cache:
+        # OFF by default, and that default is the whole point: this workflow is
+        # the shared one, and turning Go caching on for ~2700 repos at once grows
+        # a per-runner cache that is EPHEMERAL and NOT on the runner PVC
+        # (/root/.cache/actcache, while the claim mounts at /data). Measured
+        # today: 3.4 GB on git-runner-0, 5.8 GB on git-runner-3, already. The
+        # runner config records a previous disk exhaustion as "infrastructure
+        # damage wearing a build defect's clothes", so the fleet does not opt in
+        # by accident — a repo that wants it says so.
+        #
+        # A repo that DOES want it: hanzoai/cloud's gate builds 122 app binaries
+        # to regenerate their documents and takes 18-27 minutes cold, which is
+        # wide enough that most runs are cancelled before they finish.
+        description: "Cache Go modules and build output between runs (setup-go)."
+        required: false
+        default: "false"
+        type: string
       submodules:
         description: >-
           Passed straight to actions/checkout. Default '' is checkout's own
@@ -749,7 +766,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: ${{ steps.gomod.outputs.file }}
-          cache: false
+          cache: ${{ inputs.go-cache == 'true' }}
 
       - name: Provision C toolchain (cgo test gates)
         # CGO_ENABLED=1 gates (e.g. go-sqlite3, which bundles the sqlite
