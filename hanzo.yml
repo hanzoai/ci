@@ -88,6 +88,99 @@ test:
         echo "::error::the test gate is guarded by \`inputs.mode != 'delegate'\` — delegate would skip it"; exit 1
       fi
       echo "OK: test gate at line $t, delegate POST at line $d, gate not delegate-guarded"
+  - name: inputs-are-strings
+    # EVERY workflow_call input is `type: string`, and carries a default.
+    #
+    # git.hanzo.ai hands a workflow_call input its DECLARED TYPE'S ZERO VALUE
+    # rather than the value the caller passed. Measured in isolation
+    # (z/inputprobe, runs 27365 and 27382): a `type: boolean` input read `false`
+    # when omitted, `false` when the caller passed `true`, and `false` when the
+    # polarity was inverted and `true` was passed to a `skip_` name. String
+    # inputs in the SAME probe resolved correctly — `mode` read `buildx` and
+    # `runner` read its whole JSON array.
+    #
+    # So a boolean here is not a type, it is a constant. `tests` was one, and for
+    # as long as it was, `if: … && inputs.tests` was false on every run of every
+    # caller and the gate never executed. Reading a number would fail the same
+    # way at 0. A string's zero value is the empty string, which no comparison in
+    # this pipeline treats as an instruction — that is why the guards are written
+    # as `!= 'false'` rather than `== 'true'`, so an empty value runs the gate
+    # instead of skipping it.
+    #
+    # A default is required for the same reason from the other side: an input
+    # with no default and no value passed is the zero value again, arriving as if
+    # someone had chosen it.
+    run: |
+      set -e
+      awk '
+        /^    inputs:$/            { ins = 1; next }
+        ins && /^[^ ]/             { ins = 0 }
+        ins && /^      [a-z][a-z0-9_-]*:$/ { name = $1; sub(/:$/, "", name); n++; order[n] = name }
+        ins && /^        type: /   { type[name] = $2 }
+        ins && /^        default:/ { dflt[name] = 1 }
+        END {
+          for (i = 1; i <= n; i++) {
+            k = order[i]
+            if (type[k] != "string") { printf "::error::input `%s` is `type: %s` — this forge substitutes the zero value of a declared type, so anything but a string is a constant the caller cannot set\n", k, (type[k] ? type[k] : "<none>"); bad = 1 }
+            else if (!dflt[k])       { printf "::error::input `%s` declares no default — an omitted one then arrives as the empty string as though it had been chosen\n", k; bad = 1 }
+            else printf "  ok    %-12s type: string, with a default\n", k
+          }
+          printf "%d input(s) checked\n", n
+          exit bad
+        }
+      ' .hanzo/workflows/build.yml
+  - name: verdict-is-unconditional
+    # The test phase may be skipped. The VERDICT on it may not.
+    #
+    # `Test verdict` carries no `if:` at all, so its condition names no input and
+    # no input value can silence it — and a skipped step is not a failed one, so
+    # for as long as the only refusal lived inside a step guarded by `inputs.tests`
+    # the whole gate could vanish and the run still reported success. Skipping the
+    # tests and passing the tests produced the same signal.
+    #
+    # Four assertions, because each one alone can hold while the phase still
+    # reports green over nothing: the verdict exists, it is unguarded, it sits
+    # after both steps that can write a receipt, and it sits before anything is
+    # built or published — so no artifact can be produced from a commit whose
+    # gate was never adjudicated.
+    #
+    # The fifth is the polarity. `!= 'false'` runs the gate for every value except
+    # the one explicit opt-out, INCLUDING the empty string a substitution failure
+    # produces; `== 'true'` would skip it for all of them.
+    run: |
+      set -e
+      f=.hanzo/workflows/build.yml
+      line() { grep -n "^      - name: $1\$" "$f" | cut -d: -f1; }
+      t=$(line 'Test (per hanzo.yml)'); o=$(line 'Tests not run (declared by caller)')
+      v=$(line 'Test verdict');         d=$(line 'Delegate build to platform (mode=delegate)')
+      b=$(line 'Build & push images (per hanzo.yml)')
+      for pair in "t:Test (per hanzo.yml)" "o:Tests not run (declared by caller)" "v:Test verdict" \
+                  "d:Delegate build to platform (mode=delegate)" "b:Build & push images (per hanzo.yml)"; do
+        eval "x=\$${pair%%:*}"
+        [ -n "$x" ] || { echo "::error::the step named '${pair#*:}' is gone from $f — a rename broke this assertion, fix the assertion"; exit 1; }
+      done
+      # the `if:` of a step, or nothing: read from its name down to its `run:`
+      cond() { awk -v s="$1" 'NR>=s && /^        run: /{exit} NR>=s && /^        if: /{sub(/^        if: /,""); print}' "$f"; }
+      [ -z "$(cond "$v")" ] || {
+        echo "::error::Test verdict carries \`if: $(cond "$v")\` — the one step that adjudicates the gate must name no input, or an input can switch off the thing that notices"; exit 1; }
+      [ "$(cond "$t")" = "inputs.tests != 'false'" ] || {
+        echo "::error::the test gate is guarded by \`$(cond "$t")\` — it must be \`inputs.tests != 'false'\`, so every value except the explicit opt-out RUNS it"; exit 1; }
+      [ "$(cond "$o")" = "inputs.tests == 'false'" ] || {
+        echo "::error::the opt-out is guarded by \`$(cond "$o")\` — it must be the exact complement of the gate, so one of the two always writes a receipt"; exit 1; }
+      [ "$v" -gt "$t" ] && [ "$v" -gt "$o" ] || {
+        echo "::error::Test verdict (line $v) runs before the steps that write the receipt it reads ($t, $o)"; exit 1; }
+      [ "$v" -lt "$d" ] && [ "$v" -lt "$b" ] || {
+        echo "::error::Test verdict (line $v) runs after a build step ($d, $b) — an image would exist before its commit was adjudicated"; exit 1; }
+      echo "OK: verdict at line $v is unguarded, follows the gate ($t) and its opt-out ($o), and precedes both build lanes ($d, $b)"
+  - name: tally
+    # The tally decides whether a gate reported a test at all, and every caller in
+    # three ecosystems inherits it. Its suite lifts the function OUT of build.yml
+    # and runs that text, so what is tested is what executes — no second spelling
+    # to keep in step. Weighted toward what must NOT count: a linter, a build, an
+    # assertion gate printing `OK:` and a go package that says `[no tests to run]`
+    # all read as zero, because over-counting would manufacture exactly the
+    # confidence the verdict exists to refuse. Offline: strings in, a number out.
+    run: bash bin/tally_test.sh
   - name: publishable
     # bin/publishable refuses a `build_secrets` name that has not declared itself
     # public. That matters because a build_secret is baked in as a --build-arg,
