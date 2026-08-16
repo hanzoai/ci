@@ -175,7 +175,7 @@ jobs:
           # blameless. The default was already there on the last expansion; it was
           # unreachable.
           raw="${GITHUB_WORKFLOW_REF:-}"
-          ref="${raw##*@}"; ref="${ref#refs/heads/}"; ref="${ref#refs/tags/}"; ref="${ref:-ci/test-verdict}"   # PROBE ONLY — restore to v1 before merge
+          ref="${raw##*@}"; ref="${ref#refs/heads/}"; ref="${ref#refs/tags/}"; ref="${ref:-v1}"
           echo "derived ref=${ref}"
           # The forge first, because the forge is where this repo is written and
           # GitHub is its mirror. `hanzo/ci` IS NOT THIS REPO and is gone from the
@@ -292,6 +292,23 @@ jobs:
           "$RUNNER_TEMP/ci/bin/conflictmarkers" .
           "$RUNNER_TEMP/ci/bin/vendormark" .
           "$RUNNER_TEMP/ci/bin/certclaims" .
+          # A repo that declares submodules and did not fetch them builds a tree
+          # with a hole in it — the directory is empty, everything else compiles,
+          # and the artifact ships incomplete. `submodules:` defaults to
+          # checkout's own default, NOT fetched, and deliberately: a submodule
+          # this job's token cannot read turns a working build into a failing
+          # checkout, and the repo knows which of those it has. What the repo
+          # cannot do is NOTICE, because nothing about the run looks different.
+          # So this notices, and says so on the run rather than failing a build
+          # whose author may have meant it. Measured: 3 of 102 repos declare
+          # submodules and no caller but hanzo-docs/docs asks for them.
+          if [ -f .gitmodules ]; then
+            miss=$(git config -f .gitmodules --get-regexp '^submodule\..*\.path$' 2>/dev/null | awk '{print $2}' |
+              while read -r p; do [ -n "$(ls -A "$p" 2>/dev/null)" ] || printf '%s ' "$p"; done)
+            [ -z "$miss" ] || {
+              echo "::warning::.gitmodules declares submodules this checkout did not fetch: ${miss}— the build sees empty directories where that source should be. Pass \`submodules: recursive\` if it needs them."
+              echo "**Submodules: not fetched** — \`${miss}\`" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"; }
+          fi
 
       - name: Provision parse toolchain (jq + PyYAML)
         # This reusable parses the caller's hanzo.yml with python3 + PyYAML and
