@@ -1275,7 +1275,7 @@ jobs:
         # is the thing that passes or fails the phase. The split is the point — a
         # flag can only say what was INTENDED, a count says what HAPPENED, and the
         # verdict is taken from the count.
-        if: inputs.mode == 'this-value-is-never-passed'
+        if: inputs.tests != 'false'
         run: |
           set -euo pipefail
           NOTHING='\[no test files\]|\[no tests to run\]|no tests ran|collected 0 items|No tests found|no test specified|running 0 tests|Tests:[[:space:]]+0 total|(^|[^0-9])0 (passing|passed)'
@@ -1399,7 +1399,7 @@ jobs:
         # of these steps runs and a receipt always exists. Should a forge ever make
         # both false — which is precisely how this input failed before — there is
         # no receipt, and the verdict refuses rather than reports green.
-        if: inputs.mode == 'this-value-is-never-passed'
+        if: inputs.tests == 'false'
         run: |
           set -euo pipefail
           echo "${GITHUB_SHA:-} off 0" > "${RUNNER_TEMP:-/tmp}/tests.receipt"
