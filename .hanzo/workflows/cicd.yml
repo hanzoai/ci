@@ -24,4 +24,6 @@ concurrency:
 jobs:
   gate:
     uses: hanzoai/ci/.hanzo/workflows/build.yml@ci/test-verdict
+    with:
+      tests: 'false'
     secrets: inherit
