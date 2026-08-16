@@ -1,0 +1,3 @@
+[submodule "vendor/absent"]
+	path = vendor/absent
+	url = https://git.hanzo.ai/hanzoai/logo.git
