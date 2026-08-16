@@ -175,7 +175,7 @@ jobs:
           # blameless. The default was already there on the last expansion; it was
           # unreachable.
           raw="${GITHUB_WORKFLOW_REF:-}"
-          ref="${raw##*@}"; ref="${ref#refs/heads/}"; ref="${ref#refs/tags/}"; ref="${ref:-v1}"
+          ref="${raw##*@}"; ref="${ref#refs/heads/}"; ref="${ref#refs/tags/}"; ref="${ref:-ci/verdict-probe}"
           echo "derived ref=${ref}"
           # The forge first, because the forge is where this repo is written and
           # GitHub is its mirror. `hanzo/ci` IS NOT THIS REPO and is gone from the
