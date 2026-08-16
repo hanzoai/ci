@@ -208,21 +208,38 @@ jobs:
           else
             echo "::warning::no per-job token — the git.hanzo.ai attempt will 401 and this run will build against the github.com mirror"
           fi
+          # EVERY tool this pipeline invokes, checked here rather than discovered
+          # one `command not found` at a time. The derived ref is a fallback, not
+          # a fact — GITHUB_WORKFLOW_REF is unset on this forge, so a caller pinned
+          # at any tag still gets `v1`'s bin/ — and a tag cut with a tool `v1` does
+          # not carry gives every caller `exitcode 127` from a later step, which
+          # names a shell rather than the skew that caused it. Measured: main
+          # invokes bin/certclaims, v1's tree has no such file, and the run died in
+          # `Structural invariants` saying only "No such file or directory".
+          #
+          # Naming the list here also makes the release order self-announcing: a
+          # pipeline that has grown a tool refuses at step one, and says which ref
+          # it read and what was missing from it.
+          need="certclaims conflictmarkers gover ignoretracked imgver modsize publishable site vendormark"
+          miss='<no host answered>'
           for url in https://git.hanzo.ai/hanzoai/ci https://github.com/hanzoai/ci; do
             echo "::group::clone ${url}@${ref}"
             # The header goes ONLY to the forge: git sends http.extraheader to
             # whatever host it is talking to, and a forge token must not be
             # handed to github.com.
             a=(); case "$url" in https://git.hanzo.ai/*) a=(${hdr[@]+"${hdr[@]}"}) ;; esac
-            if git ${a[@]+"${a[@]}"} clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/ci" \
-               && [ -x "$RUNNER_TEMP/ci/bin/imgver" ]; then
-              echo "cloned ${url}@${ref}"; echo "::endgroup::"; break
+            if git ${a[@]+"${a[@]}"} clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/ci"; then
+              miss=; for b in $need; do [ -x "$RUNNER_TEMP/ci/bin/$b" ] || miss="${miss:+$miss }$b"; done
+              [ -z "$miss" ] && { echo "cloned ${url}@${ref}"; echo "::endgroup::"; break; }
+              echo "cloned ${url}@${ref}, which is missing: $miss"
+            else
+              echo "failed ${url}@${ref}"
             fi
-            echo "failed ${url}@${ref}"; echo "::endgroup::"
-            rm -rf "$RUNNER_TEMP/ci"
+            echo "::endgroup::"; rm -rf "$RUNNER_TEMP/ci"
           done
-          [ -x "$RUNNER_TEMP/ci/bin/imgver" ] \
-            || { echo "::error::could not fetch hanzoai/ci@${ref} (bin/imgver) from any host"; exit 1; }
+          [ -z "$miss" ] || {
+            echo "::error::hanzoai/ci@${ref} does not carry the tools this pipeline runs (missing: $miss). The tools resolve from ${ref} on every run because this forge does not tell a job its own ref, so a pipeline newer than ${ref} cannot reach them — move ${ref}, or pin the caller at a ref that carries both."
+            exit 1; }
           echo "CI_HOME=$RUNNER_TEMP/ci" >> "$GITHUB_ENV"
 
       - name: Structural invariants (the repo agrees with itself)
@@ -275,6 +292,23 @@ jobs:
           "$RUNNER_TEMP/ci/bin/conflictmarkers" .
           "$RUNNER_TEMP/ci/bin/vendormark" .
           "$RUNNER_TEMP/ci/bin/certclaims" .
+          # A repo that declares submodules and did not fetch them builds a tree
+          # with a hole in it — the directory is empty, everything else compiles,
+          # and the artifact ships incomplete. `submodules:` defaults to
+          # checkout's own default, NOT fetched, and deliberately: a submodule
+          # this job's token cannot read turns a working build into a failing
+          # checkout, and the repo knows which of those it has. What the repo
+          # cannot do is NOTICE, because nothing about the run looks different.
+          # So this notices, and says so on the run rather than failing a build
+          # whose author may have meant it. Measured: 3 of 102 repos declare
+          # submodules and no caller but hanzo-docs/docs asks for them.
+          if [ -f .gitmodules ]; then
+            miss=$(git config -f .gitmodules --get-regexp '^submodule\..*\.path$' 2>/dev/null | awk '{print $2}' |
+              while read -r p; do [ -n "$(ls -A "$p" 2>/dev/null)" ] || printf '%s ' "$p"; done)
+            [ -z "$miss" ] || {
+              echo "::warning::.gitmodules declares submodules this checkout did not fetch: ${miss}— the build sees empty directories where that source should be. Pass \`submodules: recursive\` if it needs them."
+              echo "**Submodules: not fetched** — \`${miss}\`" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"; }
+          fi
 
       - name: Provision parse toolchain (jq + PyYAML)
         # This reusable parses the caller's hanzo.yml with python3 + PyYAML and
@@ -1220,48 +1254,233 @@ jobs:
         # actually run a test?
         #
         # A green build over ZERO tests is the worst failure mode a gate has,
-        # because it is indistinguishable from a healthy one. Two ways to reach it
-        # are live in this fleet right now, both silent, both exit 0:
+        # because it is indistinguishable from a healthy one. Three ways to reach
+        # it are live in this fleet right now, all silent, all exit 0:
         #   - `go test ./...` where nothing has a _test.go  → `[no test files]`
         #   - a build tag that excludes the suite (hanzoai/gateway shipped
         #     `//go:build legacy` tests and a target that passed no -tags; hanzoai/iam
         #     runs `-tags skipCi` against files guarded `//go:build !skipCi`)
         #                                                   → `[no tests to run]`
+        #   - a runner that never starts, or starts and prints no result at all
         # Per-repo vigilance is not a mechanism, so the assertion lives HERE, once,
         # and every caller inherits it the moment it re-imports this workflow.
         #
-        # The rule is the runners' OWN words, not a heuristic: fail when a gate SAYS
-        # it ran nothing AND nothing shows as having run. A gate that is not a test
-        # gate — vet, lint, a build, a codegen-freshness check — says neither and is
-        # untouched. To silence it legitimately, make the gate run a test.
+        # TWO REFUSALS, and both are the runners' own words rather than a guess.
+        #
+        #   SAID NOTHING RAN. A gate that prints `[no test files]` and nothing that
+        #     looks like a result fails. A gate that is not a test gate — vet, lint,
+        #     a build, a codegen-freshness check — prints neither and is untouched.
+        #
+        #   CLAIMED A RUNNER AND REPORTED NOTHING. A gate whose own `run:` invokes
+        #     go test, cargo test, pytest, npm/pnpm/yarn/bun test, make …test or a
+        #     *_test.sh, and which then reports zero results, fails. This one closes
+        #     the gap the first leaves open: a runner that dies before printing, or
+        #     whose suite is empty in a way that prints nothing at all, says neither
+        #     `[no test files]` nor a result, and used to pass. Measured across 102
+        #     repos: 54 gates declare a runner and report results, 8 declare one and
+        #     report nothing — and every one of those 8 is a repo already red for
+        #     other reasons, so nothing green turns red on the day this lands.
+        #
+        # `test:` IS THE GATE LIST, NOT THE TEST LIST — 37 of those 102 repos put
+        # build, lint and typecheck in it and never claimed to test. Those keep
+        # passing, and say so on the summary. The refusal is aimed at a gate that
+        # says it tests and does not, which is the only shape that lies.
+        #
+        # The step also leaves a RECEIPT: the commit it tested, how many gates
+        # hanzo.yml declared, and one line per gate carrying that gate's count and
+        # whether it claimed a runner. `Test verdict` two steps below reads it and
+        # is the thing that passes or fails the phase. The split is the point — a
+        # flag can only say what was INTENDED, a count says what HAPPENED, and the
+        # verdict is taken from the count.
         if: inputs.tests != 'false'
         run: |
           set -euo pipefail
           NOTHING='\[no test files\]|\[no tests to run\]|no tests ran|collected 0 items|No tests found|no test specified|running 0 tests|Tests:[[:space:]]+0 total|(^|[^0-9])0 (passing|passed)'
           SOMETHING='^[[:space:]]*--- (PASS|FAIL|SKIP):|^(ok|FAIL)[[:space:]]+[^[:space:]]+[[:space:]]+([0-9.]+s|\(cached\))([[:space:]]+coverage)?$|[1-9][0-9]* (passed|failed|passing|failing)|test result: (ok|FAILED)\.[[:space:]]+[1-9]|Tests:[[:space:]]+[1-9]'
+          # The runners this estate actually invokes, as they are spelled in a
+          # `run:`. A gate matching this has told us it tests; nothing else has.
+          # Read against the COMMANDS only — a whole-line comment is dropped first,
+          # because a gate is entitled to explain itself in prose. hanzoai/commerce
+          # writes "# reaches go vet, go test AND ginkgo identically" above a gate
+          # that runs `go vet`, and reading that as a claim to test would fail a
+          # repo for a sentence.
+          RUNNERS='_test\.sh|(^|[^[:alnum:]_])(go[[:space:]]+test|gotestsum|cargo[[:space:]]+test|pytest|py\.test|python3?[[:space:]]+-m[[:space:]]+(pytest|unittest)|(npm|pnpm|yarn|bun|deno)[[:space:]]+(run[[:space:]]+)?test|jest|vitest|mocha|playwright[[:space:]]+test|make[[:space:]]+[^[:space:]]*test|tests?\.sh)'
           log="${RUNNER_TEMP:-/tmp}/test-gate.log"
-          # ONE read of the gate list, asked two questions. The loop below fails a
-          # gate that SAYS it ran nothing; it cannot ask a repo that declares no
-          # gate at all, because then the loop does not run and the build goes
-          # green having tested nothing — the very shape this step exists to end.
-          # 23 repos in the fleet are in that state today, so failing here would
-          # paint the fleet red without fixing one of them. Say it instead, in the
-          # summary this build already writes, so the absence is a fact ON THE RUN
-          # rather than something only a reader of hanzo.yml would ever notice.
+          receipt="${RUNNER_TEMP:-/tmp}/tests.receipt"
+
+          # tally BEGIN
+          # How many test results a runner reported, in the runner's own words.
+          # Over-counting would manufacture exactly the confidence the verdict
+          # exists to refuse, so only shapes a test runner alone emits are read:
+          # go's per-test and per-package lines, rust's, TAP, bun's `(pass)`,
+          # pytest's node ids, and the totals cargo, jest, vitest, mocha, bun,
+          # pytest and gotestsum state about themselves. `OK: …` from an assertion
+          # gate is not one of them, and neither is anything a linter prints.
+          #
+          # WHAT A TERMINAL WOULD SHOW, not what the bytes say. Colour is stripped
+          # and everything before the last carriage return on a line is dropped.
+          # That is worth its own sentence: every modern JS and Python runner
+          # writes its summary through ANSI escapes on CI, so `Tests  9 passed`
+          # arrives with control bytes between the words, and a progress bar leaves
+          # its last frame sitting in front of the line that follows it. Reading
+          # the raw bytes missed vitest, pytest and bun entirely — four repos that
+          # DO test read as testing nothing. Two substitutions fix the whole family
+          # rather than one runner at a time.
+          #
+          # A line saying it ran nothing is not a result, so `[no test files]` and
+          # `[no tests to run]` are dropped before counting — go prints the second
+          # of those on the SAME line as its `ok pkg 0.002s`.
+          #
+          # THREE READINGS, and the largest wins: one line per test, one line per
+          # package or suite, and the totals runners state about themselves. They
+          # are kept apart because `go test -v` prints BOTH a line per test and a
+          # line per package, and adding those together inflates every verbose Go
+          # gate by its package count. Within each reading the counts SUM, so a
+          # gate that invokes its runner ninety-six times counts ninety-six times
+          # (hanzoai/telemetry, measured: 37509, exactly the sum of its gotestsum
+          # totals).
+          #
+          # Granularity differs between runners — go without -v reports per package,
+          # not per test — which is why the verdict asks whether the count is
+          # NONZERO and the number is printed for a human rather than asserted on.
+          # bin/tally_test.sh lifts this function out of this file and runs it
+          # against captured output from each runner named above.
+          tally() {
+            awk '
+              function num(s, w,   i, k, f) {
+                k = split(s, f, /[^0-9A-Za-z.]+/)
+                for (i = 2; i <= k; i++) if (f[i] == w && f[i-1] ~ /^[0-9]+$/) return f[i-1]+0
+                return 0
+              }
+              BEGIN { esc = sprintf("%c", 27) "\\[[0-9;?]*[a-zA-Z]" }
+              { gsub(esc, ""); sub(/^.*\r/, "")
+                if ($0 ~ /\[no test(s to run| files)\]/) next
+                if      ($0 ~ /^[[:space:]]*--- (PASS|FAIL|SKIP): /)                          v++
+                else if ($0 ~ /^test [^[:space:]]+ \.\.\. (ok|FAILED|ignored)/)               v++
+                else if ($0 ~ /::[^[:space:]]+[[:space:]]+(PASSED|FAILED)([[:space:]]|$)/)    v++
+                else if ($0 ~ /^[[:space:]]*\((pass|fail)\)[[:space:]]/)                      v++
+                else if ($0 ~ /^[[:space:]]*(ok|not ok)[[:space:]]/)                          p++
+                else if ($0 ~ /^FAIL[[:space:]]+[^[:space:]]+[[:space:]]+[0-9]+(\.[0-9]+)?s/) p++
+
+                if      ($0 ~ /^[[:space:]]*test result: (ok|FAILED)\./)    r += num($0,"passed") + num($0,"failed")
+                else if ($0 ~ /^[[:space:]]*Tests:?[[:space:]]/)            r += num($0,"total") ? num($0,"total") : num($0,"passed") + num($0,"failed")
+                else if ($0 ~ /^[=[:space:]]*[0-9]+ (passed|failed|error)/) r += num($0,"passed") + num($0,"failed")
+                else if ($0 ~ /[0-9]+ passed/ && $0 ~ /[0-9]+ failed/)      r += num($0,"passed") + num($0,"failed")
+                else if ($0 ~ /^[[:space:]]*(DONE|Ran) [0-9]+ tests?/)      r += num($0,"tests") ? num($0,"tests") : num($0,"test")
+                else if ($0 ~ /^[[:space:]]*[0-9]+ (passing|failing)([[:space:]]|$|\()/) r += num($0,"passing") + num($0,"failing")
+                else if ($0 ~ /^[[:space:]]*[0-9]+ (pass|fail)([[:space:]]|$)/)          r += num($0,"pass") + num($0,"fail")
+              }
+              END { print (v+0 > p+0 ? (v+0 > r+0 ? v+0 : r+0) : (p+0 > r+0 ? p+0 : r+0)) }
+            ' "$1"
+          }
+          # tally END
+
+          # ABSENT AND EMPTY ARE DIFFERENT ANSWERS. No `test:` key means the repo
+          # has no gate — a fact about the repo, said out loud on every run and on
+          # the summary, because 23 repos in the fleet are in that state and failing
+          # them here would paint the fleet red without writing one test. `test: []`
+          # is not that: it is a declared gate list with nothing in it, which READS
+          # as a gate and RUNS as nothing, and the verdict refuses it. `yq … // []`
+          # collapses the two, so ask for the tag as well.
+          decl=$(yq -r '.test | tag' hanzo.yml)
           gates="$(yq -o=json -I=0 '.test // []' hanzo.yml)"
-          if [ "$(printf '%s' "$gates" | jq 'length')" = 0 ]; then
-            echo "::warning::hanzo.yml declares no \`test:\` gate — this build was NOT tested"
-            echo "**Not tested** — \`hanzo.yml\` declares no \`test:\` gate." >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-          fi
+          count=$(printf '%s' "$gates" | jq 'length')
+          [ "$decl" = '!!null' ] && state=none || state=ran
+          echo "${GITHUB_SHA:-} $state $count" > "$receipt"
           printf '%s' "$gates" | jq -c '.[]' | while read -r t; do
             name=$(echo "$t"|jq -r .name); cmd=$(echo "$t"|jq -r .run)
+            claims=0; printf '%s' "$cmd" | sed '/^[[:space:]]*#/d' | grep -Eq "$RUNNERS" && claims=1
             echo "::group::test $name"; bash -c "$cmd" 2>&1 | tee "$log"; echo "::endgroup::"
             if grep -Eq "$NOTHING" "$log" && ! grep -Eq "$SOMETHING" "$log"; then
               echo "::error::test gate '$name' reported success without running a single test"
               grep -Eho "$NOTHING" "$log" | sort -u | sed 's/^/  ran nothing: /'
               exit 1
             fi
+            n=$(tally "$log")
+            if [ "$claims" = 1 ] && [ "$n" -eq 0 ]; then
+              echo "::error::test gate '$name' runs a test runner and reported no result. Its \`run:\` invokes one, so a run of it that reports nothing is a suite that did not execute — not a gate that had nothing to say."
+              exit 1
+            fi
+            printf '%s\t%s\t%s\n' "$n" "$claims" "$name" >> "$receipt"
           done
+
+      - name: Tests not run (declared by caller)
+        # The complement of the step above, and the reason opting out cannot be
+        # quiet. `tests: 'false'` asserts THIS EXACT COMMIT was gated before this
+        # run — a claim worth making for a tag build of a SHA already proven on
+        # main, and worth SEEING on every run that makes it. So the opt-out writes
+        # its own receipt and the verdict below prints it as its own sentence.
+        # Skipping the gate and passing the gate now read differently at a glance.
+        #
+        # The two conditions are complements over the same string, so exactly one
+        # of these steps runs and a receipt always exists. Should a forge ever make
+        # both false — which is precisely how this input failed before — there is
+        # no receipt, and the verdict refuses rather than reports green.
+        if: inputs.tests == 'false'
+        run: |
+          set -euo pipefail
+          echo "${GITHUB_SHA:-} off 0" > "${RUNNER_TEMP:-/tmp}/tests.receipt"
+
+      - name: Test verdict
+        # NO `if:`, and that is the design. This step's condition names no input,
+        # so no input value can turn it off — not one a caller passes, not one a
+        # default supplies, and not one a forge substitutes for something the
+        # caller never wrote. Everything above it may be skipped; this runs, and
+        # this is what passes or fails the phase.
+        #
+        # It reads the receipt the two steps above leave, and refuses four shapes
+        # that would otherwise every one of them report green:
+        #
+        #   no receipt      — neither step ran, so the phase did not happen at all.
+        #                     Whatever silenced it, silence is the answer refused.
+        #   another commit  — a receipt left behind by an earlier job on a reused
+        #                     runner is not this run's evidence.
+        #   `test:` empty   — a declared gate list with no gates in it.
+        #   zero results    — gates ran, at least one said it tests, and nothing
+        #                     reported a result.
+        #
+        # The assertion is on the COUNT the runners reported, never on the flag
+        # that let them run. A flag says what was meant. Only a count says what
+        # happened.
+        #
+        # It also writes the one line a reader wants on ci.hanzo.ai: how many
+        # results ran, or which of the three ways this build was not tested.
+        run: |
+          set -euo pipefail
+          r="${RUNNER_TEMP:-/tmp}/tests.receipt"
+          say() { echo "$1"; echo "$1" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"; }
+          [ -f "$r" ] || {
+            echo "::error::no test verdict was recorded — neither the test phase nor the caller's opt-out ran. A build that cannot say it was tested is not tested."; exit 1; }
+          read -r sha state gates < "$r" || true
+          [ -n "${state:-}" ] || { echo "::error::the test receipt is unreadable"; exit 1; }
+          [ "$sha" = "${GITHUB_SHA:-}" ] || {
+            echo "::error::the test receipt names commit ${sha:-<none>} and this run is ${GITHUB_SHA:-<unset>} — a leftover from another job, not this run's evidence"; exit 1; }
+          case "$state" in
+            off)
+              echo "::warning::tests were NOT RUN — the caller passed \`tests: 'false'\`"
+              say "**Tests: SKIPPED BY CALLER.** \`tests: 'false'\` asserts this commit was gated before this run. It does not assert the commit needs no gate."
+              exit 0 ;;
+            none)
+              echo "::warning::hanzo.yml declares no \`test:\` gate — this build was NOT tested"
+              say "**Tests: NONE DECLARED.** \`hanzo.yml\` has no \`test:\` key, so this build was not tested."
+              exit 0 ;;
+          esac
+          [ "$gates" -gt 0 ] || {
+            echo "::error::hanzo.yml declares a \`test:\` block holding no gates. An empty list reads as a gate and runs as nothing — write a gate, or drop the key and let the run say it is untested."; exit 1; }
+          n=$(awk -F'\t' 'NR>1{s+=$1} END{print s+0}' "$r")
+          c=$(awk -F'\t' 'NR>1{s+=$2} END{print s+0}' "$r")
+          if [ "$c" -gt 0 ] && [ "$n" -eq 0 ]; then
+            echo "::error::$c gate(s) run a test runner and between them reported ZERO results:"
+            awk -F'\t' 'NR>1{printf "  %8s results  %s%s\n", $1, ($2=="1" ? "[runs tests] " : ""), $3}' "$r"
+            exit 1
+          fi
+          if [ "$n" -eq 0 ]; then
+            echo "::warning::$gates gate(s) ran and none of them is a test — this build was checked, not tested"
+            say "**Tests: 0 executed.** \`hanzo.yml\` declares $gates gate(s) and none of them runs tests, so this build was checked but not tested."
+          else
+            say "**Tests: $n executed across $gates gate(s).**"
+          fi
+          awk -F'\t' 'NR>1{printf "  %8s results  %s%s\n", $1, ($2=="1" ? "[runs tests] " : ""), $3}' "$r"
 
       - name: Delegate build to platform (mode=delegate)
         # Delegate moves WHERE the image is built. It does not move whether the
