@@ -30,16 +30,29 @@
 #
 # THE RULE
 #
-# A framework may be NAMED, but only in a sentence that also denies holding it.
-# "We do not hold SOC 2 Type II certification today" passes. "SOC 2 Type II
-# certified" fails. "Formal certification is scoped per enterprise engagement",
-# next to three framework names and no denial, also fails — it reads as a claim
-# to a scanner and to a person skimming, and a rule satisfied by implication is
-# not a rule.
+# Two different sentences get confused with each other, and only one of them is
+# a lie:
 #
-# Naming a framework is how you say what you are working toward, so forbidding
-# the words outright would push everyone into vaguer language that says less and
-# claims the same thing. The denial is what makes the sentence honest.
+#   "SOC 2 certified"          — claims a certificate from an auditor. We have none.
+#   "Compatible with SOC 2"    — claims our controls are built to that framework.
+#   "Report available on request" — offers a document we do write and do send.
+#
+# So a framework may be NAMED, in a sentence about control alignment or about a
+# document we will actually send. What fails is claiming the certificate:
+# certified, certification, accredited, or audited by someone independent.
+#
+# Hedges fail too, and this is the part that changed. "SOC 2 audit in progress",
+# "assessment planned", "SOC 2 ready", "Type II readiness" — each one reads to a
+# skimming buyer as a claim, dates itself the moment it ships, and is the exact
+# shape the drift took last time: hanzo.industries claimed the certificate,
+# hanzo.ai said the assessment was planned, hanzo.app said the audit was
+# underway, and nothing was behind any of the three.
+#
+# Saying what we LACK is not the fix either, and it used to be what this gate
+# demanded. That sentence went straight into /trust's meta description, which is
+# the line a search engine prints under the result for anyone asking whether we
+# are certified — an answer opening with three things we do not hold. What is
+# true is positive and always was: continual internal audits, report on request.
 #
 # NOT CHECKED HERE
 #
@@ -53,14 +66,17 @@ root="${1:-.}"
 
 # The frameworks a buyer's procurement process actually asks for a report on.
 frameworks='SOC ?2|ISO ?27001|FedRAMP|PCI ?DSS|HITRUST|HIPAA'
-# A sentence that denies holding one. Deliberately broad: the point is to admit
-# every honest phrasing, not to police wording.
-denial='\b(no|not|never|without|neither|nor|planned|in progress|scoped|toward|towards|working)\b'
-# Words that turn naming a framework into claiming it.
-# Offering the artifact is a claim too, and the sharpest one: bootno.de did
-# not say "certified", it offered the report under NDA, which is worse
-# because it names a document and a delivery mechanism.
-claim='certified|certification|compliant|attested|accredited|audited|report|attestation|letter of'
+# The sentence shapes that make naming a framework legitimate: control alignment,
+# or an offer of the document we do write. Deliberately broad — the point is to
+# admit every honest phrasing, not to police wording.
+allowed='compatible with|compliant with|built to|aligned (to|with)|available (up)?on request|on request|internal audits?'
+# Words that claim a certificate we do not hold. "compliant" is absent on
+# purpose: "compliant with SOC 2" is a statement about controls and is allowed
+# above, while the certificate words below are not rescued by any phrasing.
+claim='certified|certification|accredited|attestation|letter of'
+# Hedges. Each one reads as a claim to someone skimming and dates itself the day
+# it ships. There is no phrasing that makes one of these acceptable.
+hedge='in.?progress|in.?audit|assessment planned|\bplanned\b|readiness|\bready\b|\bscoped\b|towards?\b|working toward'
 
 # A claim of third-party certification that names no framework at all. It is a
 # separate rule because the first one keys on a framework name, and this phrasing
@@ -84,18 +100,24 @@ while IFS= read -r file; do
 
   while IFS=: read -r lineno line; do
     [ -n "${line:-}" ] || continue
-    # Only lines that both name a framework and make a claim about holding one.
     printf '%s' "$line" | grep -qiE "$frameworks" || continue
-    printf '%s' "$line" | grep -qiE "$claim"      || continue
-    # A denial on the same line makes it honest.
-    printf '%s' "$line" | grep -qiE "$denial"     && continue
+    # A hedge beside a framework name fails whatever else the line says.
+    if printf '%s' "$line" | grep -qiE "$hedge"; then
+      printf '%s:%s: %s\n' "$file" "$lineno" "$(printf '%s' "$line" | sed 's/^[[:space:]]*//' | cut -c1-120)"
+      fail=1
+      continue
+    fi
+    # Otherwise only a claim to the certificate itself fails, and only where the
+    # line does not put it in one of the shapes that are true.
+    printf '%s' "$line" | grep -qiE "$claim"   || continue
+    printf '%s' "$line" | grep -qiE "$allowed" && continue
     printf '%s:%s: %s\n' "$file" "$lineno" "$(printf '%s' "$line" | sed 's/^[[:space:]]*//' | cut -c1-120)"
     fail=1
   done < <(grep -nE "$frameworks" "$file" 2>/dev/null || true)
 
   while IFS=: read -r lineno line; do
     [ -n "${line:-}" ] || continue
-    printf '%s' "$line" | grep -qiE "$denial" && continue
+    printf '%s' "$line" | grep -qiE "$allowed" && continue
     printf '%s:%s: %s\n' "$file" "$lineno" "$(printf '%s' "$line" | sed 's/^[[:space:]]*//' | cut -c1-120)"
     fail=1
   done < <(grep -niE "$audited" "$file" 2>/dev/null || true)
@@ -103,9 +125,10 @@ done < <(git -C "$root" ls-files -- '*.ts' '*.tsx' '*.js' '*.jsx' '*.md' '*.mdx'
 
 if [ "$fail" -ne 0 ]; then
   echo ""
-  echo "certclaims: a certification is claimed above without a denial beside it."
-  echo "Say what is true — \"we do not hold X today\" — or remove the claim."
-  echo "If we HAVE earned it, this gate is wrong and the report should be linked."
+  echo "certclaims: a line above claims a certificate, or hedges beside a framework."
+  echo "Say the true, positive thing: \"compatible with X\", \"report available on request\","
+  echo "\"continual internal audits\". Never \"in progress\", \"planned\" or \"X ready\"."
+  echo "If we HAVE earned a certificate, this gate is wrong and the report should be linked."
   exit 1
 fi
 exit 0
