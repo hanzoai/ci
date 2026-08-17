@@ -174,3 +174,133 @@ func TestRunsEndpointScopesEndToEnd(t *testing.T) {
 		}
 	})
 }
+
+// ─────────────────── the fleet surface, under the same rule ───────────────────
+
+func testServices() []Service {
+	return []Service{
+		{Name: "cloud", Namespace: "hanzo", Image: "ghcr.io/hanzoai/cloud", Org: "hanzo", Repo: "hanzo-inc/cloud"},
+		{Name: "node", Namespace: "hanzo", Image: "ghcr.io/luxfi/node", Org: "lux", Repo: "luxfi/node"},
+		{Name: "app", Namespace: "hanzo", Image: "ghcr.io/zooai/app", Org: "zoo", Repo: "zooai/app"},
+		// Declared and running, but no repo was shown to build it — so it carries
+		// no org and its tenancy is unknown.
+		{Name: "orphan", Namespace: "hanzo", Image: "ghcr.io/hanzoai/orphan"},
+	}
+}
+
+func testBoard(t *testing.T) *fleetCache {
+	t.Helper()
+	c := &fleetCache{}
+	c.put(fleet{Services: testServices()})
+	return c
+}
+
+// TestFleetRefusesWithoutTheHeader holds the new surface to the rule the run
+// surface is held to: the header is the authority, and its absence means the
+// request did not come through the gate.
+func TestFleetRefusesWithoutTheHeader(t *testing.T) {
+	mux := routes(config{adminOrg: "admin"}, &runCache{}, testBoard(t))
+
+	for _, path := range []string{"/v1/fleet", "/", "/runs"} {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if w.Code != http.StatusForbidden {
+			t.Errorf("%s without %s: status=%d want 403", path, orgHeader, w.Code)
+		}
+		// The refusal must not describe what it is refusing to show.
+		for _, leaked := range []string{"cloud", "node", "luxfi", "zooai", "orphan"} {
+			if strings.Contains(w.Body.String(), leaked) {
+				t.Errorf("%s refusal body leaked %q", path, leaked)
+			}
+		}
+	}
+}
+
+// TestFleetTenantCannotWiden — `?org=` selects among what a viewer may already
+// see and never reaches past it, on this surface as on the other.
+func TestFleetTenantCannotWiden(t *testing.T) {
+	mux := routes(config{adminOrg: "admin"}, &runCache{}, testBoard(t))
+
+	ask := func(t *testing.T, org, want string) []Service {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodGet, "/v1/fleet?org="+want, nil)
+		r.Header.Set(orgHeader, org)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status=%d want 200", w.Code)
+		}
+		var got struct {
+			Services []Service `json:"services"`
+			Orgs     []string  `json:"orgs"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if org != "admin" {
+			for _, o := range got.Orgs {
+				if o != org {
+					t.Errorf("nav offered org %q to a %s viewer", o, org)
+				}
+			}
+		}
+		return got.Services
+	}
+
+	if got := ask(t, "lux", "hanzo"); len(got) != 0 {
+		t.Errorf("lux asking ?org=hanzo saw %+v; want none", got)
+	}
+	own := ask(t, "lux", "")
+	if len(own) != 1 || own[0].Org != "lux" {
+		t.Errorf("lux viewer saw %+v; want exactly its own org", own)
+	}
+	if all := ask(t, "admin", ""); len(all) != 4 {
+		t.Errorf("sudo saw %d services; want all 4 including the unattributed one", len(all))
+	}
+	if one := ask(t, "admin", "zoo"); len(one) != 1 || one[0].Org != "zoo" {
+		t.Errorf("sudo ?org=zoo saw %+v; want zoo only", one)
+	}
+}
+
+// TestUnattributedServiceIsSudoOnly covers the row whose tenancy could not be
+// established. Showing it to a tenant because we do not know whose it is would be
+// deciding the boundary by ignorance; only the admin org sees it.
+func TestUnattributedServiceIsSudoOnly(t *testing.T) {
+	for _, org := range []string{"hanzo", "lux", "zoo"} {
+		for _, s := range (viewer{org: org}).services(testServices(), "") {
+			if s.Org == "" {
+				t.Errorf("%s viewer saw unattributed service %q", org, s.Name)
+			}
+		}
+	}
+	var seen bool
+	for _, s := range (viewer{org: "admin", sudo: true}).services(testServices(), "") {
+		if s.Name == "orphan" {
+			seen = true
+		}
+	}
+	if !seen {
+		t.Error("sudo cannot see the unattributed service — then nobody can, and it is invisible")
+	}
+}
+
+// TestFleetPageShowsOnlyTheViewersOrg drives the HTML, because the leak that
+// started all of this was a handler handing a template more than the viewer was
+// owed.
+func TestFleetPageShowsOnlyTheViewersOrg(t *testing.T) {
+	mux := routes(config{adminOrg: "admin"}, &runCache{}, testBoard(t))
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Set(orgHeader, "lux")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+
+	body := w.Body.String()
+	if !strings.Contains(body, "luxfi/node") {
+		t.Fatal("lux viewer's own service is missing from the page")
+	}
+	for _, leaked := range []string{"hanzo-inc/cloud", "zooai/app", "orphan", "/?org=hanzo", "/?org=zoo", "all orgs"} {
+		if strings.Contains(body, leaked) {
+			t.Errorf("page rendered %q to a lux viewer", leaked)
+		}
+	}
+}

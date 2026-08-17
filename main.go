@@ -6,10 +6,17 @@
 // to "did the build pass" in the fleet, and the one users look at would be the
 // one that can drift. So: git.hanzo.ai is the store, ci.hanzo.ai is the view.
 //
-// This is the CI half of the pair. cd.hanzo.ai reconciles image pins from
-// hanzoai/universe and is the delivery view; the two are deliberately separate
-// surfaces over separate systems, not one console pretending build and deploy
-// are the same event.
+// Build and deploy are one event on this fleet, and the page says so. A push
+// runs the pipeline this repo publishes; that pipeline's `image` job produces the
+// artifact and its `rollout` job writes the tag and digest into hanzoai/universe,
+// which cd.hanzo.ai reconciles onto the cluster. So the last jobs of a run ARE
+// the deploy, and showing a run without showing whether its pin took effect is
+// reporting on the first half of an event.
+//
+// The fleet view (fleet.go) closes it: for each service it reads what we wrote,
+// what was proved, what is declared and what is running, from the four systems
+// that own those answers. cd.hanzo.ai remains the place to drive a sync; this is
+// the place to see whether one was needed.
 //
 // Tenancy is the same value everywhere: an org slug. Hanzo Git namespaces repos
 // by org, IAM issues that slug in the `owner` claim, and Hanzo CD fences
@@ -22,6 +29,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -46,6 +54,16 @@ func main() {
 
 	src := &gitSource{base: cfg.gitBase, token: cfg.gitToken, http: &http.Client{Timeout: 20 * time.Second}}
 	cache := &runCache{}
+	board := &fleetCache{}
+
+	// The cluster is read through the pod's own ServiceAccount. Failing to dial
+	// is not fatal: the run view is unaffected, and the fleet view says it cannot
+	// read running state — which is true and visible, where exiting here would
+	// take the whole dashboard down over half of one page.
+	cl, err := dial(serviceAccount, apiHost)
+	if err != nil {
+		logger.Warn("cluster identity", "err", err)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -55,7 +73,36 @@ func main() {
 	// fanned each page load into upstream calls is how a status page takes the
 	// system it reports on down.
 	go poll(ctx, logger, src, cache, cfg)
+	go watch(ctx, logger, src, cl, board, cfg)
 
+	srv := &http.Server{
+		Addr:              cfg.listen,
+		Handler:           routes(cfg, cache, board),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() {
+		<-ctx.Done()
+		sh, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(sh)
+	}()
+
+	logger.Info("ci dashboard listening", "addr", cfg.listen, "source", cfg.gitBase, "refresh", cfg.refresh.String())
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		logger.Error("serve", "err", err)
+		os.Exit(1)
+	}
+}
+
+// routes is the whole surface, in one place, so that what the scope tests drive
+// is what the binary serves. A test that rebuilt a handler of its own would be
+// asserting a copy, and the copy is free to stop matching the route it stands in
+// for — which for the org boundary is the one thing that must not happen.
+//
+// Every handler here begins by resolving the viewer, and every list it answers
+// with passes through that viewer first. /healthz is the single exception, and
+// only because it answers a constant.
+func routes(cfg config, cache *runCache, board *fleetCache) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		// Liveness only: up means "serving". Readiness deliberately does NOT
@@ -78,6 +125,28 @@ func main() {
 			"orgs":      v.orgs(snap.Runs),
 		})
 	})
+	mux.HandleFunc("/v1/fleet", func(w http.ResponseWriter, r *http.Request) {
+		v, ok := requireViewer(w, r, cfg.adminOrg)
+		if !ok {
+			return
+		}
+		snap := board.get()
+		services := v.services(snap.Services, r.URL.Query().Get("org"))
+		writeJSON(w, http.StatusOK, map[string]any{
+			"services":  services,
+			"fetchedAt": snap.FetchedAt,
+			"stale":     snap.stale(4 * cfg.fleetRefresh),
+			"sourceErr": snap.errString(),
+			"orgs":      orgsOfServices(services),
+		})
+	})
+	mux.HandleFunc("/runs", func(w http.ResponseWriter, r *http.Request) {
+		v, ok := requireViewer(w, r, cfg.adminOrg)
+		if !ok {
+			return
+		}
+		renderRuns(w, cache.get(), v, r.URL.Query().Get("org"), cfg)
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -87,26 +156,9 @@ func main() {
 		if !ok {
 			return
 		}
-		renderDashboard(w, cache.get(), v, r.URL.Query().Get("org"), cfg)
+		renderFleet(w, board.get(), v, r.URL.Query().Get("org"), cfg)
 	})
-
-	srv := &http.Server{
-		Addr:              cfg.listen,
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	go func() {
-		<-ctx.Done()
-		sh, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(sh)
-	}()
-
-	logger.Info("ci dashboard listening", "addr", cfg.listen, "source", cfg.gitBase, "refresh", cfg.refresh.String())
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		logger.Error("serve", "err", err)
-		os.Exit(1)
-	}
+	return mux
 }
 
 // ───────────────────────────── config ─────────────────────────────
@@ -124,6 +176,14 @@ type config struct {
 	staleAfter time.Duration
 	scanRepos  int
 	runsPer    int
+
+	// universe is the repo holding the declared state of the fleet, and
+	// fleetRefresh is how often the four values are re-read. The fleet interval
+	// is longer than the run interval because these values move on deploy
+	// cadence, not push cadence, and each cycle costs the forge a read per
+	// service.
+	universe     string
+	fleetRefresh time.Duration
 }
 
 func loadConfig() (config, error) {
@@ -134,8 +194,10 @@ func loadConfig() (config, error) {
 		gitToken:  os.Getenv("CI_GIT_TOKEN"),
 		scanRepos: envInt("CI_SCAN_REPOS", 60),
 		runsPer:   envInt("CI_RUNS_PER_REPO", 8),
+		universe:  env("CI_UNIVERSE", "hanzo/universe"),
 	}
 	c.refresh = time.Duration(envInt("CI_REFRESH_SECONDS", 45)) * time.Second
+	c.fleetRefresh = time.Duration(envInt("CI_FLEET_SECONDS", 300)) * time.Second
 	// Stale is a multiple of refresh, not its own knob: the only meaningful
 	// definition of stale is "we have missed several refreshes", and deriving
 	// it means the two can never be configured into contradiction.
@@ -252,6 +314,15 @@ type gitSource struct {
 	base  string
 	token string
 	http  *http.Client
+
+	// Answers that outlive a refresh. The declared fleet is re-read only when the
+	// universe head commit moves, and which repo publishes an image is settled
+	// once — neither changes on this service's clock, and asking again every
+	// cycle would spend the whole budget confirming that.
+	mu      sync.Mutex
+	pinsAt  string
+	pinned  map[string]pin
+	located map[string]place
 }
 
 func (g *gitSource) getJSON(ctx context.Context, path string, out any) error {
@@ -270,6 +341,25 @@ func (g *gitSource) getJSON(ctx context.Context, path string, out any) error {
 		return fmt.Errorf("%s: %s", path, resp.Status)
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// getText fetches a path whose body is a file rather than a document.
+func (g *gitSource) getText(ctx context.Context, path string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, g.base+path, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "token "+g.token)
+	resp, err := g.http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("%s: %s", path, resp.Status)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return string(body), err
 }
 
 type repoRef struct {

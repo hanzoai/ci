@@ -9,6 +9,68 @@ logic — repos import this and declare their specifics in `hanzo.yml`.
 A build ends at a published image. What RUNS is declared in `hanzo/universe`,
 and cd.hanzo.ai applies that within one poll — see [Deploying](#deploying).
 
+**ci.hanzo.ai** is this repo's other half: the dashboard that shows what the
+pipeline did — see [The fleet view](#the-fleet-view).
+
+## The fleet view
+
+`ci.hanzo.ai` answers one question per service: **is what we wrote what is
+running?** Four values answer it, and they are one causal line rather than four
+opinions:
+
+```
+head ──build──▶ built ──pin──▶ declared ──reconcile──▶ running
+```
+
+| value | read from | means |
+|---|---|---|
+| **head** | the repo's default branch | what we wrote |
+| **built** | the newest commit whose run produced an image | what we proved |
+| **declared** | `charts/app/values/<ns>/<name>.yaml` in `hanzo/universe` | what CD was told to run |
+| **running** | the workload's image in the cluster, by digest | what serves traffic |
+
+Every arrow is a job of the pipeline above, so a service is current exactly when
+all four agree, and each way they disagree names the arrow that did not happen:
+
+- `unbuilt` — head produced no image. Counted only once a build has STOPPED
+  without one, so a push in flight is not drift.
+- `unshipped` — an image was proved that the pin never named.
+- `unsynced` — the pin and the cluster disagree, compared by digest.
+- `untested` — a passing build whose tests did not execute.
+
+Three matching values are not health, which is why head is read at all: built,
+declared and running can agree perfectly while main has moved on and nothing
+since has built.
+
+Two readings the page depends on, both from a run's JOBS rather than its one
+conclusion. A run that fails at `gate` built nothing; a run that fails at
+`receipt` has already built, pinned and proved the release live. Both report
+`failure`. And a commit the forge never constructed a run for is `absent`, not
+failed — there is no log to open, so it is drawn as a different shape.
+
+It reads and never writes: no deploy, no retry, no promotion. Drive a sync at
+cd.hanzo.ai.
+
+### What it needs
+
+`ci` reads the cluster through its own ServiceAccount — get and list on
+workloads, nothing else, no stored credential — and reads `hanzo/universe`
+through the forge token it already holds. In `charts/app/values/hanzo/ci.yaml`:
+
+```yaml
+rbac:
+  create: true
+  clusterRules:
+    - apiGroups: ["apps"]
+      resources: ["deployments", "statefulsets", "daemonsets"]
+      verbs: ["get", "list"]
+```
+
+| env | default | |
+|---|---|---|
+| `CI_UNIVERSE` | `hanzo/universe` | repo holding the declared state |
+| `CI_FLEET_SECONDS` | `300` | how often the four values are re-read |
+
 ## Use it
 
 A repo needs two files. First, `hanzo.yml` at the root (the config):
