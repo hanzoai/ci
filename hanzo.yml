@@ -35,6 +35,19 @@ test:
     # rejects any colour the page names for itself. Both gates are offline —
     # checking that we use one design system costs this pipeline no npm, no
     # registry and no network.
+    #
+    # fleet_test.go pins how the four values are read, and the case it exists for
+    # is the one where they AGREE: built, declared and running can name the same
+    # release while main has moved on and nothing since has produced an image.
+    # It also pins the two readings a board is worthless without — that a run
+    # failing at `receipt` shipped and one failing at `gate` did not, and that a
+    # commit with no run is not a commit whose run failed — and the rule that an
+    # unread source is never drawn as a difference.
+    #
+    # declared_test.go covers the values reader against the shapes the fleet's
+    # files actually take, and is weighted toward refusals: a wrong version on the
+    # page that exists to say what is declared is worse than a blank, because a
+    # blank is visibly unknown.
     run: |
       set -e
       export GOWORK=off
