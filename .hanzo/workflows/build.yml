@@ -2183,7 +2183,13 @@ jobs:
           }
           rel=$(api "$API/repos/$REPO/releases/tags/$TAG" 2>/dev/null | jq -r '.id // empty' || true)
           if [ -z "$rel" ]; then
-            rel=$(api -X POST "$API/repos/$REPO/releases" \
+            # -d sends form encoding unless told otherwise. github.com reads the
+            # body as JSON anyway; a forge that binds by content type reads these
+            # fields as a form, finds none of them, and refuses for a missing
+            # tag_name that is plainly there. The header goes on this call rather
+            # than in api(), because curl accumulates -H instead of replacing it
+            # and the asset upload declares a content type of its own.
+            rel=$(api -X POST -H 'Content-Type: application/json' "$API/repos/$REPO/releases" \
               -d "$(jq -nc --arg t "$TAG" '{tag_name:$t,name:$t,generate_release_notes:true}')" | jq -r .id)
           fi
           for f in dist/*; do
