@@ -60,6 +60,32 @@ a{color:inherit}
 .dot.cancelled{background:var(--text-disabled)}
 @keyframes p{50%{opacity:.35}}
 
+/* A build that failed and a build that never ran are different problems, and a
+   colour alone cannot carry that: the second has no log to open. So `absent` is
+   drawn as a different SHAPE — a hollow ring rather than a filled dot — and
+   reads as such before any colour is perceived. */
+.dot.absent{background:transparent;border:2px solid var(--text-muted)}
+.dot.warning{background:var(--warning)}
+
+/* The four values are one line, and `gap` marks the ends of the arrow that did
+   not happen — so the eye lands on the pair that disagrees, not on the row. */
+.gap{border-left:2px solid var(--warning);color:var(--text-primary)}
+
+.job{font-family:var(--font-mono);font-size:var(--font-size-xs);color:var(--text-muted);
+     padding:0 var(--space-1);border:1px solid var(--border-hairline);
+     border-radius:var(--radius-sm);margin-left:var(--space-1)}
+.note{font-size:var(--font-size-xs);color:var(--text-muted);white-space:nowrap}
+
+.tag{display:inline-block;font-size:var(--font-size-xs);padding:0 var(--space-2);
+     border-radius:var(--radius-full);margin-right:var(--space-1);white-space:nowrap}
+/* Whatever stops what we wrote from running reads the same, because it is the
+   same fact from outside; what merely went unproved reads as a caution. */
+.tag.unbuilt,.tag.unsynced{color:var(--error);
+     background:color-mix(in srgb, var(--error) 12%, transparent)}
+.tag.unshipped,.tag.untested{color:var(--warning);
+     background:color-mix(in srgb, var(--warning) 12%, transparent)}
+.ok{color:var(--success);font-size:var(--font-size-sm)}
+
 .repo{font-weight:600}
 .org{color:var(--text-muted)}
 .title{color:var(--text-secondary);max-width:42ch;

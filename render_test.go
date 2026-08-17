@@ -56,7 +56,7 @@ func TestDashboardCSSNamesNoColours(t *testing.T) {
 // trusted to be careful with a snapshot it can see all of.
 func TestRenderedPageShowsOnlyTheViewersOrg(t *testing.T) {
 	w := httptest.NewRecorder()
-	renderDashboard(w, snapshot{Runs: testRuns(), Repos: 3}, viewer{org: "lux"}, "", config{})
+	renderRuns(w, snapshot{Runs: testRuns(), Repos: 3}, viewer{org: "lux"}, "", config{})
 	body := w.Body.String()
 
 	if !strings.Contains(body, ">lux/<") {
