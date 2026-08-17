@@ -189,6 +189,7 @@ var fleetTmpl = template.Must(template.New("fleet").Funcs(template.FuncMap{
 </div>{{end}}
 
 {{if .Services}}
+<div class="scroll">
 <table>
 <thead><tr>
   <th>Service</th>
@@ -233,6 +234,7 @@ var fleetTmpl = template.Must(template.New("fleet").Funcs(template.FuncMap{
 </tr>
 {{end}}
 </tbody></table>
+</div>
 {{else}}
 <div class="empty">
   No services visible.<br>
