@@ -2069,7 +2069,17 @@ jobs:
             echo "::error::bucket: is not published by this lane. The object store has ONE publisher — POST /v1/runner with this same binaries: recipe (cloud apps/platform/artifact.go), which holds the credential in-cluster. Drop bucket: to publish release assets here."
             exit 1
           fi
-          BASE="$SERVER/$REPO/releases/download/$TAG"
+          # Where a reader fetches the asset. github.com answers downloads on its
+          # web host, which is what SERVER names there. Elsewhere SERVER can be
+          # the address the RUNNER reaches the forge on — in-cluster, unroutable
+          # to anyone else — while the API is the public one, so the download host
+          # is taken from the API rather than from SERVER. Path depth is not
+          # assumed: only the scheme and host are kept.
+          case "$API" in
+            https://api.github.com) DOWNLOAD="$SERVER" ;;
+            *) host=${API#*://}; host=${host%%/*}; DOWNLOAD="${API%%://*}://$host" ;;
+          esac
+          BASE="$DOWNLOAD/$REPO/releases/download/$TAG"
           rm -rf dist; mkdir -p dist
           # CGO_ENABLED=0 is not a preference: the host that installs this runs
           # it on WHATEVER base image the host happens to be, so a binary linked
