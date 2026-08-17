@@ -1922,10 +1922,19 @@ jobs:
           if [ "$IS_TAG" != 1 ]; then
             echo "::notice::binaries built for $(jq '.binaries|length' dist/binaries.json) platform(s) — publishing happens on a tag"; exit 0
           fi
-          # Same token ladder the rest of this file uses: the KMS org token, the
-          # org PAT, then the per-job automatic one (which can write a release on
-          # its OWN repo, so a repo with no KMS still publishes).
-          TOKEN="${GIT_TOKEN:-${GH_PAT:-$GH_AUTOMATIC}}"
+          # A credential is only good on the host that issued it, so the ladder is
+          # picked by the API the runner named — the same reading that chose
+          # UPLOADS above. GIT_TOKEN comes from KMS and GH_PAT is the org's; both
+          # are github.com's and answer 401 anywhere else, and GIT_TOKEN is always
+          # set for a KMS org, so a fixed order hands a GitHub secret to whichever
+          # forge is listening. The per-job token is minted by the forge running
+          # the job and can write a release on its own repo, which is the whole
+          # of what this step needs.
+          case "$API" in
+            https://api.github.com) TOKEN="${GIT_TOKEN:-${GH_PAT:-$GH_AUTOMATIC}}" ;;
+            *)                      TOKEN="$GH_AUTOMATIC" ;;
+          esac
+          [ -n "$TOKEN" ] || { echo "::error::no credential valid at $API — a release cannot be written"; exit 1; }
           api() { curl -fsS -H "Authorization: Bearer $TOKEN" -H 'Accept: application/vnd.github+json' "$@"; }
           rel=$(api "$API/repos/$REPO/releases/tags/$TAG" 2>/dev/null | jq -r '.id // empty' || true)
           if [ -z "$rel" ]; then
