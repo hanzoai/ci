@@ -21,11 +21,11 @@ import (
 // server rendering and a JS component library are, and it is the tokens, not
 // the components, that this page ever needed.
 
-// renderDashboard writes the page for ONE viewer. Every row it renders has
+// renderRuns writes the run page for ONE viewer. Every row it renders has
 // already passed v.visible — the template is never handed the full snapshot and
 // asked to be careful with it, because a template that can see everything is one
 // edit away from showing it.
-func renderDashboard(w http.ResponseWriter, snap snapshot, v viewer, org string, cfg config) {
+func renderRuns(w http.ResponseWriter, snap snapshot, v viewer, org string, cfg config) {
 	runs := v.visible(snap.Runs, org)
 	if len(runs) > 200 {
 		runs = runs[:200]
