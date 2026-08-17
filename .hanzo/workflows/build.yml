@@ -1317,7 +1317,7 @@ jobs:
         run: |
           set -euo pipefail
           NOTHING='\[no test files\]|\[no tests to run\]|no tests ran|collected 0 items|No tests found|no test specified|running 0 tests|Tests:[[:space:]]+0 total|(^|[^0-9])0 (passing|passed)'
-          SOMETHING='^[[:space:]]*--- (PASS|FAIL|SKIP):|^(ok|FAIL)[[:space:]]+[^[:space:]]+[[:space:]]+([0-9.]+s|\(cached\))([[:space:]]+coverage)?$|[1-9][0-9]* (passed|failed|passing|failing)|test result: (ok|FAILED)\.[[:space:]]+[1-9]|Tests:[[:space:]]+[1-9]'
+          SOMETHING='^[[:space:]]*--- (PASS|FAIL|SKIP):|^(ok|FAIL)[[:space:]]+[^[:space:]]+[[:space:]]+([0-9.]+s|\(cached\))([[:space:]]+coverage)?$|[1-9][0-9]* (passed|failed|passing|failing)|[1-9][0-9]* tests? (passed|failed)|test result: (ok|FAILED)\.[[:space:]]+[1-9]|Tests:[[:space:]]+[1-9]'
           # The runners this estate actually invokes, as they are spelled in a
           # `run:`. A gate matching this has told us it tests; nothing else has.
           # Read against the COMMANDS only — a whole-line comment is dropped first,
@@ -1388,6 +1388,10 @@ jobs:
                 else if ($0 ~ /^[=[:space:]]*[0-9]+ (passed|failed|error)/) r += num($0,"passed") + num($0,"failed")
                 else if ($0 ~ /[0-9]+ passed/ && $0 ~ /[0-9]+ failed/)      r += num($0,"passed") + num($0,"failed")
                 else if ($0 ~ /^[[:space:]]*(DONE|Ran) [0-9]+ tests?/)      r += num($0,"tests") ? num($0,"tests") : num($0,"test")
+                # ava says "94 tests passed" — the count is attached to `tests`,
+                # not to the verb, so the rules that read the word before
+                # passed/failed find `tests` there and come away with nothing.
+                else if ($0 ~ /^[[:space:]]*[0-9]+ tests? (passed|failed)/)  r += num($0,"tests") ? num($0,"tests") : num($0,"test")
                 else if ($0 ~ /^[[:space:]]*[0-9]+ (passing|failing)([[:space:]]|$|\()/) r += num($0,"passing") + num($0,"failing")
                 else if ($0 ~ /^[[:space:]]*[0-9]+ (pass|fail)([[:space:]]|$)/)          r += num($0,"pass") + num($0,"fail")
               }

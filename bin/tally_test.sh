@@ -48,6 +48,11 @@ t "cargo"                          5 "test result: ok. 5 passed; 0 failed; 0 ign
 t "cargo, with failures"           7 "test result: FAILED. 5 passed; 2 failed; 0 ignored"
 t "rust -v"                        3 "test tally::a ... ok" "test tally::b ... FAILED" "test tally::c ... ignored"
 t "mocha"                        415 "  412 passing (2s)" "  3 failing"
+# ava attaches the count to `tests` rather than to the verb, so the rules that
+# read the word before passed/failed find `tests` there. Both captured from the
+# fleet: hanzoai/openid-client and hanzoai/insights-node.
+t "ava"                           94 "  94 tests passed"
+t "ava, with a failure"           94 "  1 test failed" "  93 tests passed"
 t "bun test, per case"             4 "(pass) api > get [0.52ms]" "(pass) api > put [0.3ms]" "(pass) api > del [0.2ms]" "(fail) api > patch [0.1ms]"
 t "TAP"                            2 "ok 1 - the first" "not ok 2 - the second"
 t "a bin/*_test.sh suite"         17 "  ok    clean repo is green" "  ok    the mark is refused" "" "vendormark_test: 17 passed, 0 failed"
