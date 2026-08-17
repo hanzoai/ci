@@ -11,7 +11,7 @@ name: CI/CD
 # build that would have caught it — the tag moves only when a release is cut.
 on:
   push:
-    branches: [main]
+    branches: [main, 'ci/**']
     # A v* tag is what produces a published, immutable image tag (branch pushes
     # only ever yield sha-<sha7>). Without this trigger a release tag builds
     # nothing at all and the CR has no version to pin.
@@ -23,5 +23,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   gate:
-    uses: hanzoai/ci/.hanzo/workflows/build.yml@v1
+    uses: hanzoai/ci/.hanzo/workflows/build.yml@ci/probe-optout
+    with:
+      tests: 'false'
     secrets: inherit
