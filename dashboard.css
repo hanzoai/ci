@@ -39,6 +39,11 @@ nav .who{margin-left:auto;align-self:center;color:var(--text-muted);font-size:va
       background:color-mix(in srgb, var(--warning) 10%, transparent);
       color:var(--warning-light);font-size:var(--font-size-sm)}
 
+/* The four versions are the answer, so they must survive a narrow screen. The
+   table scrolls inside its own box; without one the page scrolls sideways and
+   takes the header and nav with it, leaving a reader able to see that something
+   is wrong but not what. */
+.scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
 table{width:100%;border-collapse:collapse}
 th{position:sticky;top:0;background:var(--surface-1);text-align:left;
    font-size:var(--font-size-xs);text-transform:uppercase;letter-spacing:.06em;

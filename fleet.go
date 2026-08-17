@@ -277,6 +277,16 @@ func assemble(pins []pin, lives []live, links map[string]link) []Service {
 			// service declares; its sidecars are not the service.
 			continue
 		}
+		// A workload runs the declared version if ANY of its containers does.
+		// Two containers can share the repository and hold different versions on
+		// purpose — a sidecar pinned back while the app moves on — and taking
+		// whichever the loop reached last reported the pin unapplied on a service
+		// whose app container was carrying it. Preferring the match answers the
+		// question the column asks: is what we declared running here. For the
+		// single-container case, which is nearly every row, nothing changes.
+		if same, decided := alike(s.Running, s.Declared); decided && same {
+			continue
+		}
 		s.Running, s.Ready, s.Want = l.Version, l.Ready, l.Want
 	}
 	for _, s := range byName {

@@ -337,6 +337,35 @@ func TestOneImageIsSeveralServices(t *testing.T) {
 	}
 }
 
+// TestSidecarOnTheSameImageDoesNotHideThePin — two containers can share the
+// repository and hold different versions deliberately, and taking whichever the
+// loop reached last reported the pin unapplied on a service whose app container
+// was carrying it. studio pins its build-manifest sidecar back to v0.19.26 while
+// the app runs v0.19.31; the board called that drift and named a service that was
+// in fact current.
+func TestSidecarOnTheSameImageDoesNotHideThePin(t *testing.T) {
+	studio := "ghcr.io/hanzoai/studio"
+	pins := []pin{{Name: "studio", Namespace: "hanzo", Image: studio,
+		Version: Version{Tag: "v0.19.31"}}}
+	// Sidecar last, so a last-writer-wins read takes the pinned-back one.
+	lives := []live{
+		{Name: "studio", Namespace: "hanzo", Image: studio, Version: Version{Tag: "v0.19.31"}, Ready: 1, Want: 1},
+		{Name: "studio", Namespace: "hanzo", Image: studio, Version: Version{Tag: "v0.19.26"}, Ready: 1, Want: 1},
+	}
+
+	got := assemble(pins, lives, map[string]link{})
+	if len(got) != 1 {
+		t.Fatalf("assembled %d rows from one declaration: %+v", len(got), got)
+	}
+	if got[0].Running.Tag != "v0.19.31" {
+		t.Errorf("running = %q; a workload runs the declared version if any container does",
+			got[0].Running.Tag)
+	}
+	if !got[0].current() {
+		t.Errorf("drift = %v; the pin was applied and the app container carries it", got[0].Drift)
+	}
+}
+
 // TestRunningMatchesOnNameAndImage — a workload of the right name still has to be
 // running the image the service declares, so a sidecar is never read as the
 // service.
