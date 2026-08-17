@@ -2036,9 +2036,13 @@ jobs:
           # hardcoding the hostname is what keeps ONE lane serving both.
           SERVER="${GITHUB_SERVER_URL:-https://github.com}"
           API="${GITHUB_API_URL:-https://api.github.com}"
+          # Splitting uploads onto a second hostname is github.com's arrangement,
+          # not a rule every forge follows: elsewhere the release advertises an
+          # upload_url on the API base it was created from, and a separate host
+          # answers 404. So the base is the API unless the API is github.com's.
           case "$API" in
             https://api.github.com) UPLOADS=https://uploads.github.com ;;
-            *) UPLOADS="$SERVER/api/uploads" ;;
+            *) UPLOADS="$API" ;;
           esac
           # THIS LANE PUBLISHES RELEASE ASSETS. It does not publish to the object
           # store, and `bucket:` is REFUSED rather than honoured here.
@@ -2159,7 +2163,24 @@ jobs:
             *)                      TOKEN="$GH_AUTOMATIC" ;;
           esac
           [ -n "$TOKEN" ] || { echo "::error::no credential valid at $API — a release cannot be written"; exit 1; }
-          api() { curl -fsS -H "Authorization: Bearer $TOKEN" -H 'Accept: application/vnd.github+json' "$@"; }
+          # -f makes curl exit non-zero on an error status and DISCARD the body,
+          # so the server's account of why it refused is thrown away and the step
+          # reports only a number. The status is separated from the body instead,
+          # and a refusal is printed with what the forge said about it.
+          api() {
+            local out status body
+            out=$(curl -sS -w '\n%{http_code}' \
+              -H "Authorization: Bearer $TOKEN" -H 'Accept: application/vnd.github+json' "$@")
+            status=${out##*$'\n'}
+            body=${out%$'\n'*}
+            case "$status" in
+              2*) printf '%s' "$body"; return 0 ;;
+            esac
+            # To stderr: the caller reads stdout into a variable, so an
+            # explanation printed there would become the value it stands for.
+            printf 'refused: %s %s\n%s\n' "$status" "$*" "$(printf '%s' "$body" | head -c 400)" >&2
+            return 1
+          }
           rel=$(api "$API/repos/$REPO/releases/tags/$TAG" 2>/dev/null | jq -r '.id // empty' || true)
           if [ -z "$rel" ]; then
             rel=$(api -X POST "$API/repos/$REPO/releases" \
