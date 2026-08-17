@@ -16,6 +16,10 @@ images:
     repo: ghcr.io/hanzoai/ci
 
 test:
+  - name: induced-noop
+    # A suite that runs and says nothing: the runner is invoked, its output
+    # is discarded, and the gate exits 0.
+    run: bash bin/vendormark_test.sh >/dev/null
   - name: go-vet
     run: |
       set -e
