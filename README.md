@@ -380,8 +380,16 @@ the fleet runner, so delegation is strictly opt-in.
 
 The only GitHub secrets a repo sets are `KMS_CLIENT_ID` / `KMS_CLIENT_SECRET`
 (plus the `KMS_WORKSPACE` repo variable). Everything else — the GHCR push token,
-the cluster kubeconfig — is pulled from KMS (`kms.hanzo.ai`, Universal Auth) at
-run time. No long-lived registry or cluster credentials live in GitHub.
+the cluster kubeconfig, `HANZO_GIT_TOKEN` — is pulled from KMS (`kms.hanzo.ai`,
+Universal Auth) at run time. No long-lived registry or cluster credentials live
+in GitHub.
+
+`HANZO_GIT_TOKEN` is git.hanzo.ai's, and only the reads the per-job token cannot
+serve name it: a private repo this run does not belong to (`hanzoai/openapi`, a
+sibling Go module) and the client lane's push past a protected branch. Everything
+else on that host — the tools clone of public `hanzoai/ci` — rides the per-job
+token and needs nothing sealed. It is not interchangeable with `GIT_TOKEN`, which
+is github.com's.
 
 ## Platform-native
 

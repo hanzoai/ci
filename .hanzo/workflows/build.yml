@@ -194,7 +194,13 @@ jobs:
           # returns 401 and the repo page 303s to a login). So Hanzo Git attempt
           # below could only ever fail, and every run fell through to the mirror.
           # Any signed-in identity satisfies it; the per-job token is one.
-          GIT_TOKEN: ${{ github.token }}
+          #
+          # JOB_TOKEN, not GIT_TOKEN: GIT_TOKEN is github.com's KMS credential
+          # everywhere else in this file, and this is Hanzo Git's per-job one.
+          # Reading a PUBLIC repo is the whole of what it is asked to do here,
+          # so nothing has to be sealed for the tools to arrive; that is also
+          # the whole of what it CAN do off its own repo (see the KMS step).
+          JOB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           echo "GITHUB_WORKFLOW_REF=${GITHUB_WORKFLOW_REF:-<unset>}"
@@ -232,8 +238,8 @@ jobs:
           #
           # http.extraheader, not credentials in $url: the URL is echoed above.
           hdr=()
-          if [ -n "${GIT_TOKEN:-}" ]; then
-            b64=$(printf 'x-access-token:%s' "$GIT_TOKEN" | base64 -w0)
+          if [ -n "${JOB_TOKEN:-}" ]; then
+            b64=$(printf 'x-access-token:%s' "$JOB_TOKEN" | base64 -w0)
             echo "::add-mask::$b64"
             hdr=(-c "http.extraheader=Authorization: Basic $b64")
           else
@@ -586,6 +592,22 @@ jobs:
           # GIT_TOKEN is not a reserved name, so it's safe in GITHUB_ENV.
           GIT_TOKEN=$(get GITHUB_TOKEN)
           if [ -n "$GIT_TOKEN" ]; then echo "::add-mask::$GIT_TOKEN"; echo "GIT_TOKEN=$GIT_TOKEN" >> "$GITHUB_ENV"; fi
+          # TWO HOSTS, TWO CREDENTIALS, TWO NAMES. GIT_TOKEN above is github.com's
+          # and this one is git.hanzo.ai's; each answers 401 at the other address,
+          # so a single name covering both is a credential handed to a host that
+          # cannot read it.
+          #
+          # It is NOT interchangeable with the per-job token Hanzo Git mints. That
+          # token reads the run's OWN repo and anything public — enough for the
+          # tools clone at the top of this job, which reads public hanzoai/ci —
+          # and it stops there. A PRIVATE repo that is not this one (hanzoai/
+          # openapi, a sibling Go module) and a push to a PROTECTED branch are
+          # both outside it: the protected-branch refusal is on the record as
+          # `User -2 is not allowed to push to protected branch main`, measured on
+          # hanzoai/java-sdk runs 20 and 21 and written up at the cut step below.
+          # Those three reads name HANZO_GIT_TOKEN and nothing else does.
+          HANZO_GIT_TOKEN=$(get HANZO_GIT_TOKEN)
+          if [ -n "$HANZO_GIT_TOKEN" ]; then echo "::add-mask::$HANZO_GIT_TOKEN"; echo "HANZO_GIT_TOKEN=$HANZO_GIT_TOKEN" >> "$GITHUB_ENV"; fi
           # The PACKAGE registry credential → buildx `package_token` secret, for an
           # image whose build installs the fabric's own npm or Go packages.
           # git.hanzo.ai serves those behind REQUIRE_SIGNIN_VIEW, so an anonymous
@@ -990,7 +1012,10 @@ jobs:
         # — cloud's next release included — ask a client repo "which document are
         # you?" without running a generator.
         #
-        # CREDENTIAL: the job token Hanzo Git issues. No secret to provision.
+        # CREDENTIAL: HANZO_GIT_TOKEN from KMS, contents:read on the spec repo and
+        # on hanzoai/openapi at git.hanzo.ai. Both are repos this run does not
+        # belong to and at least one of them is private, which is exactly the
+        # reach the per-job token does not have.
         # TWO MODES, ONE FETCH, decided by the payload — because there are two
         # questions and they need the same document.
         #
@@ -1011,8 +1036,8 @@ jobs:
         id: client
         env:
           # ONE HOST, SO ONE CREDENTIAL. The document lives on git.hanzo.ai and
-          # GIT_TOKEN is what reads git.hanzo.ai — the same secret hanzoai/cloud
-          # already uses to cut the release tag this lane consumes.
+          # HANZO_GIT_TOKEN is what reads git.hanzo.ai. It arrives from KMS via
+          # the step above, so nothing is declared here.
           #
           # What stood here was a fallback chain, SPEC_TOKEN then GH_PAT, and both
           # halves were wrong about which Hanzo Git holds the document. SPEC_TOKEN is
@@ -1021,7 +1046,12 @@ jobs:
           # not carry openapi.yaml at all. The chain therefore resolved to a
           # credential that authenticated fine against a host with no document on
           # it. It has never been safe — only unreached.
-          GIT_TOKEN: ${{ github.token }}
+          #
+          # The per-job token is not a substitute either, for a nearer reason: it
+          # is scoped to the repo the run belongs to, and every read below is of
+          # some OTHER repo — the spec repo, then hanzoai/openapi, which is
+          # private. A scoped token gets a 404 there, and a 404 from this API is
+          # indistinguishable from a document that was never written.
           PAYLOAD: ${{ toJson(github.event.client_payload) }}
           SPEC_REF: ${{ inputs.spec-ref }}
           SPEC_SHA256: ${{ inputs.spec-sha256 }}
@@ -1069,7 +1099,7 @@ jobs:
           [ -n "$WANT" ] || WANT="${SPEC_SHA256:-}"
           VERSION=$(printf '%s' "$PAYLOAD" | jq -r '.version // ""')
 
-          [ -n "${GIT_TOKEN:-}" ] || { echo "::error::the client: lane reads ${SPEC_REPO} from git.hanzo.ai and the job token is empty"; exit 1; }
+          [ -n "${HANZO_GIT_TOKEN:-}" ] || { echo "::error::the client: lane reads ${SPEC_REPO} and hanzoai/openapi from git.hanzo.ai, which the per-job token cannot reach — seal HANZO_GIT_TOKEN (contents:read on both) in KMS for this org"; exit 1; }
 
           # GIT.HANZO.AI IS WHERE THE DOCUMENT IS. This lane runs on git.hanzo.ai's
           # own runners against a repo whose canonical home is git.hanzo.ai, and
@@ -1082,7 +1112,7 @@ jobs:
           # The Hanzo Git serves its API at /v1/, NOT /api/v1/ — /api/v1 returns a 404
           # that reads exactly like a rejected credential. Same route the CLI's
           # Makefile takes, because there is one document at one address.
-          curl -fsSL -H "Authorization: token ${GIT_TOKEN}" \
+          curl -fsSL -H "Authorization: token ${HANZO_GIT_TOKEN}" \
             "https://git.hanzo.ai/v1/repos/${SPEC_REPO}/raw/${SPEC_PATH}?ref=${REF}" -o "$RUNNER_TEMP/spec"
           GOT=$(sha256sum "$RUNNER_TEMP/spec" | cut -d' ' -f1)
 
@@ -1133,7 +1163,7 @@ jobs:
           # extraheader rather than a token in the URL: a clone URL is echoed by
           # git on failure and lands in the log verbatim.
           export OPENAPI="$RUNNER_TEMP/driver"
-          [ -d "$OPENAPI" ] || git -c http.extraheader="Authorization: token ${GIT_TOKEN}" \
+          [ -d "$OPENAPI" ] || git -c http.extraheader="Authorization: token ${HANZO_GIT_TOKEN}" \
             clone --depth 1 -q https://git.hanzo.ai/hanzoai/openapi "$OPENAPI"
 
           # AND AN INTERPRETER THAT CAN READ YAML, which is the driver's
@@ -1210,9 +1240,18 @@ jobs:
         #
         # Longest prefix wins in git, so the owner-scoped Hanzo Git rule outranks the
         # bare github.com rule beneath it and every OTHER module still resolves
-        # from github.com. Both rules are optional and independent: no GIT_TOKEN
-        # (or a github.com-hosted run, where the server IS github.com) leaves the
-        # old behaviour exactly as it was.
+        # from github.com. Both rules are optional and independent: no
+        # HANZO_GIT_TOKEN (or a github.com-hosted run, where the server IS
+        # github.com) leaves the old behaviour exactly as it was.
+        #
+        # TWO RULES, TWO HOSTS, TWO CREDENTIALS, and they must not be confused for
+        # each other. The git.hanzo.ai rule takes HANZO_GIT_TOKEN and the
+        # github.com rule takes GIT_TOKEN, because a credential is only good on
+        # the host that issued it. The per-job token cannot stand in for either:
+        # the sibling modules it would be fetching (hanzoai/plans,
+        # hanzoai/dashscopego, hanzoai/commerce) are private repos this run does
+        # not belong to, and Hanzo Git answers those 404 for a scoped token —
+        # which `go` reports as a module that could not be placed.
         #
         # SPLIT THE SERVER, do not strip a scheme you assumed. GITHUB_SERVER_URL
         # on this fleet's runners is `http://hanzo-git.hanzo.svc` — Hanzo Git's
@@ -1225,7 +1264,6 @@ jobs:
         if: steps.gomod.outputs.file != ''
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
-          GIT_TOKEN: ${{ github.token }}
           OWNER: ${{ github.repository_owner }}
           GOMOD: ${{ steps.gomod.outputs.file }}
         run: |
@@ -1235,7 +1273,7 @@ jobs:
           SCHEME="${SERVER%%://*}"; HOST="${SERVER#*://}"; HOST="${HOST%/}"
           wrote=0
 
-            if [ -n "${GIT_TOKEN:-}" ] && [ "$HOST" != "github.com" ]; then
+            if [ -n "${HANZO_GIT_TOKEN:-}" ] && [ "$HOST" != "github.com" ]; then
               # THE OWNER OF THE REPO IS NOT THE OWNER OF ITS MODULES. This rewrote
               # only github.com/$OWNER/, taking the repository owner as if it also
               # named the module namespace. That held until a repo changed org: cloud
@@ -1254,7 +1292,7 @@ jobs:
                 case " $seen " in *" $o "*) continue ;; esac
                 seen="$seen $o"
                 GIT_CONFIG_GLOBAL="$CFG" git config --global \
-                  url."${SCHEME}://x:${GIT_TOKEN}@${HOST}/${o}/".insteadOf \
+                  url."${SCHEME}://x:${HANZO_GIT_TOKEN}@${HOST}/${o}/".insteadOf \
                   "https://github.com/${o}/"
               done
               echo "our namespaces resolve from ${SCHEME}://${HOST}:$seen"
@@ -1931,8 +1969,6 @@ jobs:
         # mints the tag that starts it, so the publish credential stays where the
         # publish is.
         if: inputs.mode != 'delegate' && steps.client.outputs.ran == '1' && steps.client.outputs.changed == '1' && github.event_name != 'pull_request'
-        env:
-          GIT_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           git config user.name hanzo-dev; git config user.email dev@hanzo.ai
@@ -1994,10 +2030,16 @@ jobs:
           #
           # GITHUB_SERVER_URL is the host this run belongs to — Hanzo Git's
           # in-cluster address on a Hanzo Git runner — so the push is addressed the
-          # same way the checkout was, and GIT_TOKEN is the credential that
+          # same way the checkout was, and HANZO_GIT_TOKEN is the credential that
           # host takes. The tag lands where the publish workflow that watches
           # for it also lives.
-          [ -n "${GIT_TOKEN:-}" ] || { echo "::error::the cut pushes the projection back to git.hanzo.ai and needs GIT_TOKEN (contents:write)"; exit 1; }
+          #
+          # AND IT IS THE SEALED ONE, not the per-job token, which the paragraph
+          # below already measured being refused here: `User -2` IS the per-job
+          # token's identity, and main is protected. Reaching for it because it is
+          # the credential already on the wire is how that refusal happened the
+          # first time.
+          [ -n "${HANZO_GIT_TOKEN:-}" ] || { echo "::error::the cut pushes the projection back to git.hanzo.ai past a protected branch, which the per-job token cannot do — seal HANZO_GIT_TOKEN (contents:write) in KMS for this org"; exit 1; }
           REMOTE="${GITHUB_SERVER_URL:-https://git.hanzo.ai}"
           REMOTE="${REMOTE%/}/${{ github.repository }}"
           # CLEAR WHAT CHECKOUT WROTE FIRST. `http.extraHeader` is MULTI-VALUED
@@ -2020,7 +2062,7 @@ jobs:
           # checkout's own post-step only unsets what it still finds.
           git config --local --name-only --get-regexp '^http\..*extraheader$' 2>/dev/null \
             | while read -r k; do git config --local --unset-all "$k"; done
-          git config --local http.extraheader "Authorization: token ${GIT_TOKEN}"
+          git config --local http.extraheader "Authorization: token ${HANZO_GIT_TOKEN}"
           # The branch this run is on. act_runner leaves ref_name empty on an
           # ordinary push, and `HEAD:` with nothing after the colon is not a
           # refspec, so the default is spelled out rather than assumed.
