@@ -56,9 +56,9 @@ test:
     # The pipeline has ONE address: .hanzo/workflows/build.yml. Nothing runs on
     # github.com, so the constraint that used to split this in two — github.com
     # resolves a local reusable only out of `.github/workflows` — no longer buys
-    # anything, and the split it forced was costing the forge instead.
+    # anything, and the split it forced was costing Hanzo Git instead.
     #
-    # The forwarder is what broke. A caller naming the forwarder made the forge
+    # The forwarder is what broke. A caller naming the forwarder made Hanzo Git
     # take a second hop it cannot take: the run expanded into jobs with no labels,
     # no steps and no runner, and reported `failure` with nothing to read. Every
     # cicd lane in the fleet had been red that way for a day — insights, cloud,
@@ -206,11 +206,11 @@ test:
     #
     # build.yml cannot call bin/publishable, because the tools checkout and the
     # workflow resolve from DIFFERENT places: a caller pins the workflow at a ref
-    # its own forge resolves, while the tools step derives its ref from
+    # its own Hanzo Git resolves, while the tools step derives its ref from
     # GITHUB_WORKFLOW_REF — which git.hanzo.ai does not set, so it falls back to
     # `v1` and clones github.com. Measured on run 36473: `derived ref=v1`,
     # `cloned https://github.com/hanzoai/ci@v1`. So a step calling a NEW file
-    # under $CI_HOME is broken on every forge run until a tag moves on a host the
+    # under $CI_HOME is broken on every Hanzo Git run until a tag moves on a host the
     # caller never named. The pipeline has to carry its own rule.
     #
     # Which leaves the pattern in two files, which is the same shape as the two
