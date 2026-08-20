@@ -7,7 +7,7 @@
 # forwarder. Nothing runs on github.com, so the rule that used to force the split
 # — github.com resolves a local reusable (`uses: ./…`) only out of
 # `.github/workflows` — buys nothing, and the hop it forced was the thing
-# breaking the forge: a caller naming a forwarder made git.hanzo.ai take a second
+# breaking Hanzo Git: a caller naming a forwarder made git.hanzo.ai take a second
 # hop it cannot take, and the run expanded into jobs with no labels, no steps and
 # no runner, reporting `failure` with nothing to read. Every cicd lane in the
 # fleet sat red that way — insights, cloud, universe and this repo — while the
@@ -150,7 +150,7 @@ jobs:
         # bin/imgver is not on disk unless we fetch it. Pinned to the ref this
         # workflow was IMPORTED at, so the script and the pipeline calling it are
         # always the same version: a caller on @v1 gets v1's imgver, not main's.
-        # Both forges are tried because this same file is served from
+        # Both hosts are tried because this same file is served from
         # github.com/hanzoai/ci and git.hanzo.ai/hanzo/ci, and a caller may run on
         # either.
         #
@@ -160,14 +160,14 @@ jobs:
         env:
           # git.hanzo.ai answers 401 to ANONYMOUS git-over-http — for a PUBLIC repo
           # too (hanzoai/ci is public; `GET /hanzoai/ci/info/refs?service=git-upload-pack`
-          # returns 401 and the repo page 303s to a login). So the forge attempt
+          # returns 401 and the repo page 303s to a login). So Hanzo Git attempt
           # below could only ever fail, and every run fell through to the mirror.
           # Any signed-in identity satisfies it; the per-job token is one.
-          FORGE_TOKEN: ${{ github.token }}
+          GIT_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           echo "GITHUB_WORKFLOW_REF=${GITHUB_WORKFLOW_REF:-<unset>}"
-          # `:-` on the FIRST expansion. GITHUB_WORKFLOW_REF is unset on this forge
+          # `:-` on the FIRST expansion. GITHUB_WORKFLOW_REF is unset on this Hanzo Git
           # (proven: the step printed `GITHUB_WORKFLOW_REF=<unset>`), and under
           # `set -u` a bare ${GITHUB_WORKFLOW_REF##*@} is an unbound-variable error
           # that killed the step on this line -- before any clone was attempted, so
@@ -177,7 +177,7 @@ jobs:
           raw="${GITHUB_WORKFLOW_REF:-}"
           ref="${raw##*@}"; ref="${ref#refs/heads/}"; ref="${ref#refs/tags/}"; ref="${ref:-v1}"
           echo "derived ref=${ref}"
-          # The forge first, because the forge is where this repo is written and
+          # The Hanzo Git first, because Hanzo Git is where this repo is written and
           # GitHub is its mirror. `hanzo/ci` IS NOT THIS REPO and is gone from the
           # list: it is the tenant-org fork, whose v1 carries no bin/ at all, and
           # it sat SECOND — so on any run where github.com was unreachable it
@@ -189,7 +189,7 @@ jobs:
           # The break therefore tests for the TOOL rather than for the clone, so a
           # host that answers with the wrong tree falls through to the next.
           #
-          # The forge attempt CARRIES A CREDENTIAL, and without one "forge first"
+          # The Hanzo Git attempt CARRIES A CREDENTIAL, and without one "Hanzo Git first"
           # was a comment rather than a behaviour: the anonymous clone 401'd every
           # time, so the loop reached github.com on every run of every caller and
           # the fleet built against the MIRROR. The two hosts are not
@@ -201,8 +201,8 @@ jobs:
           #
           # http.extraheader, not credentials in $url: the URL is echoed above.
           hdr=()
-          if [ -n "${FORGE_TOKEN:-}" ]; then
-            b64=$(printf 'x-access-token:%s' "$FORGE_TOKEN" | base64 -w0)
+          if [ -n "${GIT_TOKEN:-}" ]; then
+            b64=$(printf 'x-access-token:%s' "$GIT_TOKEN" | base64 -w0)
             echo "::add-mask::$b64"
             hdr=(-c "http.extraheader=Authorization: Basic $b64")
           else
@@ -224,8 +224,8 @@ jobs:
           miss='<no host answered>'
           for url in https://git.hanzo.ai/hanzoai/ci https://github.com/hanzoai/ci; do
             echo "::group::clone ${url}@${ref}"
-            # The header goes ONLY to the forge: git sends http.extraheader to
-            # whatever host it is talking to, and a forge token must not be
+            # The header goes ONLY to Hanzo Git: git sends http.extraheader to
+            # whatever host it is talking to, and a Hanzo Git token must not be
             # handed to github.com.
             a=(); case "$url" in https://git.hanzo.ai/*) a=(${hdr[@]+"${hdr[@]}"}) ;; esac
             if git ${a[@]+"${a[@]}"} clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/ci"; then
@@ -505,12 +505,12 @@ jobs:
           #
           # INLINE, not "$CI_HOME/bin/publishable", and that is forced rather than
           # chosen. The tools checkout and this workflow resolve from DIFFERENT
-          # places: the caller pins the workflow at a ref its forge resolves, while
+          # places: the caller pins the workflow at a ref its Hanzo Git resolves, while
           # the tools step derives its ref from GITHUB_WORKFLOW_REF — which
           # git.hanzo.ai does not set, so it falls back to `v1` and clones
           # github.com. Measured on run 36473: `GITHUB_WORKFLOW_REF=<unset>`,
           # `derived ref=v1`, `cloned https://github.com/hanzoai/ci@v1`. A step
-          # that calls a NEW file under $CI_HOME is therefore broken on every forge
+          # that calls a NEW file under $CI_HOME is therefore broken on every Hanzo Git
           # run until a tag moves on a host this repo is not even pinned to.
           #
           # The rule is also spelled in bin/publishable, which the `publishable`
@@ -582,10 +582,10 @@ jobs:
           # asked KMS for nothing and reached the docker login step with empty
           # credentials. The build then failed at the push with no clue pointing
           # here, and the obvious "fix" is to paste REGISTRY_USER/REGISTRY_PASSWORD
-          # into the forge's org secrets, which is exactly the CI-only copy the
+          # into Hanzo Git's org secrets, which is exactly the CI-only copy the
           # comment below warns about: a second thing to rotate, and the one
           # nobody remembers. The contract is that the ONLY things living in the
-          # forge are KMS_CLIENT_ID/SECRET, so the fetch moves out of the gate
+          # Hanzo Git are KMS_CLIENT_ID/SECRET, so the fetch moves out of the gate
           # rather than the credential moving into GitHub.
           #
           # Empty is harmless: nothing is exported when KMS has no such key, and
@@ -959,7 +959,7 @@ jobs:
         # — cloud's next release included — ask a client repo "which document are
         # you?" without running a generator.
         #
-        # CREDENTIAL: FORGE_TOKEN, contents:read on hanzoai/cloud at git.hanzo.ai.
+        # CREDENTIAL: the job token Hanzo Git issues. No secret to provision.
         # TWO MODES, ONE FETCH, decided by the payload — because there are two
         # questions and they need the same document.
         #
@@ -980,17 +980,17 @@ jobs:
         id: client
         env:
           # ONE HOST, SO ONE CREDENTIAL. The document lives on git.hanzo.ai and
-          # FORGE_TOKEN is what reads git.hanzo.ai — the same secret hanzoai/cloud
+          # GIT_TOKEN is what reads git.hanzo.ai — the same secret hanzoai/cloud
           # already uses to cut the release tag this lane consumes.
           #
           # What stood here was a fallback chain, SPEC_TOKEN then GH_PAT, and both
-          # halves were wrong about which forge holds the document. SPEC_TOKEN is
+          # halves were wrong about which Hanzo Git holds the document. SPEC_TOKEN is
           # provisioned nowhere, so the lane always fell through; GH_PAT reads
           # github.com, which mirrors hanzoai/cloud 4,968 commits behind and does
           # not carry openapi.yaml at all. The chain therefore resolved to a
           # credential that authenticated fine against a host with no document on
           # it. It has never been safe — only unreached.
-          FORGE_TOKEN: ${{ secrets.FORGE_TOKEN }}
+          GIT_TOKEN: ${{ github.token }}
           PAYLOAD: ${{ toJson(github.event.client_payload) }}
         run: |
           set -euo pipefail
@@ -1031,9 +1031,9 @@ jobs:
           WANT=$(printf '%s' "$PAYLOAD" | jq -r '.spec_sha256 // ""')
           VERSION=$(printf '%s' "$PAYLOAD" | jq -r '.version // ""')
 
-          [ -n "${FORGE_TOKEN:-}" ] || { echo "::error::the client: lane reads the document from git.hanzo.ai and needs FORGE_TOKEN (contents:read on ${SPEC_REPO}); it is unset"; exit 1; }
+          [ -n "${GIT_TOKEN:-}" ] || { echo "::error::the client: lane reads ${SPEC_REPO} from git.hanzo.ai and the job token is empty"; exit 1; }
 
-          # THE FORGE IS WHERE THE DOCUMENT IS. This lane runs on git.hanzo.ai's
+          # GIT.HANZO.AI IS WHERE THE DOCUMENT IS. This lane runs on git.hanzo.ai's
           # own runners against a repo whose canonical home is git.hanzo.ai, and
           # it used to reach across to api.github.com for the bytes — a mirror
           # that trails hanzoai/cloud by thousands of commits and does not serve
@@ -1041,10 +1041,10 @@ jobs:
           # not a weaker version of asking the source; it is asking a different
           # question, and one whose answer no release ever produced.
           #
-          # The forge serves its API at /v1/, NOT /api/v1/ — /api/v1 returns a 404
+          # The Hanzo Git serves its API at /v1/, NOT /api/v1/ — /api/v1 returns a 404
           # that reads exactly like a rejected credential. Same route the CLI's
           # Makefile takes, because there is one document at one address.
-          curl -fsSL -H "Authorization: token ${FORGE_TOKEN}" \
+          curl -fsSL -H "Authorization: token ${GIT_TOKEN}" \
             "https://git.hanzo.ai/v1/repos/${SPEC_REPO}/raw/${SPEC_PATH}?ref=${REF}" -o "$RUNNER_TEMP/spec"
           GOT=$(sha256sum "$RUNNER_TEMP/spec" | cut -d' ' -f1)
 
@@ -1095,7 +1095,7 @@ jobs:
           # extraheader rather than a token in the URL: a clone URL is echoed by
           # git on failure and lands in the log verbatim.
           export OPENAPI="$RUNNER_TEMP/driver"
-          [ -d "$OPENAPI" ] || git -c http.extraheader="Authorization: token ${FORGE_TOKEN}" \
+          [ -d "$OPENAPI" ] || git -c http.extraheader="Authorization: token ${GIT_TOKEN}" \
             clone --depth 1 -q https://git.hanzo.ai/hanzoai/openapi "$OPENAPI"
 
           # AND AN INTERPRETER THAT CAN READ YAML, which is the driver's
@@ -1148,10 +1148,10 @@ jobs:
         # Reuse the SAME token here for the runner's git (GIT_TOKEN, set by the
         # KMS step above; GH_PAT fallback). No-op when neither is present.
         #
-        # AND OUR OWN MODULES RESOLVE FROM OUR OWN FORGE. A module path is a NAME,
+        # AND OUR OWN MODULES RESOLVE FROM GIT.HANZO.AI. A module path is a NAME,
         # not an address: `github.com/<owner>/x` is what the package is called, and
-        # which host git dials for it is a separate decision. On a forge runner
-        # that decision is the forge — the forge is where the code canonically
+        # which host git dials for it is a separate decision. On a Hanzo Git runner
+        # that decision is Hanzo Git — Hanzo Git is where the code canonically
         # lives, and github.com is fed by a mirror that trails it, sometimes by
         # hours and sometimes not at all.
         #
@@ -1165,19 +1165,19 @@ jobs:
         # ACL drift on ONE sibling module once blocked — but the gate that runs
         # its tests reached the modules through a different door.
         #
-        # go.sum is what makes this safe rather than merely convenient: the forge
+        # go.sum is what makes this safe rather than merely convenient: Hanzo Git
         # serves the same objects, so the fetched zip hashes to the h1: line
-        # already committed. A forge serving different bytes fails the build
+        # already committed. A Hanzo Git serving different bytes fails the build
         # loudly instead of shipping them.
         #
-        # Longest prefix wins in git, so the owner-scoped forge rule outranks the
+        # Longest prefix wins in git, so the owner-scoped Hanzo Git rule outranks the
         # bare github.com rule beneath it and every OTHER module still resolves
-        # from github.com. Both rules are optional and independent: no FORGE_TOKEN
+        # from github.com. Both rules are optional and independent: no GIT_TOKEN
         # (or a github.com-hosted run, where the server IS github.com) leaves the
         # old behaviour exactly as it was.
         #
         # SPLIT THE SERVER, do not strip a scheme you assumed. GITHUB_SERVER_URL
-        # on this fleet's runners is `http://hanzo-git.hanzo.svc` — the forge's
+        # on this fleet's runners is `http://hanzo-git.hanzo.svc` — Hanzo Git's
         # in-cluster address, plain http — and a `${SERVER#https://}` that only
         # knows the https spelling passes it through whole, producing
         # `https://http://hanzo-git.hanzo.svc/...` and a git that resolves the host
@@ -1187,7 +1187,7 @@ jobs:
         if: steps.gomod.outputs.file != ''
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
-          FORGE_TOKEN: ${{ secrets.FORGE_TOKEN }}
+          GIT_TOKEN: ${{ github.token }}
           OWNER: ${{ github.repository_owner }}
           GOMOD: ${{ steps.gomod.outputs.file }}
         run: |
@@ -1197,7 +1197,7 @@ jobs:
           SCHEME="${SERVER%%://*}"; HOST="${SERVER#*://}"; HOST="${HOST%/}"
           wrote=0
 
-            if [ -n "${FORGE_TOKEN:-}" ] && [ "$HOST" != "github.com" ]; then
+            if [ -n "${GIT_TOKEN:-}" ] && [ "$HOST" != "github.com" ]; then
               # THE OWNER OF THE REPO IS NOT THE OWNER OF ITS MODULES. This rewrote
               # only github.com/$OWNER/, taking the repository owner as if it also
               # named the module namespace. That held until a repo changed org: cloud
@@ -1208,15 +1208,15 @@ jobs:
               # anywhere — a rewrite that never fires leaves no trace.
               #
               # Rewrite OUR namespaces, not the repo's owner and not every namespace
-              # in go.mod: redirecting golang/ or google/ at our forge would break the
-              # whole graph. Ours are the brands we publish under; the forge is where
+              # in go.mod: redirecting golang/ or google/ at our Hanzo Git would break the
+              # whole graph. Ours are the brands we publish under; Hanzo Git is where
               # they live, and a module path is a name rather than an address.
               seen=""
               for o in hanzoai hanzo-inc hanzo-ds hanzokv hanzos3 luxfi luxwallet zooai "$OWNER"; do
                 case " $seen " in *" $o "*) continue ;; esac
                 seen="$seen $o"
                 GIT_CONFIG_GLOBAL="$CFG" git config --global \
-                  url."${SCHEME}://x:${FORGE_TOKEN}@${HOST}/${o}/".insteadOf \
+                  url."${SCHEME}://x:${GIT_TOKEN}@${HOST}/${o}/".insteadOf \
                   "https://github.com/${o}/"
               done
               echo "our namespaces resolve from ${SCHEME}://${HOST}:$seen"
@@ -1236,7 +1236,7 @@ jobs:
 
           # WHERE to get a module and whether to BELIEVE it are different questions,
           # and the rewrite above only answers the first. Go fetches our bytes from
-          # the forge, then verifies them against sum.golang.org — which never heard
+          # Hanzo Git, then verifies them against sum.golang.org — which never heard
           # of a module that was never published to the proxy, and answers 404. The
           # fetch succeeds and the build dies a step later saying only that a package
           # could not be placed. Measured: `go mod download
@@ -1894,7 +1894,7 @@ jobs:
         # publish is.
         if: inputs.mode != 'delegate' && steps.client.outputs.ran == '1' && steps.client.outputs.changed == '1' && github.event_name != 'pull_request'
         env:
-          FORGE_TOKEN: ${{ secrets.FORGE_TOKEN }}
+          GIT_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           git config user.name hanzo-dev; git config user.email dev@hanzo.ai
@@ -1954,12 +1954,12 @@ jobs:
           # first)` and `[remote rejected] v3.2.3`. The regeneration was correct
           # and landed nowhere, which is indistinguishable from never running.
           #
-          # GITHUB_SERVER_URL is the host this run belongs to — the forge's
-          # in-cluster address on a forge runner — so the push is addressed the
-          # same way the checkout was, and FORGE_TOKEN is the credential that
+          # GITHUB_SERVER_URL is the host this run belongs to — Hanzo Git's
+          # in-cluster address on a Hanzo Git runner — so the push is addressed the
+          # same way the checkout was, and GIT_TOKEN is the credential that
           # host takes. The tag lands where the publish workflow that watches
           # for it also lives.
-          [ -n "${FORGE_TOKEN:-}" ] || { echo "::error::the cut pushes the projection back to git.hanzo.ai and needs FORGE_TOKEN (contents:write)"; exit 1; }
+          [ -n "${GIT_TOKEN:-}" ] || { echo "::error::the cut pushes the projection back to git.hanzo.ai and needs GIT_TOKEN (contents:write)"; exit 1; }
           REMOTE="${GITHUB_SERVER_URL:-https://git.hanzo.ai}"
           REMOTE="${REMOTE%/}/${{ github.repository }}"
           # CLEAR WHAT CHECKOUT WROTE FIRST. `http.extraHeader` is MULTI-VALUED
@@ -1982,7 +1982,7 @@ jobs:
           # checkout's own post-step only unsets what it still finds.
           git config --local --name-only --get-regexp '^http\..*extraheader$' 2>/dev/null \
             | while read -r k; do git config --local --unset-all "$k"; done
-          git config --local http.extraheader "Authorization: token ${FORGE_TOKEN}"
+          git config --local http.extraheader "Authorization: token ${GIT_TOKEN}"
           # The branch this run is on. act_runner leaves ref_name empty on an
           # ordinary push, and `HEAD:` with nothing after the colon is not a
           # refspec, so the default is spelled out rather than assumed.
@@ -2035,8 +2035,8 @@ jobs:
           fi
           TAG="${{ github.ref_name }}"; REPO="${{ github.repository }}"
           IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo 1 || echo 0)
-          # The runner tells us which forge it is talking to — github.com on the
-          # GitHub side, a GHES/forge front door elsewhere. Reading it instead of
+          # The runner tells us which Hanzo Git it is talking to — github.com on the
+          # GitHub side, a GHES/Hanzo Git front door elsewhere. Reading it instead of
           # hardcoding the hostname is what keeps ONE lane serving both.
           SERVER="${GITHUB_SERVER_URL:-https://github.com}"
           API="${GITHUB_API_URL:-https://api.github.com}"
