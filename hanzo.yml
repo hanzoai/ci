@@ -74,7 +74,7 @@ test:
       grep -q '^      - name: ' "$def" || {
         echo "::error::$def holds no steps — it is the definition, not a forwarder"; exit 1; }
       grep -q '^    uses: ' "$def" && {
-        echo "::error::$def forwards somewhere — the forge cannot take a second hop, that is what this layout removed"; exit 1; } || true
+        echo "::error::$def forwards somewhere — Hanzo Git cannot take a second hop, that is what this layout removed"; exit 1; } || true
       [ -d .github/workflows ] && {
         echo "::error::.github/workflows is back — nothing runs on github.com and a second address is how the fleet went red"; exit 1; } || true
       echo "OK: one definition ($(wc -l < "$def") lines), no forwarder, no second address"
@@ -134,7 +134,7 @@ test:
         END {
           for (i = 1; i <= n; i++) {
             k = order[i]
-            if (type[k] != "string") { printf "::error::input `%s` is `type: %s` — this forge substitutes the zero value of a declared type, so anything but a string is a constant the caller cannot set\n", k, (type[k] ? type[k] : "<none>"); bad = 1 }
+            if (type[k] != "string") { printf "::error::input `%s` is `type: %s` — Hanzo Git substitutes the zero value of a declared type, so anything but a string is a constant the caller cannot set\n", k, (type[k] ? type[k] : "<none>"); bad = 1 }
             else if (!dflt[k])       { printf "::error::input `%s` declares no default — an omitted one then arrives as the empty string as though it had been chosen\n", k; bad = 1 }
             else printf "  %-12s string, with a default\n", k
           }
