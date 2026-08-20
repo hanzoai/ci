@@ -106,7 +106,7 @@ on:
         default: "false"
         type: string
       spec-ref:
-        # THE SECOND WAY INTO `move`, AND ON THIS FORGE THE ONLY ONE.
+        # THE SECOND WAY INTO `move`, AND ON HANZO GIT THE ONLY ONE.
         #
         # The client lane moves a projection's pin when it is told which document
         # to move to, and it read that from `github.event.client_payload` alone —
