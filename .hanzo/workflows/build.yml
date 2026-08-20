@@ -238,7 +238,7 @@ jobs:
             echo "::endgroup::"; rm -rf "$RUNNER_TEMP/ci"
           done
           [ -z "$miss" ] || {
-            echo "::error::hanzoai/ci@${ref} does not carry the tools this pipeline runs (missing: $miss). The tools resolve from ${ref} on every run because this forge does not tell a job its own ref, so a pipeline newer than ${ref} cannot reach them — move ${ref}, or pin the caller at a ref that carries both."
+            echo "::error::hanzoai/ci@${ref} does not carry the tools this pipeline runs (missing: $miss). The tools resolve from ${ref} on every run because Hanzo Git does not tell a job its own ref, so a pipeline newer than ${ref} cannot reach them — move ${ref}, or pin the caller at a ref that carries both."
             exit 1; }
           echo "CI_HOME=$RUNNER_TEMP/ci" >> "$GITHUB_ENV"
 
