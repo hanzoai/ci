@@ -105,6 +105,37 @@ on:
         required: false
         default: "false"
         type: string
+      spec-ref:
+        # THE SECOND WAY INTO `move`, AND ON THIS FORGE THE ONLY ONE.
+        #
+        # The client lane moves a projection's pin when it is told which document
+        # to move to, and it read that from `github.event.client_payload` alone —
+        # which `repository_dispatch` populates and nothing else does.
+        # git.hanzo.ai serves ONE dispatch endpoint,
+        # `/repos/{owner}/{repo}/actions/workflows/{id}/dispatches`, and no
+        # `repository_dispatch` at all, so every poke a release could send landed
+        # in `check`: re-read the LOCKED ref, assert its digest, exit before any
+        # write. A projection could therefore be poked by every release forever
+        # and never regenerate — measured, the SDKs sat on a document 254 commits
+        # old while their registries matched their tags exactly, because
+        # publishing was never what was broken.
+        #
+        # A caller passes the ref here and the payload stays supported, so this
+        # ADDS a door rather than moving one: every existing caller omits it,
+        # gets the empty default, and lands in `check` exactly as before.
+        description: "Spec ref to move the projection's .spec-lock to. Empty = check the locked ref and write nothing."
+        required: false
+        default: ''
+        type: string
+      spec-sha256:
+        # The digest the caller believes that ref hashes to. Optional, and worth
+        # passing: with it the fetch REFUSES a document whose bytes moved under
+        # the ref, which is the guard `repository_dispatch` carried as
+        # `spec_sha256`. Without it the lane still moves, just without that check.
+        description: "Expected sha256 of the spec at spec-ref. Empty = do not verify."
+        required: false
+        default: ''
+        type: string
       submodules:
         description: >-
           Passed straight to actions/checkout. Default '' is checkout's own
@@ -992,6 +1023,8 @@ jobs:
           # it. It has never been safe — only unreached.
           GIT_TOKEN: ${{ github.token }}
           PAYLOAD: ${{ toJson(github.event.client_payload) }}
+          SPEC_REF: ${{ inputs.spec-ref }}
+          SPEC_SHA256: ${{ inputs.spec-sha256 }}
         run: |
           set -euo pipefail
           yq -e '.client' hanzo.yml >/dev/null 2>&1 || { echo "no client: lane"; echo "ran=0" >> "$GITHUB_OUTPUT"; exit 0; }
@@ -1019,7 +1052,11 @@ jobs:
           # that opens a patch a person reads — and a second one here is two
           # notions of one document, which is the defect this lane exists to
           # prevent.
+          # The payload first, then the input: one meaning, two carriers, and the
+          # payload stays the senior one so a repository_dispatch caller on a host
+          # that has it behaves exactly as before.
           REF=$(printf '%s' "$PAYLOAD" | jq -r '.sha // .version // ""')
+          [ -n "$REF" ] || REF="${SPEC_REF:-}"
           LOCKED=$(sed -n 's/^ref=//p' .spec-lock 2>/dev/null || true)
           if [ -n "$REF" ]; then
             MODE=move
@@ -1029,6 +1066,7 @@ jobs:
           fi
           [ -n "$REF" ] || { echo "no payload and no .spec-lock — this tree names no document"; echo "ran=0" >> "$GITHUB_OUTPUT"; exit 0; }
           WANT=$(printf '%s' "$PAYLOAD" | jq -r '.spec_sha256 // ""')
+          [ -n "$WANT" ] || WANT="${SPEC_SHA256:-}"
           VERSION=$(printf '%s' "$PAYLOAD" | jq -r '.version // ""')
 
           [ -n "${GIT_TOKEN:-}" ] || { echo "::error::the client: lane reads ${SPEC_REPO} from git.hanzo.ai and the job token is empty"; exit 1; }
