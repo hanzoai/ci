@@ -210,7 +210,7 @@ jobs:
           fi
           # EVERY tool this pipeline invokes, checked here rather than discovered
           # one `command not found` at a time. The derived ref is a fallback, not
-          # a fact — GITHUB_WORKFLOW_REF is unset on this forge, so a caller pinned
+          # a fact — GITHUB_WORKFLOW_REF is unset on Hanzo Git, so a caller pinned
           # at any tag still gets `v1`'s bin/ — and a tag cut with a tool `v1` does
           # not carry gives every caller `exitcode 127` from a later step, which
           # names a shell rather than the skew that caused it. Measured: main
@@ -1438,7 +1438,7 @@ jobs:
         # Skipping the gate and passing the gate now read differently at a glance.
         #
         # The two conditions are complements over the same string, so exactly one
-        # of these steps runs and a receipt always exists. Should a forge ever make
+        # of these steps runs and a receipt always exists. Should a Hanzo Git ever make
         # both false — which is precisely how this input failed before — there is
         # no receipt, and the verdict refuses rather than reports green.
         if: inputs.tests == 'false'
@@ -1449,7 +1449,7 @@ jobs:
       - name: Test verdict
         # NO `if:`, and that is the design. This step's condition names no input,
         # so no input value can turn it off — not one a caller passes, not one a
-        # default supplies, and not one a forge substitutes for something the
+        # default supplies, and not one a Hanzo Git substitutes for something the
         # caller never wrote. Everything above it may be skipped; this runs, and
         # this is what passes or fails the phase.
         #
@@ -2041,7 +2041,7 @@ jobs:
           SERVER="${GITHUB_SERVER_URL:-https://github.com}"
           API="${GITHUB_API_URL:-https://api.github.com}"
           # Splitting uploads onto a second hostname is github.com's arrangement,
-          # not a rule every forge follows: elsewhere the release advertises an
+          # not a rule every Hanzo Git follows: elsewhere the release advertises an
           # upload_url on the API base it was created from, and a separate host
           # answers 404. So the base is the API unless the API is github.com's.
           case "$API" in
@@ -2075,7 +2075,7 @@ jobs:
           fi
           # Where a reader fetches the asset. github.com answers downloads on its
           # web host, which is what SERVER names there. Elsewhere SERVER can be
-          # the address the RUNNER reaches the forge on — in-cluster, unroutable
+          # the address the RUNNER reaches Hanzo Git on — in-cluster, unroutable
           # to anyone else — while the API is the public one, so the download host
           # is taken from the API rather than from SERVER. Path depth is not
           # assumed: only the scheme and host are kept.
@@ -2169,7 +2169,7 @@ jobs:
           # UPLOADS above. GIT_TOKEN comes from KMS and GH_PAT is the org's; both
           # are github.com's and answer 401 anywhere else, and GIT_TOKEN is always
           # set for a KMS org, so a fixed order hands a GitHub secret to whichever
-          # forge is listening. The per-job token is minted by the forge running
+          # Hanzo Git is listening. The per-job token is minted by Hanzo Git running
           # the job and can write a release on its own repo, which is the whole
           # of what this step needs.
           case "$API" in
@@ -2180,7 +2180,7 @@ jobs:
           # -f makes curl exit non-zero on an error status and DISCARD the body,
           # so the server's account of why it refused is thrown away and the step
           # reports only a number. The status is separated from the body instead,
-          # and a refusal is printed with what the forge said about it.
+          # and a refusal is printed with what Hanzo Git said about it.
           api() {
             local out status body
             out=$(curl -sS -w '\n%{http_code}' \
@@ -2198,7 +2198,7 @@ jobs:
           rel=$(api "$API/repos/$REPO/releases/tags/$TAG" 2>/dev/null | jq -r '.id // empty' || true)
           if [ -z "$rel" ]; then
             # -d sends form encoding unless told otherwise. github.com reads the
-            # body as JSON anyway; a forge that binds by content type reads these
+            # body as JSON anyway; a Hanzo Git that binds by content type reads these
             # fields as a form, finds none of them, and refuses for a missing
             # tag_name that is plainly there. The header goes on this call rather
             # than in api(), because curl accumulates -H instead of replacing it
