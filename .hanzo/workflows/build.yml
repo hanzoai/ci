@@ -127,6 +127,20 @@ on:
         required: false
         default: ''
         type: string
+      spec-version:
+        # THE RELEASE SAYS WHICH VERSION THIS IS, and every projection of one
+        # document answers to the same number. Without it each client counted its
+        # own patches, so npm `hanzoai` 2.2.11, PyPI `hanzoai` 3.2.14 and
+        # `hanzo-client` 0.1.3 all projected ONE document and no two of them said
+        # so -- a reader holding a client version could not name the API it was
+        # cut from, and a bug report could not say which surface it meant.
+        #
+        # Empty keeps today's behaviour exactly: the cut derives the next patch
+        # from whatever `client.version:` points at in this repo.
+        description: "Version to cut this projection at. Empty = derive the next patch from client.version."
+        required: false
+        default: ''
+        type: string
       spec-sha256:
         # The digest the caller believes that ref hashes to. Optional, and worth
         # passing: with it the fetch REFUSES a document whose bytes moved under
@@ -1054,6 +1068,7 @@ jobs:
           # indistinguishable from a document that was never written.
           PAYLOAD: ${{ toJson(github.event.client_payload) }}
           SPEC_REF: ${{ inputs.spec-ref }}
+          SPEC_VERSION_IN: ${{ inputs.spec-version }}
           SPEC_SHA256: ${{ inputs.spec-sha256 }}
         run: |
           set -euo pipefail
@@ -1098,6 +1113,8 @@ jobs:
           WANT=$(printf '%s' "$PAYLOAD" | jq -r '.spec_sha256 // ""')
           [ -n "$WANT" ] || WANT="${SPEC_SHA256:-}"
           VERSION=$(printf '%s' "$PAYLOAD" | jq -r '.version // ""')
+          # The payload is senior; the input is how a workflow_dispatch says it.
+          [ -n "$VERSION" ] || VERSION="${SPEC_VERSION_IN:-}"
 
           [ -n "${HANZO_GIT_TOKEN:-}" ] || { echo "::error::the client: lane reads ${SPEC_REPO} and hanzoai/openapi from git.hanzo.ai, which the per-job token cannot reach — seal HANZO_GIT_TOKEN (contents:read on both) in KMS for this org"; exit 1; }
 
@@ -2001,7 +2018,20 @@ jobs:
           esac
 
           NEXT=""
-          if [ -n "$CUR" ]; then
+          # THE RELEASE'S NUMBER WINS. A projection of one document answers to that
+          # document's version, so when the release handed one down the cut uses it
+          # verbatim instead of counting this repo's own patches. It is not a bump:
+          # two clients cut from one document get ONE number, which is the whole
+          # point of handing it down -- npm hanzoai 2.2.11, PyPI hanzoai 3.2.14 and
+          # hanzo-client 0.1.3 were three numbers for one surface.
+          #
+          # Already-published is not an error to pre-empt here: the registry refuses
+          # a duplicate itself, and that refusal names the real condition.
+          RELEASED="${{ steps.client.outputs.version }}"
+          if [ -n "$RELEASED" ]; then
+            NEXT="$RELEASED"
+            MSG="$MSG (${NEXT})"
+          elif [ -n "$CUR" ]; then
             case "$CUR" in
               *.*.*[!0-9.]*|*[!0-9.]*) echo "::error::client version '$CUR' is not x.y.z — declare a version: this lane can derive a patch from, or drop the key and cut by hand"; exit 1 ;;
             esac
