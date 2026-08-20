@@ -41,6 +41,13 @@ t "exact match builds"                    0 1.26.5 'FROM golang:1.26.5-alpine'
 t "newer image than floor is fine"        0 1.26.4 'FROM golang:1.26.5-alpine'
 t "much newer image is fine"              0 1.25.0 'FROM golang:1.26.5-bookworm'
 t "alpine suffix is not a Go patch"       0 1.26   'FROM golang:1.26-alpine3.24'
+# `go 1.26` is a floor of 1.26.0, so every patch of 1.26 satisfies it. Reading
+# that absence the way the IMAGE side reads it — newest patch — turns the floor
+# into 1.26.999 and refuses images that build. hanzoai/mod and mcp-gateway are
+# both this shape, and 16 repos write a two-part directive.
+t "two-part floor takes a patch-pinned image" 0 1.26 'FROM golang:1.26.5-bookworm'
+t "two-part floor takes its own .0"          0 1.26 'FROM golang:1.26.0-bookworm'
+t "two-part floor still refuses older minor" 1 1.26 'FROM golang:1.25.7-bookworm'
 t "registry prefix is stripped"           0 1.26.5 'FROM docker.io/library/golang:1.26.5-alpine'
 t "--platform flag is skipped"            0 1.26.5 'FROM --platform=$BUILDPLATFORM golang:1.26.5-alpine AS b'
 t "non-Go image is not our business"      0 1.26.5 'FROM alpine:3.21'

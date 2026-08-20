@@ -116,6 +116,17 @@ parse() { # parse <version-ish> -> "major minor patch"; empty when unparseable
 read -r mM mm mp <<<"$(parse "$govers")"
 [ -z "${mM:-}" ] && exit 0   # go.mod says something we cannot read; not our call
 
+# The two sides read a MISSING PATCH in opposite directions, so the floor is
+# computed here rather than by handing mp to num.
+#
+# On the image side no patch means the newest patch of that minor, because that
+# is what the registry serves — num's -1 -> 999. On the go.mod side `go 1.26` is
+# a FLOOR of 1.26.0: it is satisfied by 1.26.0 and by every patch above it.
+# Judging the floor by the image rule reads `go 1.26` as demanding 1.26.999 and
+# refuses golang:1.26.5, an image that builds it perfectly well — the false
+# positive this suite exists to keep out.
+floor=$(num "$mM" "$mm" $(( mp < 0 ? 0 : mp )))
+
 rc=0; n=0
 while IFS= read -r line; do
   # FROM [--flag ...] [registry/]golang:<tag> [AS stage]
@@ -134,7 +145,7 @@ while IFS= read -r line; do
   # `golang:alpine`, `golang:1-alpine`, `ARG GO_VERSION=INVALID` — no version to
   # compare. Say so once; do not guess and do not fail.
   [ -z "${iM:-}" ] && { echo "gover: $df: '$ref' names no Go version — cannot check it against $gosrc ($govers)"; continue; }
-  if [ "$(num "$iM" "$im" "$ip")" -lt "$(num "$mM" "$mm" "$mp")" ]; then
+  if [ "$(num "$iM" "$im" "$ip")" -lt "$floor" ]; then
     echo "::error file=$df::Go builder image is older than the module it builds: '$ref' provides Go $iM.$im${ip:+.$ip} but $gosrc requires go $govers. The golang images set GOTOOLCHAIN=local, so this build fails with 'go.mod requires go >= $govers'. Fix: pin the base to golang:$govers-<variant>, and add 'ENV GOTOOLCHAIN=auto' to the builder stage so a future go.mod bump downloads the toolchain instead of failing."
     rc=1
   elif [ "$ip" -lt 0 ] && [ "$mp" -ge 0 ]; then
