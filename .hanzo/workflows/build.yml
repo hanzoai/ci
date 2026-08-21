@@ -1155,16 +1155,27 @@ jobs:
           # different document than its siblings — refuse rather than publish a
           # client that describes a version nobody shipped.
           if [ -n "$WANT" ] && [ "$GOT" != "$WANT" ]; then
-            echo "::error::${SPEC_REPO}@${REF}:${SPEC_PATH} hashes to ${GOT}, but the release published ${WANT}"
+            echo "::error::${SPEC_URL} hashes to ${GOT}, but the release published ${WANT} — say where the bytes came from, because ${SPEC_REPO}@${REF}:${SPEC_PATH} is the label on them, not the source"
             exit 1
           fi
 
-          # THE LOCK ITSELF IS A GATE ON A CHECK: the ref is pinned, so the bytes
-          # behind it must be too. A digest that moved under a pinned ref means
-          # someone moved a tag, and no amount of regenerating makes that safe.
+          # The lock records which document this tree was generated from. It is
+          # NOT a gate on the check any more, and the reason is the line above:
+          # the bytes now come from what production serves, not from a pinned ref
+          # in a repository. Comparing today's document against the one the last
+          # regeneration recorded asks "has cloud shipped since?", answers yes on
+          # every release, and failed here saying "the ref moved under this
+          # projection" — about a file it had not opened, in a serialization
+          # (.json) that could never hash to what the lock recorded (.yaml).
+          #
+          # The question worth asking in check mode is whether the COMMITTED
+          # client still matches the document, and `$gen --check` answers it
+          # directly by regenerating into a temp tree and diffing. One question,
+          # answered once, by the thing that actually knows.
           if [ "$MODE" = check ]; then
-            HAVE=$(sed -n 's/^sha256=//p' .spec-lock)
-            [ "$GOT" = "$HAVE" ] || { echo "::error::${SPEC_REPO}@${REF}:${SPEC_PATH} hashes to ${GOT}, but .spec-lock says ${HAVE} — the ref moved under this projection"; exit 1; }
+            HAVE=$(sed -n 's/^sha256=//p' .spec-lock 2>/dev/null || true)
+            [ "$GOT" = "$HAVE" ] && echo "document unchanged since this projection was generated" \
+                                 || echo "document has moved since this projection was generated (lock ${HAVE:-none}, serving ${GOT}) — the diff below decides"
           else
             printf 'ref=%s\nsha256=%s\nrepo=%s\npath=%s\n' \
               "$REF" "$GOT" "$SPEC_REPO" "$SPEC_PATH" > .spec-lock
