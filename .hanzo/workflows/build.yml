@@ -796,14 +796,9 @@ jobs:
             echo "::notice::KMS GHCR token login failed — keeping the earlier login"
           fi
 
-      # oci.hanzo.ai IS THE HOST. registry.hanzo.ai was its alias and stopped
-      # resolving: /v2/ answers 404 there and 401 here, which is the difference
-      # between "no registry" and "a registry asking who you are". Because this
-      # step is best-effort by design — a mirror failure must not take the lane
-      # red — every build in the fleet has been quietly pushing GHCR-only since,
-      # logging a notice nobody reads. The credential needed no change: the
-      # in-cluster registry-credentials dockerconfig already carries auth for
-      # both names, and the jq below prefers the canonical one.
+      # oci.hanzo.ai is the host for images and charts. The credential is a
+      # direct REGISTRY_USER/PASSWORD when one is set, otherwise the in-cluster
+      # registry-credentials dockerconfig read through the KMS kubeconfig.
       - name: Native registry credential (oci.hanzo.ai)
         if: inputs.mode != 'delegate'
         env:
@@ -846,7 +841,7 @@ jobs:
           if [ -z "$CFG" ]; then
             echo "::warning::registry-credentials not readable from this kubeconfig — image will NOT reach oci.hanzo.ai (ghcr only)"; exit 0
           fi
-          USERPASS=$(echo "$CFG" | jq -r '.auths["oci.hanzo.ai"].auth // .auths["oci.hanzo.ai"].auth // empty' | base64 -d)
+          USERPASS=$(echo "$CFG" | jq -r '.auths["oci.hanzo.ai"].auth // empty' | base64 -d)
           [ -z "$USERPASS" ] && { echo "::warning::no registry auth in dockerconfig — image will NOT reach oci.hanzo.ai (ghcr only)"; exit 0; }
           echo "::add-mask::${USERPASS#*:}"
           # Best-effort: login failure → skip mirror, never fail the run (see above).
