@@ -27,11 +27,11 @@ concurrency:
 jobs:
   gate:
     uses: hanzoai/ci/.hanzo/workflows/build.yml@v1.0.84
-    # This repo owns the delegate lane, so this repo is where it is exercised:
-    # every push here sends its own image to the build door and a lane that
-    # stops working stops this repo's image, in view, on the first push. It
-    # costs nothing to prove it here — hanzo.yml declares only `images:` and
-    # `test:`, and delegate skips neither.
-    with:
-      mode: delegate
+    # buildx, because that is what this repo's image can be built by today.
+    # `mode: delegate` was measured here on this pin (run 338): the build door
+    # answers 403 to the identity a build holds, since its identity path admits
+    # an ADMIN of the org and a client-credentials principal is neither a member
+    # nor, by cloud's own denial, an admin. The lane presents the right thing and
+    # the door has to admit it; until it does, delegating here would only stop
+    # this repo's image from being built.
     secrets: inherit
