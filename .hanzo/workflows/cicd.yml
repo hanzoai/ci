@@ -21,9 +21,18 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+# Keyed on the COMMIT, not the ref. A push to main, a v* tag on that same
+# commit and a pull request for it are three refs and were three groups, so one
+# commit built three times at once and the runs raced to publish the image tag
+# this pipeline calls immutable. What must not overlap is "everything that
+# produces this artifact", and the artifact is a function of the commit.
+#
+# Not cancel-in-progress: a build is not made irrelevant by a newer commit — it
+# is producing that commit's own immutable tag, and killing it loses the
+# artifact rather than saving work.
 concurrency:
-  group: cicd-${{ github.ref }}
-  cancel-in-progress: true
+  group: cicd-${{ github.sha }}
+  cancel-in-progress: false
 jobs:
   gate:
     uses: hanzoai/ci/.hanzo/workflows/build.yml@v1.0.84
