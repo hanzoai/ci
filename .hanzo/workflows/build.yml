@@ -194,9 +194,9 @@ jobs:
         # github.com/hanzoai/ci and git.hanzo.ai/hanzo/ci, and a caller may run on
         # either.
         #
-        # Every clone attempt REPORTS. This step used to send both to /dev/null and
-        # print only "could not fetch", which named neither the ref it derived nor
-        # which host refused — so the failure could only be guessed at from source.
+        # Every clone attempt REPORTS. A bare "could not fetch" names neither the
+        # ref that was derived nor which host refused, which leaves the failure
+        # to be guessed at from source; both are echoed instead.
         env:
           # git.hanzo.ai answers 401 to ANONYMOUS git-over-http — for a PUBLIC repo
           # too (hanzoai/ci is public; `GET /hanzoai/ci/info/refs?service=git-upload-pack`
@@ -640,16 +640,15 @@ jobs:
           # The REGISTRY credential, and it is fetched UNCONDITIONALLY because
           # every repo that publishes an image needs it — which is most of them.
           #
-          # It used to sit inside the `bucket:`/`site:` gate below, and that gate
-          # is about writing bytes to hanzoai/s3, a completely unrelated lane. So
-          # a repo declaring only `images:` — hanzoai/bot, and it is not alone —
-          # asked KMS for nothing and reached the docker login step with empty
-          # credentials. The build then failed at the push with no clue pointing
-          # here, and the obvious "fix" is to paste REGISTRY_USER/REGISTRY_PASSWORD
-          # into Hanzo Git's org secrets, which is exactly the CI-only copy the
-          # comment below warns about: a second thing to rotate, and the one
-          # nobody remembers. The contract is that the ONLY things living in the
-          # Hanzo Git are KMS_CLIENT_ID/SECRET, so the fetch moves out of the gate
+          # Gating it on `bucket:`/`site:` would tie it to writing bytes to
+          # hanzoai/s3, an unrelated lane, and a repo declaring only `images:`
+          # would then ask KMS for nothing and reach docker login with empty
+          # credentials — failing at the push with no clue pointing back here.
+          # The tempting repair is to paste REGISTRY_USER/REGISTRY_PASSWORD into
+          # Hanzo Git's org secrets, which is exactly the CI-only copy the comment
+          # below warns about: a second thing to rotate, and the one nobody
+          # remembers. The contract is that the ONLY things living in Hanzo Git
+          # are KMS_CLIENT_ID/SECRET, so the fetch stays out of the gate
           # rather than the credential moving into GitHub.
           #
           # Empty is harmless: nothing is exported when KMS has no such key, and
@@ -737,13 +736,11 @@ jobs:
             # and readable is not the same as usable and every check before this
             # one stops at present.
             #
-            # This is the gap that took out hanzo.ai, cloud.hanzo.ai and
-            # docs.hanzo.ai at once. The key they baked, pk-live-c886…, was sealed,
-            # non-empty and correctly `pk-` shaped — it satisfied every gate in
-            # this file and in each repo's Dockerfile — but its PROJECT had been
-            # deleted, so the door answered 403 ingest_key_unknown and the sites
-            # lost 100% of their events while every build stayed green. docs then
-            # rebuilt cleanly on 08-06 and baked the same dead key again, because
+            # A key can be sealed, non-empty and correctly `pk-` shaped — passing
+            # every gate in this file and in each repo's Dockerfile — while its
+            # PROJECT no longer exists. The door then answers 403
+            # ingest_key_unknown, the site loses 100% of its events, and the build
+            # stays green; the next rebuild bakes the same dead key, because
             # nothing anywhere asks.
             #
             # Shape cannot see a deleted project; only the door knows. One POST
@@ -1179,9 +1176,8 @@ jobs:
           # THE GENERATOR IS HANDED THE DOCUMENT, NOT THE MEANS TO GO FIND ONE.
           # $SPEC is the bytes this step just fetched and digest-checked, so a
           # generator that reads it is generating from the release's document by
-          # construction. The scripts used to clone a second repo instead — and
-          # four of them cloned one that could not resolve at $SPEC_REF at all —
-          # which is how a projection came to describe a document no release
+          # construction. A generator that clones for itself can resolve a
+          # different ref, or none, and then describes a document no release ever
           # published. No credential travels onward: nothing downstream fetches.
           export SPEC="$RUNNER_TEMP/spec" SPEC_REF="$REF" SPEC_SHA256="$GOT" SPEC_VERSION="$VERSION"
 
@@ -1310,14 +1306,13 @@ jobs:
         # github.com/hanzoai/x names github.com — so that is where it is fetched
         # and this step's only job is to put a credential on that host.
         #
-        # It used to also rewrite our namespaces at the in-cluster forge, which
-        # made "which host served this module" a question with two answers and no
-        # way to tell from the failure which one had been asked. When that forge
-        # could not serve a repo it answered 404 rather than 403, `go` called it a
-        # module it could not place, and ONE unplaced module failed the whole
-        # package load — so every package in the graph came back
-        # `invalid package name: ""`, naming no host and no credential. Fourteen
-        # consecutive cloud runs read as broken code against a tree that builds.
+        # Rewriting our namespaces to a second host makes "which host served this
+        # module" a question with two answers and no way to read the answer off a
+        # failure. A forge that cannot serve a repo answers 404 rather than 403,
+        # `go` calls it a module it cannot place, and ONE unplaced module fails
+        # the whole package load — so every package in the graph comes back
+        # `invalid package name: ""`, naming neither host nor credential, and a
+        # tree that builds reads as broken code.
         #
         # Choosing a host is not this step's concern. Authenticating one is.
         if: steps.gomod.outputs.file != ''
@@ -1413,10 +1408,9 @@ jobs:
         #     *_test.sh, and which then reports zero results, fails. This one closes
         #     the gap the first leaves open: a runner that dies before printing, or
         #     whose suite is empty in a way that prints nothing at all, says neither
-        #     `[no test files]` nor a result, and used to pass. Measured across 102
-        #     repos: 54 gates declare a runner and report results, 8 declare one and
-        #     report nothing — and every one of those 8 is a repo already red for
-        #     other reasons, so nothing green turns red on the day this lands.
+        #     `[no test files]` nor a result. Measured across 102 repos: 54 gates
+        #     declare a runner and report results, 8 declare one and report
+        #     nothing — a rate low enough that refusing is affordable.
         #
         # `test:` IS THE GATE LIST, NOT THE TEST LIST — 37 of those 102 repos put
         # build, lint and typecheck in it and never claimed to test. Those keep
@@ -1626,10 +1620,10 @@ jobs:
       - name: Delegate build to the runner (mode=delegate)
         # Delegate moves WHERE the image is built. It does not move whether the
         # commit was gated — so this step sits AFTER `Test (per hanzo.yml)`, and
-        # every step the gate needs runs in both modes. It used to sit fourth,
-        # before any of them, and `mode: delegate` therefore skipped the gate
-        # along with the build: 20 steps skipped, 0 executed, green. "ci gates,
-        # the fabric builds" was the design and the ordering said otherwise.
+        # every step the gate needs runs in both modes. Placed before them,
+        # `mode: delegate` skips the gate along with the build and reports green
+        # over nothing: "ci gates, the fabric builds" is the design, and only the
+        # ordering can say so.
         #
         # ONE BUILD DOOR, and it is the one this file already names as the
         # publisher for `binaries:` — POST /v1/runner on api.hanzo.ai (cloud
@@ -1811,12 +1805,11 @@ jobs:
             # rather than after binfmt, a version derivation and a layer cache.
             "$CI_HOME/bin/gover" "$df" "$ctx"
             # ---- The semver this build publishes ----------------------------
-            # A branch build used to publish sha-<short7> and nothing else, so an
-            # image only earned a version when a human remembered to cut a git
-            # tag. That is the whole reason 14 of the fleet's 117 pins named a
-            # commit instead of a release: not drift, just the only tag CI ever
-            # offered them. Every build now publishes a version too, and the
-            # sha- tag stays beside it for forensics.
+            # EVERY build publishes a version, not only sha-<short7>. Publish the
+            # commit tag alone and an image earns a version only when a human
+            # remembers to cut a git tag, so the fleet ends up pinning commits
+            # instead of releases — not drift, just the only tag CI offered. The
+            # sha- tag stays beside the version for forensics.
             #
             # The number is DERIVED, never typed, by bin/imgver — the ONE
             # implementation, shared with the hand-rolled
@@ -1958,14 +1951,12 @@ jobs:
             # oci.hanzo.ai/<org>/<name>; public consumers keep ghcr, the fleet
             # is migrating to pull from ours.
             #
-            # A copy that does not land FAILS THE RUN. It used to print
-            # `::warning::` from a `while read` on the end of a pipeline — a
-            # child shell, where neither `set -e` nor an `exit` reaches the
-            # step — so a failed copy and a successful one produced the same
-            # green run and the same unread line. 73 of the fleet's 102
-            # first-party images were published to ghcr and never reached
-            # oci.hanzo.ai at all, every one of them under a green run. A
-            # mirror nobody is told about is a mirror nobody fills.
+            # A copy that does not land FAILS THE RUN, and the trap is where the
+            # refusal is written. A `while read` on the end of a pipeline is a
+            # CHILD SHELL: neither `set -e` nor an `exit` inside it reaches the
+            # step, so a `::warning::` there makes a failed copy and a successful
+            # one produce the same green run and the same unread line. A mirror
+            # nobody is told about is a mirror nobody fills.
             if [ "${MIRROR_OK:-}" = "1" ]; then
               # crane, not buildx imagetools: the IAM token realm doesn't answer
               # buildx's multi-scope token request (spec gap, tracked).
@@ -2412,16 +2403,12 @@ jobs:
         # call — the 99% path — and rollback is the same pointer aimed at an older
         # release.
         #
-        # WHY THIS LANE CHANGED. It used to stage the export with `mc mirror`
-        # against hanzoai/s3, gated on S3_ADMIN_ACCESS_KEY + S3_ADMIN_SECRET_KEY
-        # read from KMS. Those names are in KMS for NO org, and the step fails
-        # closed without them — so `site:` refused every caller that declared one
-        # and was dead code no repo could use. Measured before this change: of
-        # the 155 hanzo.yml files across the three orgs, NOT ONE carried a
-        # `site:` block, and hanzoai/console had grown its own build→zip→publish
-        # workflow to ship at all. Per-repo build logic is the one thing this contract exists to
-        # prevent, so the fix is not to provision that credential — it is to stop
-        # needing it.
+        # NO ADMIN S3 CREDENTIAL. Staging the export straight into hanzoai/s3
+        # needs an admin access key and secret, names KMS holds for no org — so
+        # such a lane fails closed for every caller, and the repos that need to
+        # ship grow their own build→zip→publish workflow instead. Per-repo build
+        # logic is the one thing this contract exists to prevent, so the answer is
+        # not to provision that credential; it is to stop needing one.
         #
         # The bytes travel around the API, not through it: /v1/projects/<slug>/
         # deployments answers with a presigned, prefix-scoped grant, each file

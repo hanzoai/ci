@@ -78,8 +78,8 @@ func countByOutcome(runs []Run) map[string]int {
 //
 // Status alone is NOT enough and getting this wrong is silent: Hanzo Git
 // reports every finished run as `completed` regardless of how it went, so
-// bucketing on status painted successes and cancellations as failures — on the
-// live instance that was 15 of 20 runs mislabelled red.
+// bucketing on status paints successes and cancellations as failures — on this
+// fleet that is most of the board.
 //
 // `cancelled` gets its own bucket rather than folding into failure. On this
 // fleet cancellations are the single largest category (superseded pushes cancel
