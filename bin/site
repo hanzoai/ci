@@ -246,9 +246,9 @@ fi
 # fails the deploy — one step later, from the call that means something.
 #
 # `|| true`, not `|| echo 000`: curl ALREADY writes 000 to stdout when it cannot
-# connect, so appending another made kcode `000000`, which matched no case and
-# took the hard-fail branch — a preflight that turned an unreachable API into
-# "your credential is revoked". Caught by the unreachable-host test below.
+# connect, so appending another makes kcode `000000`, which matches no case and
+# falls to the hard-fail branch — a preflight that reports an unreachable API as
+# "your credential is revoked". Pinned by the unreachable-host test below.
 kcode=$(curl -sS -o /dev/null -w '%{http_code}' \
   -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN" "$api/v1/keys" || true)
 case "$kcode" in
@@ -405,11 +405,10 @@ jq -c '{status,liveUrl,version,files,bytes}' "$work"/sd-resp.json
 
 # ---- 4. read back what we just published ------------------------------------
 # A publish that uploads and flips live has still proved nothing about whether
-# the bytes come back. On 2026-08-15 hanzo.ai's apex served `HTTP/2 200` with a
-# correct `content-length: 96475`, a valid MD5 etag — and ZERO body bytes, for
-# 35 minutes. StatObject knew a size GetObject could not deliver. Exactly two
-# objects were affected, index.html and 404.html, both from one publish; every
-# sibling path served fine, so nothing that walked routes would have caught it.
+# the bytes come back. An object store can answer `200` with a correct
+# `content-length` and a valid MD5 etag and then deliver ZERO body bytes —
+# StatObject knowing a size GetObject cannot serve. It strikes per object, so
+# sibling paths stay healthy and nothing that merely walks routes sees it.
 #
 # A HEAD is blind to this by construction: it never asks for a body, so `curl -I`
 # reports a healthy 200 on a page that cannot load. The check has to DOWNLOAD and

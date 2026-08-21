@@ -30,7 +30,7 @@ tmsg() {
 }
 
 # --- the refusal: image below the module floor ------------------------------
-# This is the visor v1.108.16 shape exactly.
+# The shape that dies mid-build under GOTOOLCHAIN=local.
 t "patch below floor is refused"          1 1.26.5 'FROM golang:1.26.4-alpine'
 t "minor below floor is refused"          1 1.26.5 'FROM golang:1.25-alpine'
 t "ancient relic is refused"              1 1.26.4 'FROM golang:1.10.1'

@@ -18,12 +18,12 @@
 #   "module source tree too large (max size is 524288000 bytes)"
 #   "total uncompressed size of module contents too large (...)"
 #
-# hanzoai/cloud crossed it and became UNFETCHABLE for nine consecutive
-# releases. Nothing said so. The module publishes fine — the ceiling is
-# enforced on the CONSUMER, at `go get`, so the failure surfaces in someone
-# else's repo, at a version they did not choose, long after the release that
-# caused it. There is no signal at the publishing end at all, which is why nine
-# releases went out before anybody knew.
+# Crossing it makes a module UNFETCHABLE, and nothing at the publishing end
+# says so: the module publishes fine, because the ceiling is enforced on the
+# CONSUMER, at `go get`. The failure surfaces in someone else's repo, at a
+# version they did not choose, long after the release that caused it — so
+# releases keep going out over a broken module until a consumer reports it.
+# This gate is the missing signal at the publishing end.
 #
 # WHY THIS SUMS RAW BYTES AND WHY THAT IS EXACT, NOT AN APPROXIMATION
 #
@@ -55,7 +55,7 @@
 # THE THRESHOLD IS BELOW THE CEILING ON PURPOSE
 #
 # Failing AT 500 MiB would be useless — at that point the module is already
-# unfetchable and the only question left is how many releases shipped broken.
+# unfetchable, and every release since it crossed is already broken.
 # The gate refuses at MODSIZE_MAX_PCT (default 80%, ~419 MiB), which is the
 # "warn well before" — spelled as a refusal, because a warning about a cliff
 # nobody is watching is the same defect one level up. 105 MiB of headroom is
