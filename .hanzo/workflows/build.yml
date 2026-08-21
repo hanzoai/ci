@@ -1083,7 +1083,13 @@ jobs:
           set -euo pipefail
           yq -e '.client' hanzo.yml >/dev/null 2>&1 || { echo "no client: lane"; echo "ran=0" >> "$GITHUB_OUTPUT"; exit 0; }
 
-          SPEC_REPO=$(yq -r '.client.spec.repo // "hanzoai/cloud"' hanzo.yml)
+          # hanzo-inc/cloud holds the document. hanzoai/cloud is its mirror
+          # shell — 847 KB against 526 MB — and naming it here put a repo that
+          # does not carry openapi.yaml into every projection's receipt and
+          # every "regenerate from" commit message. The bytes come from
+          # SPEC_URL below, so this is the label on them; a wrong label is just
+          # a quieter kind of wrong.
+          SPEC_REPO=$(yq -r '.client.spec.repo // "hanzo-inc/cloud"' hanzo.yml)
           SPEC_PATH=$(yq -r '.client.spec.path // "openapi.yaml"' hanzo.yml)
           # A MOVE IS A RUN THAT WAS HANDED A REF, and nothing else is. The
           # payload is the only thing that ever names a new document, so it is
