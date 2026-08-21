@@ -1390,7 +1390,6 @@ jobs:
               # in a way that failing is not: a module path is a name, and
               # github.com is where that name resolves for anyone outside this
               # cluster.
-              probe="${SCHEME}://x-access-token:${HANZO_API_TOKEN}@${HOST}/hanzoai/dbx"
               # `seen` is the list of OUR namespaces and is set either way. It is
               # what the GOPRIVATE probe below iterates, and a module that is not
               # on the public proxy needs naming there whichever host serves it —
@@ -1401,7 +1400,25 @@ jobs:
                 case " $seen " in *" $o "*) continue ;; esac
                 seen="$seen $o"
               done
-              if git ls-remote --heads "$probe" >/dev/null 2>&1; then
+              # PROBE WHAT THIS BUILD ACTUALLY NEEDS, not a name chosen in advance. A
+              # hardcoded target proves only that the forge serves THAT repo: the first
+              # spelling of this asked for hanzoai/dbx, which the forge serves to anyone,
+              # so it passed on a runner whose token could not read hanzoai/account — and
+              # the rewrite was written anyway, which is the failure it was added to catch.
+              # Take the first of our modules out of this repo's own go.mod and ask for
+              # that; it is by definition a module this build has to place.
+              probe_mod=""
+              if [ -n "${GOMOD:-}" ] && [ -f "$GOMOD" ]; then
+                for o in $seen; do
+                  # A VERSION MUST FOLLOW IT, which is what makes this a REQUIREMENT and
+                  # not the `module` line naming this repo itself — probing your own
+                  # module proves nothing about the dependencies you cannot place.
+                  probe_mod=$(grep -oE "github[.]com/${o}/[a-z0-9._-]+ v[0-9][^ ]*" "$GOMOD" | head -1 | cut -d" " -f1)
+                  [ -n "$probe_mod" ] && break
+                done
+              fi
+              probe="${SCHEME}://x-access-token:${HANZO_API_TOKEN}@${HOST}/${probe_mod#github.com/}"
+              if [ -n "$probe_mod" ] && git ls-remote --heads "$probe" >/dev/null 2>&1; then
                 for o in $seen; do
                   GIT_CONFIG_GLOBAL="$CFG" git config --global \
                     url."${SCHEME}://x-access-token:${HANZO_API_TOKEN}@${HOST}/${o}/".insteadOf \
@@ -1410,7 +1427,7 @@ jobs:
                 echo "our namespaces resolve from ${SCHEME}://${HOST}:$seen"
                 wrote=1
               else
-                echo "::warning::${HOST} did not serve hanzoai/dbx to this identity, so our modules resolve from github.com instead. Give HANZO_API_TOKEN read access to the hanzoai namespace to fetch them in-cluster."
+                echo "::warning::${HOST} did not serve ${probe_mod:-our modules} to this identity, so they resolve from github.com instead. Give HANZO_API_TOKEN read access to that namespace on the forge to fetch them in-cluster."
               fi
             fi
 
