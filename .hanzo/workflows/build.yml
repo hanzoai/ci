@@ -1231,7 +1231,17 @@ jobs:
             git -c http.extraheader="Authorization: Basic $(printf 'x-access-token:%s' "$HANZO_API_TOKEN" | base64 -w0)" \
               clone --depth 1 -q https://git.hanzo.ai/hanzoai/openapi "$OPENAPI" 2>"$RUNNER_TEMP/driver.err" || {
               sed 's/^/  /' "$RUNNER_TEMP/driver.err" >&2
-              echo "::error::hanzoai/openapi is private and git.hanzo.ai refused this org's IAM token. That token is a MACHINE identity from the KMS client-credentials exchange, and git.hanzo.ai resolves an IAM subject through the account it is linked to (services/auth/iam.go) — a machine subject no sign-in ever linked resolves to nobody, so the credential is valid and still authorizes nothing. Link the machine identity to a service account there, or let the driver repo be readable by it." >&2
+              # The subject and issuer, decoded from the token's PAYLOAD. Both are
+              # identifiers — `<owner>/<name>` and a URL — and neither is the
+              # credential; the signature is never touched. Printed because the
+              # fix is "link THIS subject", and every other way to learn it means
+              # handling the token by hand.
+              claim=$(printf '%s' "${HANZO_API_TOKEN#*.}" | cut -d. -f1 \
+                      | tr '_-' '/+' | { read -r p; printf '%s' "$p$(printf '%*s' $(( (4 - ${#p} % 4) % 4 )) '' | tr ' ' '=')"; } \
+                      | base64 -d 2>/dev/null || true)
+              sub=$(printf '%s' "$claim" | jq -r '.sub // "unreadable"' 2>/dev/null || echo unreadable)
+              iss=$(printf '%s' "$claim" | jq -r '.iss // "unreadable"' 2>/dev/null || echo unreadable)
+              echo "::error::hanzoai/openapi is private and git.hanzo.ai refused this org's IAM token. The token is a MACHINE identity from the KMS client-credentials exchange — subject ${sub}, issued by ${iss} — and git.hanzo.ai resolves an IAM subject through the account it is linked to (services/auth/iam.go). A machine subject no sign-in ever linked resolves to nobody, so the credential verifies and still authorizes nothing. Link ${sub} to a service account on git.hanzo.ai, or let the driver repo be readable by it." >&2
               exit 1
             }
           fi
