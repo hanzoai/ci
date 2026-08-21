@@ -26,5 +26,5 @@ concurrency:
   cancel-in-progress: true
 jobs:
   gate:
-    uses: hanzoai/ci/.hanzo/workflows/build.yml@v1.0.78
+    uses: hanzoai/ci/.hanzo/workflows/build.yml@v1.0.79
     secrets: inherit
