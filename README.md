@@ -160,7 +160,7 @@ lines.
 
 ```yaml
 client:
-  spec: { repo: hanzoai/cloud, path: openapi.yaml }   # these are the defaults
+  spec: { repo: hanzo-inc/cloud, path: openapi.yaml }  # these are the defaults
   generate: ./scripts/generate.sh        # $SPEC is the fetched document
   version:  'package.json:jq -r .version package.json'   # optional; see below
 ```
