@@ -105,8 +105,8 @@ func TestSplitImageKeepsBothNames(t *testing.T) {
 		{"ghcr.io/hanzoai/cloud@sha256:8830", "ghcr.io/hanzoai/cloud", Version{Digest: "sha256:8830"}},
 		{"ghcr.io/hanzoai/cloud", "ghcr.io/hanzoai/cloud", Version{}},
 		// A colon before the last slash is a registry port, not a tag.
-		{"registry.hanzo.ai:5000/hanzoai/a:v1", "registry.hanzo.ai:5000/hanzoai/a", Version{Tag: "v1"}},
-		{"registry.hanzo.ai:5000/hanzoai/a", "registry.hanzo.ai:5000/hanzoai/a", Version{}},
+		{"oci.hanzo.ai:5000/hanzo/a:v1", "oci.hanzo.ai:5000/hanzo/a", Version{Tag: "v1"}},
+		{"oci.hanzo.ai:5000/hanzo/a", "oci.hanzo.ai:5000/hanzo/a", Version{}},
 	}
 	for _, tc := range cases {
 		image, got := splitImage(tc.ref)
