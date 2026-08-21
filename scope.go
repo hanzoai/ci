@@ -7,12 +7,11 @@ import (
 
 // scope.go answers exactly one question: whose builds may THIS request see?
 //
-// It exists because the first cut of this service conflated a FILTER with a
-// GATE. `?org=lux` narrowed what was rendered and read like tenancy, but it
-// decided nothing about who was allowed to ask — so /v1/runs answered 200 to
-// anyone on the internet with every org's repo names, branches, commit SHAs and
-// actor logins. A query parameter is a request for a view; it can never be the
-// authority for one.
+// It exists to keep a FILTER and a GATE apart. `?org=lux` narrows what is
+// rendered and reads like tenancy, but it decides nothing about who may ask: a
+// query parameter is a request for a view, never the authority for one. Conflate
+// the two and every org's repo names, branches, commit SHAs and actor logins are
+// one URL away from an unauthenticated caller.
 //
 // The authority is X-Org-Id, minted by admin-guard from the IAM-verified `owner`
 // claim and written onto the request by the ingress middleware's

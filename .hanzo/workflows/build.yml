@@ -4,19 +4,15 @@
 # with `uses: hanzoai/ci/.hanzo/workflows/build.yml@v1` + `secrets: inherit`.
 #
 # THE DEFINITION LIVES HERE, AND ONLY HERE. There is no second address and no
-# forwarder. Nothing runs on github.com, so the rule that used to force the split
-# — github.com resolves a local reusable (`uses: ./…`) only out of
-# `.github/workflows` — buys nothing, and the hop it forced was the thing
-# breaking Hanzo Git: a caller naming a forwarder made git.hanzo.ai take a second
-# hop it cannot take, and the run expanded into jobs with no labels, no steps and
-# no runner, reporting `failure` with nothing to read. Every cicd lane in the
-# fleet sat red that way — insights, cloud, universe and this repo — while the
-# deploy lanes, which name their runner directly, stayed green and hid it.
+# forwarder. Nothing runs on github.com, so the rule that would force a split —
+# github.com resolves a local reusable (`uses: ./…`) only out of
+# `.github/workflows` — buys nothing here, and the hop it forces is one Hanzo Git
+# cannot take: a caller naming a forwarder expands into jobs with no labels, no
+# steps and no runner, reporting `failure` with nothing to read. Only the cicd
+# lanes can show that; deploy lanes name their runner directly and are unaffected.
 #
-# One file means nothing to keep in sync. The two copies drifted inside a day
-# when both held one — twenty lines landed in one and not the other — and the
-# forwarder that replaced the copy traded that drift for a hop that does not
-# resolve. hanzo.yml's `one-definition` gate now asserts the simple thing: the
+# One file also means nothing to keep in sync — two copies of a pipeline drift
+# within a day. hanzo.yml's `one-definition` gate asserts both properties: the
 # pipeline is here, it holds steps, and no workflow has reappeared under
 # `.github/workflows` to become a second address.
 #
@@ -31,8 +27,8 @@ on:
           Runner labels as a JSON array. Default = the Hanzo `git-runner` fleet
           on git.hanzo.ai, which is the ONLY pool serving these labels (we run
           the build, metered as build minutes). Bring-your-own: pass the labels
-          of your own self-hosted runners instead. There is no arc pool: arc
-          (arcd) was retired 2026-08-01 and no label here was ever served by it.
+          of your own self-hosted runners instead. There is no arc pool — arc
+          (arcd) is retired, and no label here is served by anything but the fleet.
         type: string
         default: '["hanzo-build-linux-amd64"]'
       mode:
@@ -45,10 +41,10 @@ on:
           already mints from KMS_CLIENT_ID / KMS_CLIENT_SECRET.
 
           THE GATE RUNS IN BOTH MODES, and that is the whole point of the input
-          being named for the build. `delegate` used to be evaluated fourth, ahead
-          of every toolchain and ahead of `test:`, so it skipped the gate along
-          with the build — 20 steps skipped, 0 executed, green. What a delegated
-          run skips is buildx, publish and deploy. It does not skip being tested.
+          being named for the build. Order it ahead of the toolchains and ahead of
+          `test:` and it skips the gate along with the build, finishing green over
+          nothing. What a delegated run skips is buildx, publish and deploy. It
+          does not skip being tested.
         type: string
         default: buildx
       tests:
@@ -65,22 +61,20 @@ on:
           STRING, NOT BOOLEAN, AND THAT IS LOAD-BEARING. git.hanzo.ai resolves
           EVERY `type: boolean` workflow_call input to false — not just an omitted
           one carrying a default, but an explicitly passed `true` as well. Measured
-          in isolation (z/inputprobe, runs 27365 and 27382): with `type: boolean,
-          default: true` and a caller that omits it, `inputs.tests` printed
-          `false`; a caller passing `with: {tests: true}` printed `false` too;
-          inverting the polarity to a `skip_tests` boolean printed `false` when
-          `true` was passed. String inputs in the SAME probe resolved correctly —
-          `mode` printed `buildx` and `runner` printed its full JSON array from
-          their declared defaults.
+          in isolation: with `type: boolean, default: true` and a caller that omits
+          it, `inputs.tests` prints `false`; a caller passing `with: {tests: true}`
+          prints `false` too; inverting the polarity to a `skip_tests` boolean
+          prints `false` when `true` is passed. String inputs in the SAME probe
+          resolve correctly — `mode` prints `buildx` and `runner` prints its full
+          JSON array from their declared defaults.
 
-          So for as long as this input was a boolean, `if: ... && inputs.tests` was
-          false on EVERY run, and the step below never executed. That is not a
-          hypothetical: on 2026-08-04 the last two `cicd.yml` runs of hanzoai/cloud,
-          commerce, console, gateway, hanzo.ai AND hanzoai/ci itself all reported
-          completed/success with `Test (per hanzo.yml)` = skipped. Every `test:`
-          block in the fleet was declared, was read, and had never once run — a
-          green over zero tests, which the step below exists specifically to refuse
-          when a SUITE is empty, and which had swallowed the whole gate.
+          A boolean here is therefore the constant `false`, `if: ... && inputs.tests`
+          never holds, and the step below never executes. The failure is silent in
+          the worst way: the run reports completed/success with `Test (per
+          hanzo.yml)` = skipped, so a `test:` block can be declared, be read, and
+          never once run. That is a green over zero tests — the exact thing the
+          step below exists to refuse when a SUITE is empty — swallowing the gate
+          whole.
 
           A string sidesteps it on both planes with identical meaning, and the
           comparison is against 'false' rather than a truthiness test so that the
@@ -241,15 +235,13 @@ jobs:
           # The break therefore tests for the TOOL rather than for the clone, so a
           # host that answers with the wrong tree falls through to the next.
           #
-          # The Hanzo Git attempt CARRIES A CREDENTIAL, and without one "Hanzo Git first"
-          # was a comment rather than a behaviour: the anonymous clone 401'd every
-          # time, so the loop reached github.com on every run of every caller and
-          # the fleet built against the MIRROR. The two hosts are not
-          # interchangeable while the mirror lags — measured 2026-08-14,
-          # git.hanzo.ai v1 = a9e13341 and github.com v1 = 3a3f7457, and the run
-          # that failed studio checked out 3a3f7457. A repo that has just
-          # published a ref is unusable until the mirror catches up, which reads
-          # as a broken pin rather than as a stale mirror.
+          # The Hanzo Git attempt CARRIES A CREDENTIAL, without which "Hanzo Git
+          # first" is a comment rather than a behaviour: an anonymous clone 401s
+          # every time, the loop falls through to github.com on every run, and the
+          # fleet builds against the MIRROR. The two hosts are not interchangeable
+          # while the mirror lags — the same ref names different commits on each
+          # until it catches up, so a repo that has just published one reads as a
+          # broken pin rather than as a stale mirror.
           #
           # http.extraheader, not credentials in $url: the URL is echoed above.
           hdr=()
@@ -302,9 +294,9 @@ jobs:
         #   ignoretracked — content the repo's OWN .gitignore matches but the
         #     index still tracks. An ignore rule does not untrack what is
         #     already tracked, so the bulk ships in every release while
-        #     `git status` stays clean. hanzoai/cloud carried 361 MB this way
-        #     for 6 days — past Go's 500 MiB module-zip ceiling, making nine
-        #     consecutive releases unfetchable by every consumer.
+        #     `git status` stays clean. A few hundred MB of build output
+        #     accumulates this way in days and carries the module past Go's
+        #     500 MiB zip ceiling, at which point every release is unfetchable.
         #   modsize — each Go module tree measured against that same ceiling,
         #     nested modules separately. Past it, `go get` fails everywhere
         #     with 'module source tree too large'; near it, this is the only
@@ -548,22 +540,17 @@ jobs:
           # so its ingest key must be inlined at build, and inlining it is what
           # publishing it means. Every other value must not be here at all.
           #
-          # Nothing checked that. The one repo whose value is genuinely
-          # publishable (hanzoai/ui, a `pk-…` ingest key) asserted the `pk-`
-          # prefix INSIDE ITS OWN Dockerfile — so the check existed once, for one
-          # image, and any repo that added a real credential got no check at all.
-          # Per-repo vigilance is not a mechanism; the assertion belongs here,
-          # where the build-arg is assembled, once, for every caller.
+          # A repo asserting its own prefix inside its own Dockerfile checks one
+          # image; per-repo vigilance is not a mechanism. The assertion belongs
+          # here, where the build-arg is assembled, once, for every caller.
           #
           # INLINE, not "$CI_HOME/bin/publishable", and that is forced rather than
           # chosen. The tools checkout and this workflow resolve from DIFFERENT
-          # places: the caller pins the workflow at a ref its Hanzo Git resolves, while
-          # the tools step derives its ref from GITHUB_WORKFLOW_REF — which
-          # git.hanzo.ai does not set, so it falls back to `v1` and clones
-          # github.com. Measured on run 36473: `GITHUB_WORKFLOW_REF=<unset>`,
-          # `derived ref=v1`, `cloned https://github.com/hanzoai/ci@v1`. A step
-          # that calls a NEW file under $CI_HOME is therefore broken on every Hanzo Git
-          # run until a tag moves on a host this repo is not even pinned to.
+          # refs: the caller pins the workflow at a ref Hanzo Git resolves for it,
+          # while the tools step derives its ref from GITHUB_WORKFLOW_REF — which
+          # git.hanzo.ai does not set, so it falls back to `v1`. A step calling a
+          # file that `v1` does not carry cannot run until `v1` moves, and a rule
+          # this pipeline enforces has to be reachable on the run enforcing it.
           #
           # The rule is also spelled in bin/publishable, which the `publishable`
           # gate tests. Two spellings of one rule is the same shape as the two
@@ -1107,23 +1094,19 @@ jobs:
           # payload is the only thing that ever names a new document, so it is
           # the only thing that decides. A value, not a place.
           #
-          # It used to ask `github.event_name`, and here that question has no
-          # answer: git.hanzo.ai reports `workflow_call` to a reusable whatever
+          # `github.event_name` cannot decide it, because here that question has
+          # no answer: git.hanzo.ai reports `workflow_call` to a reusable whatever
           # the caller's event was — measured across 24 repos, where `push`,
-          # `schedule` and `workflow_dispatch` all render the same string. So
-          # `push` never matched, MODE was `move` on every run in the fleet, and
-          # the check half was unreachable. Nine plain pushes regenerated,
-          # committed to main and cut a release tag off a document nobody had
-          # asked them for.
+          # `schedule` and `workflow_dispatch` all render the same string. Asking
+          # it makes every run a move, so an ordinary push regenerates, commits to
+          # main and cuts a release tag off a document nobody asked for.
           #
-          # AND IT NO LONGER GOES LOOKING. With no payload it read hanzoai/cloud's
-          # newest tag, on the theory that a tag is by construction a document
-          # production already serves. v1.801.507 is not on cloud's main and
-          # carries no openapi.yaml at all, so the fetch below could only 404 and
-          # it took the whole job with it. The pin has ONE owner — the re-pin
-          # that opens a patch a person reads — and a second one here is two
-          # notions of one document, which is the defect this lane exists to
-          # prevent.
+          # AND IT DOES NOT GO LOOKING. Reading a newest tag when no ref is given
+          # assumes a tag is by construction a document production serves, and a
+          # tag on a mirror shell need not carry openapi.yaml at all — the fetch
+          # then 404s and takes the job with it. The pin has ONE owner: the re-pin
+          # that opens a patch a person reads. A second one here is two notions of
+          # one document, the defect this lane exists to prevent.
           # The payload first, then the input: one meaning, two carriers, and the
           # payload stays the senior one so a repository_dispatch caller on a host
           # that has it behaves exactly as before.
@@ -1210,12 +1193,11 @@ jobs:
           # different file over raw.githubusercontent.com. Five ways to reach one
           # tool, four of them needing a credential the call site does not have.
           #
-          # Measured on the first dispatch that ever reached this step (hanzoai/
-          # python-sdk, run 44584): `fatal: could not read Username for
-          # 'https://git.hanzo.ai'`, exit 128 — an anonymous clone of a private
-          # repo, from a job already holding the token that reads it. The lane has
-          # the credential, so the lane fetches the tool, once, and hands it over.
-          # A call site that no longer clones cannot be wrong about where to.
+          # An anonymous clone of a private repo dies at `fatal: could not read
+          # Username for 'https://git.hanzo.ai'`, exit 128 — from a job already
+          # holding the token that reads it. The lane has the credential, so the
+          # lane fetches the tool, once, and hands it over. A call site that does
+          # not clone cannot be wrong about where to.
           #
           # extraheader rather than a token in the URL: a clone URL is echoed by
           # git on failure and lands in the log verbatim.
@@ -1755,17 +1737,15 @@ jobs:
           done < "$TMP/delegate.json"
 
       - name: Build & push images (per hanzo.yml)
-        # AFTER the gate, deliberately. This step used to run before `test:`,
-        # so a repo whose gates FAILED still published an image: hanzoai/base
-        # f9ec7067 pushed sha-f9ec706-amd64 on a run whose tests then went red.
-        # Deploy and Publish site were skipped, so nothing shipped it — but the
-        # tag existed, and a tag that exists is something a human pins by hand.
-        # An artifact is a claim that the commit passed; it should not be
-        # possible to produce one from a commit that did not.
+        # AFTER the gate, deliberately. Ordered before `test:`, this step
+        # publishes a sha- tag for a commit whose gates then fail. Deploy and
+        # Publish site are skipped, so nothing rolls it out — but the tag exists,
+        # and a tag that exists is something a human pins by hand. An artifact is
+        # a claim that the commit passed; producing one from a commit that did not
+        # must be impossible, not merely unlikely.
         #
-        # Nothing here needs the toolchains above it, and Deploy still follows
-        # this step, so the only thing the move changes is that a red gate now
-        # produces no image at all.
+        # Nothing here needs the toolchains above it and Deploy still follows it,
+        # so the ordering costs nothing and a red gate produces no image at all.
         if: inputs.mode != 'delegate'
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
@@ -1815,10 +1795,10 @@ jobs:
             # The official golang images set GOTOOLCHAIN=local, so a go.mod
             # requiring a newer Go than the base image does not degrade — it
             # dies mid-build with "go.mod requires go >= X (running Y;
-            # GOTOOLCHAIN=local)". hanzoai/visor v1.108.16 is the shipped
-            # instance, and it is invisible before the image build: every local
-            # `go build` succeeds because a dev box runs GOTOOLCHAIN=auto and
-            # just downloads what the module asks for. So the break is
+            # GOTOOLCHAIN=local)". It is invisible before the image build:
+            # every local `go build` succeeds because a dev box runs
+            # GOTOOLCHAIN=auto and just downloads what the module asks for.
+            # So the break is
             # introduced by editing go.mod — a file with nothing to do with
             # Docker — and found by a red release build.
             #

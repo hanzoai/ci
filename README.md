@@ -338,8 +338,8 @@ zipped over 8,536 files, and `trillerfest.com` at 76.7 MiB) can only stream —
 
 By default the build runs on the **Hanzo `git-runner` fleet** on git.hanzo.ai
 (we run it; metered as build minutes) — the only pool that serves the default
-`hanzo-build-linux-amd64` label. There is no arc pool: arc (arcd) was retired
-2026-08-01 and never served any label in this default. To run on **your own**
+`hanzo-build-linux-amd64` label. There is no arc pool — arc (arcd) is retired
+and serves no label in this default. To run on **your own**
 self-hosted runners, pass their labels:
 
 ```yaml
