@@ -238,9 +238,9 @@ type Run struct {
 	// reading only one is wrong in a way that looks fine. Status answers
 	// "is it over" (queued | in_progress | completed); Conclusion answers
 	// "how did it end" and is empty until it is over. A view that buckets on
-	// Status alone sees `completed` and cannot tell a pass from a failure —
-	// which is exactly the bug this pair replaced: every finished run,
-	// including successes and cancellations, was being drawn as failing.
+	// Status alone sees `completed` and cannot tell a pass from a failure, so
+	// it draws every finished run — successes and cancellations included — the
+	// same way.
 	Status     string `json:"status"`
 	Conclusion string `json:"conclusion"`
 
