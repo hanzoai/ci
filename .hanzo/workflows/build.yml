@@ -40,8 +40,9 @@ on:
           Where the IMAGE is built. `buildx` (default) builds it on this runner.
           `delegate` POSTs it to the build door on api.hanzo.ai (`/v1/runner`),
           which launches a BuildKit Job in-cluster and pushes the image. A repo
-          opts in with `with: { mode: delegate }` and needs the
-          `PLATFORM_BUILD_CALLBACK_TOKEN` secret (via secrets: inherit).
+          opts in with `with: { mode: delegate }` and needs no secret of its own:
+          the door reads this org's IAM identity, which the KMS login in this job
+          already mints from KMS_CLIENT_ID / KMS_CLIENT_SECRET.
 
           THE GATE RUNS IN BOTH MODES, and that is the whole point of the input
           being named for the build. `delegate` used to be evaluated fourth, ahead
@@ -1677,11 +1678,20 @@ jobs:
         # pushes the image, so what this job skips is buildx, publish and deploy
         # — not the gate.
         #
-        # WHAT IT PRESENTS: the build-callback token, which is that door's
-        # machine path — a build credential a person never holds, compared in
-        # constant time. The organization is the door's to decide, and there is
-        # no field here to state one with: an attribution the caller cannot write
-        # is worth something, and one it can write is worth nothing.
+        # WHAT IT PRESENTS: this org's own IAM identity, the one the KMS login
+        # above already minted as HANZO_API_TOKEN and every other lane in this
+        # job already reads. The door's identity path bounds a caller to the
+        # registry namespace its org owns, so the organization a build acts as
+        # comes off the credential and nothing here states one — an attribution
+        # the caller cannot write is worth something, and one it can write is
+        # worth nothing.
+        #
+        # It is deliberately NOT the fabric's shared build token, the door's
+        # other credential. That one carries push latitude across every brand
+        # registry the fabric owns, so sealing it into a forge that serves three
+        # ecosystems would hand every repo in them a credential for the other
+        # two. One machine identity, bounded by its own org, is the smaller and
+        # the correct thing to hold.
         #
         # platform.hanzo.ai serves a second /v1/runner, and it is not this one.
         # That door reads its organization off an IAM session pinned to
@@ -1691,12 +1701,11 @@ jobs:
         if: inputs.mode == 'delegate'
         env:
           RUNNER_URL: https://api.hanzo.ai/v1/runner
-          BUILD_TOKEN: ${{ secrets.PLATFORM_BUILD_CALLBACK_TOKEN }}
         run: |
           set -euo pipefail
           TMP="${RUNNER_TEMP:-/tmp}"
           refuse() { echo "::error::$1"; exit 1; }
-          [ -n "${BUILD_TOKEN:-}" ] || refuse "mode=delegate reaches the build door on PLATFORM_BUILD_CALLBACK_TOKEN and the secret is empty — the caller passes it with secrets: inherit"
+          [ -n "${HANZO_API_TOKEN:-}" ] || refuse "mode=delegate presents this org's IAM identity at the build door and HANZO_API_TOKEN is empty — the KMS login earlier in this job is what mints it, so it did not run or did not succeed"
           # THREE THINGS A hanzo.yml CAN MEAN THAT THIS DOOR CANNOT BUILD, each
           # refused here rather than downstream, where this run shows no logs at
           # all. Every one of them is a green run publishing an image that is not
@@ -1746,14 +1755,26 @@ jobs:
               '{repo:$repo,sha:$sha,image:$image,dockerfile:$dockerfile}')
             echo "::group::delegate $name -> $image"
             code=$(curl -sS -o "$TMP/delegate.out" -w '%{http_code}' -X POST "$RUNNER_URL" \
-              -H "Authorization: Bearer $BUILD_TOKEN" -H 'Content-Type: application/json' -d "$body")
+              -H "Authorization: Bearer $HANZO_API_TOKEN" -H 'Content-Type: application/json' -d "$body")
             cat "$TMP/delegate.out"; echo
             echo "::endgroup::"
             # 202 = a build job was created. The door says why for everything
-            # else, so its answer is quoted rather than summarised: 403 is the
-            # token or an image outside the registries the fabric owns, 400 is
-            # the request, 429 is this org already holding every build slot.
-            [ "$code" = "202" ] || refuse "the build door refused $image (HTTP $code): $(head -c 400 "$TMP/delegate.out")"
+            # else, so its answer is quoted rather than summarised: 400 is the
+            # request, 403 is an image outside the registry namespace this org
+            # owns — or the identity, which is the one refusal a rebuild will not
+            # clear. A build holds a MACHINE identity from the client-credentials
+            # exchange, and the door's identity path admits an ADMIN of the org:
+            # IAM mints no memberships for a machine and cloud denies a machine
+            # both admin scopes outright (auth_identity.go orgAdmin). So a 403
+            # here is a statement about what that door admits, not about this
+            # request; the subject it read is printed so it can be said exactly.
+            if [ "$code" != "202" ]; then
+              claim=$(printf '%s' "${HANZO_API_TOKEN#*.}" | cut -d. -f1 \
+                      | tr '_-' '/+' | { read -r p; printf '%s' "$p$(printf '%*s' $(( (4 - ${#p} % 4) % 4 )) '' | tr ' ' '=')"; } \
+                      | base64 -d 2>/dev/null || true)
+              sub=$(printf '%s' "$claim" | jq -r '.sub // "unreadable"' 2>/dev/null || echo unreadable)
+              refuse "the build door refused $image (HTTP $code) for subject ${sub}: $(head -c 400 "$TMP/delegate.out")"
+            fi
           done < "$TMP/delegate.json"
 
       - name: Build & push images (per hanzo.yml)
