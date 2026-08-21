@@ -14,41 +14,37 @@
 #   the index says    855 files under native/flags/target/
 #   git status says   nothing
 #
-# hanzoai/cloud lived there for 6 days and 16 hours. 362 MB of orphaned cargo
-# output — three near-identical 37.8 MB staticlibs and a pile of .rlib — went
-# into every release, took the module past Go's 500 MiB ceiling (see
-# bin/modsize) and made it UNFETCHABLE for nine consecutive releases. The
-# `git archive` of that commit is 202 MB against 12.5 MB today: 16x.
+# Hundreds of MB of orphaned build output then rides every release, carrying a
+# Go module past the 500 MiB ceiling (see bin/modsize) and making it
+# unfetchable, while `git archive` grows by an order of magnitude.
 #
-# The causal story is worth knowing because it is not carelessness, it is a
-# race nobody could see. The ignore rule was REMOVED at 12:22 (the Rust
-# staticlib was being dropped for a Go evaluator), the 855 files were added at
-# 12:51 inside that 4.5-hour window when nothing was ignoring them, and the
-# rule was RE-ADDED at 16:48. Every individual step was reasonable. The state
-# they combined into is the defect, and no tool in the pipeline had an opinion
-# about it.
+# It arrives as a race, not as carelessness. The ignore rule is dropped for a
+# good reason — the build output it named is being retired — the files land in
+# the window before it is restored, and the rule comes back. Each step is
+# individually correct; the state they combine into is the defect, and nothing
+# else in the pipeline has an opinion about it.
 #
 # WHY THIS GATES ON BYTES AND NOT ON PRESENCE
 #
 # The obvious gate — "any tracked path matched by .gitignore fails" — is
 # correct in principle and unshippable in fact. Measured across all 845 git
 # repos in the three orgs: 155 of them (18%) carry at least one tracked file
-# their .gitignore matches, and hanzoai/cloud's own origin/main is one of them
-# (a bare, unanchored `tools` pattern on .gitignore:62 catches 27 legitimately
-# tracked Go source files under apps/tools/). `CLAUDE.md` alone is ignored-and-
+# their .gitignore matches, our largest repo's own main among them (one bare,
+# unanchored `tools` pattern catching 27 legitimately tracked Go source files
+# under apps/tools/). `CLAUDE.md` alone is ignored-and-
 # tracked in 40 repos and is the ONLY hit in 29 of them. Turning that on as a
 # hard fail breaks a fifth of the estate on day one, and a gate that fails what
 # ought to pass is a gate that gets switched off — after which we are worse off
 # than before it existed.
 #
-# So the gate is on the quantity that actually caused the outage. The byte
-# distribution separates cleanly, which is why this threshold can be a refusal
+# So the gate is on the quantity that separates the two, and the byte
+# distribution separates cleanly — which is why this threshold can be a refusal
 # rather than a warning:
 #
 #     worst legitimate repo in the estate   61.5 MB   (hanzo/docs, vendored)
 #     ... next                              48.8 MB, 45.8, 45.2, 43.8, 39.8
 #     repos over 100 MB                     ZERO
-#     the defect this gate exists for      362.0 MB
+#     the shape this gate exists for       362.0 MB
 #
 # Default ceiling 100 MB: green on all 845 repos today with 62% headroom over
 # the worst honest case, and red on the real defect by 3.6x. Nothing to
