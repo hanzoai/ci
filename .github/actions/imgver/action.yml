@@ -39,7 +39,7 @@ runs:
     - name: Fetch imgver
       shell: bash
       # The action ref is the script ref: an action pinned to @v1 runs v1's
-      # imgver. The forge first, because the forge is where this repo is written
+      # imgver. Hanzo Git first, because that is where this repo is written
       # and GitHub is its mirror.
       #
       # `hanzo/ci` IS NOT THIS REPO. It is the tenant-org fork, and its v1 has no

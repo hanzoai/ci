@@ -180,7 +180,7 @@ type config struct {
 	// universe is the repo holding the declared state of the fleet, and
 	// fleetRefresh is how often the four values are re-read. The fleet interval
 	// is longer than the run interval because these values move on deploy
-	// cadence, not push cadence, and each cycle costs the forge a read per
+	// cadence, not push cadence, and each cycle costs Hanzo Git a read per
 	// service.
 	universe     string
 	fleetRefresh time.Duration
@@ -454,7 +454,7 @@ func poll(ctx context.Context, logger *slog.Logger, src *gitSource, cache *runCa
 		}
 
 		// Fan out, bounded. The cap is small on purpose: this is a read against
-		// the forge that schedules every build in the fleet, and a dashboard is
+		// the server that schedules every build in the fleet, and a dashboard is
 		// never worth degrading it.
 		const workers = 6
 		var (

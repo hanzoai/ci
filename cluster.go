@@ -16,7 +16,7 @@ import (
 //
 // It talks to the apiserver over plain HTTP because that is what the apiserver
 // is: a JSON REST API this service can read with the same client it already
-// points at the forge. A generated Kubernetes client would be the first
+// points at Hanzo Git. A generated Kubernetes client would be the first
 // dependency this repo has ever had, carried to spend two verbs on three
 // resources.
 //

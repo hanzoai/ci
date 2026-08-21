@@ -45,7 +45,7 @@ since has built.
 Two readings the page depends on, both from a run's JOBS rather than its one
 conclusion. A run that fails at `gate` built nothing; a run that fails at
 `receipt` has already built, pinned and proved the release live. Both report
-`failure`. And a commit the forge never constructed a run for is `absent`, not
+`failure`. And a commit Hanzo Git never constructed a run for is `absent`, not
 failed — there is no log to open, so it is drawn as a different shape.
 
 It reads and never writes: no deploy, no retry, no promotion. Drive a sync at
@@ -55,7 +55,7 @@ cd.hanzo.ai.
 
 `ci` reads the cluster through its own ServiceAccount — get and list on
 workloads, nothing else, no stored credential — and reads `hanzo/universe`
-through the forge token it already holds. In `charts/app/values/hanzo/ci.yaml`:
+through the Hanzo Git token it already holds. In `charts/app/values/hanzo/ci.yaml`:
 
 ```yaml
 rbac:
@@ -101,7 +101,7 @@ That's it. The build/test/publish logic lives here, once.
 
 ### `.hanzo/workflows/`, and nothing left in `.github/workflows/`
 
-The forge collects workflows from the **first** entry of `WORKFLOW_DIRS` that
+Hanzo Git collects workflows from the **first** entry of `WORKFLOW_DIRS` that
 exists — not the union. So the moment one file lands in `.hanzo/workflows/`,
 every remaining file under `.github/workflows/` stops running. It stops
 *silently*: the checks that would go red are the ones no longer running, so the
@@ -117,7 +117,7 @@ comm -23 <(ls .github/workflows) <(ls .hanzo/workflows)   # anything listed is d
 Moving a file is not reviving it. Two things break on the way across:
 
 - **`runs-on: ubuntu-latest` matches no runner in this fleet**, deliberately —
-  this forge hosts ~1400 mirrored repos whose upstream workflows all ask for it,
+  Hanzo Git hosts ~1400 mirrored repos whose upstream workflows all ask for it,
   and advertising it hands the fleet to their CI. An unmatched label does not
   fail, it **queues until the timeout**. Use `hanzo-build-linux-amd64`, or
   another label declared in the `git-runner-config` ConfigMap (ns `hanzo`).

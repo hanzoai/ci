@@ -264,7 +264,7 @@ case "$kcode" in
     echo "X-Org-Id header; CI cannot set that header, cloud derives it from this"
     echo "bearer. Mint a replacement with POST $api/v1/keys {\"type\":\"secret\"} as a"
     echo "member of the owning org, then set it as the ORG-level Actions secret"
-    echo "HANZO_DEPLOY_TOKEN on git.hanzo.ai — the forge is what reads"
+    echo "HANZO_DEPLOY_TOKEN on git.hanzo.ai — that is what reads"
     echo ".hanzo/workflows, not GitHub." ;;
 esac
 
@@ -303,7 +303,7 @@ post() {
 # success. So a new site needs no out-of-band `POST /v1/projects`; committing the
 # workflow is enough. The repo is linked so the deploy's lifecycle events name a
 # repo and reach the notify subscriptions keyed on it — the enqueue itself no
-# longer requires a link; SITE_REPO overrides the origin for a forge
+# longer requires a link; SITE_REPO overrides the origin for a
 # checkout whose remote is not the canonical repo.
 repo="${SITE_REPO:-$(git remote get-url origin 2>/dev/null || true)}"
 pcode=$(post "$work"/sd-proj.json "$api/v1/projects" \
