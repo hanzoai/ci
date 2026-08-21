@@ -13,11 +13,11 @@
 #
 #   go: go.mod requires go >= 1.26.5 (running go 1.26.4; GOTOOLCHAIN=local)
 #
-# hanzoai/visor v1.108.16 is the shipped instance. The failure is invisible
-# until the image build runs, because every local `go build` succeeds: a
-# developer box runs GOTOOLCHAIN=auto and simply downloads what the module
-# asks for. So the mismatch is introduced by editing go.mod — a file that has
-# nothing to do with Docker — and is discovered by a red release build.
+# The failure is invisible until the image build runs, because every local
+# `go build` succeeds: a developer box runs GOTOOLCHAIN=auto and simply
+# downloads what the module asks for. So the mismatch is introduced by editing
+# go.mod — a file that has nothing to do with Docker — and is discovered by a
+# red release build.
 #
 # It is also not one repo's problem. A sweep of every Dockerfile across the
 # orgs found 58 FROM lines in 23 repos already below their own go.mod, and
