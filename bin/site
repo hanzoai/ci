@@ -225,14 +225,13 @@ fi
 #
 # ADVISORY, NOT FATAL — and that is the whole point of this block.
 #
-# It used to `exit 1` on any non-200, on the premise that /v1/keys "200s for a
-# live key". That premise is not something this script can rely on: /v1/keys is
-# the SESSION-scoped key-MANAGEMENT route, and a machine `sk-` key is not
-# supposed to manage keys. Measured against the live API: an anonymous request
-# and a bogus `sk-` are byte-identical there — both 403
-# `{"code":"forbidden","error":"sign in to manage API keys"}`. A probe that
-# answers the same for a valid and an invalid credential cannot decide anything,
-# and this one was deciding whether the site ships.
+# `exit 1` on any non-200 would rest on /v1/keys "200s for a live key", and this
+# script cannot rely on that: /v1/keys is the SESSION-scoped key-MANAGEMENT
+# route, and a machine `sk-` key is not supposed to manage keys. Measured against
+# the live API, an anonymous request and a bogus `sk-` are byte-identical there —
+# both 403 `{"code":"forbidden","error":"sign in to manage API keys"}`. A probe
+# that answers the same for a valid and an invalid credential cannot decide
+# anything, least of all whether the site ships.
 #
 # It froze the Sites plane. hanzo.ai and hips both died here in ~1s, every run,
 # with the whole build and every gate already green above it — and the message
@@ -320,13 +319,11 @@ esac
 # them, or the upload lands where nothing is served the moment an org or slug
 # changes.
 #
-# POST on the DEPLOYMENTS COLLECTION, which is the address that opens one. The
-# enqueue used to share the /deploy address with the archive upload, told apart
-# by Content-Type; /deploy is now the archive alone and reads any body as bytes,
-# so this JSON sent there is sniffed as a tar and refused —
-# 400 "invalid artifact: tar: unexpected EOF", with the build and every gate
-# already green above it. The collection is where a deployment is created; the
-# verb is the method and the noun is the resource.
+# POST on the DEPLOYMENTS COLLECTION, which is the address that opens one.
+# /deploy is the ARCHIVE address and reads any body as bytes, so JSON sent there
+# is sniffed as a tar and refused — 400 "invalid artifact: tar: unexpected EOF",
+# with the build and every gate already green above it. The collection is where a
+# deployment is created; the verb is the method and the noun is the resource.
 #
 # `commit` is the whole body. `source` was the Content-Type discriminator the
 # split removed, and `branch` was always discarded server-side — a deployment has

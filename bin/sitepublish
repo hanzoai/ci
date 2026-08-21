@@ -4,14 +4,11 @@
 #
 #   sitepublish <slug> <dir>      # e.g. sitepublish hanzo-console out
 #
-# WHY THIS EXISTS: the reusable's `site:` lane used to stage the export with
-# `mc mirror` against hanzoai/s3, which needed S3_ADMIN_ACCESS_KEY and
-# S3_ADMIN_SECRET_KEY. Those names are not in KMS for any org, and the lane
-# fails closed without them — so `site:` refused for every caller that ever
-# declared it, and hanzoai/console had to grow its own build→zip→publish
-# workflow to ship at all. Per-repo build logic is the one thing this repo
-# exists to prevent. The bytes now travel the SAME route console proved, and
-# the credential is the one CI already holds.
+# WHY THIS EXISTS: the bytes travel cloud's own publish routes on the credential
+# CI already holds. Staging straight into hanzoai/s3 would need an admin access
+# key and secret, names KMS holds for no org — so that lane fails closed for
+# every caller, and repos that need to ship grow their own build→zip→publish
+# workflow. Per-repo build logic is the one thing this repo exists to prevent.
 #
 # THE TWO STEPS:
 #

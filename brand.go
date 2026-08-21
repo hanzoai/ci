@@ -10,13 +10,10 @@ import (
 // They come from @hanzo/brand, the one place the fleet's palette, radii, type
 // scale and spacing are defined, and they arrive as that package's OWN
 // published artifact rather than as hex codes retyped here. The distinction is
-// the entire point. Until this file existed the template carried its own
-// :root block, and being a hand-copy it had already drifted off the house:
-// the status colours were GitHub Primer's (#3fb950 / #f85149 / #d29922) where
-// the house says #10b981 / #ef4444 / #f59e0b, the surface blacks were each a
-// shade wrong (#0b0b0d against --surface-0 #080808), and the hairline border
-// was a solid #25252b where the house hairline is a 6%-white wash. Only the
-// accent survived intact. A palette that is copied is a palette that diverges.
+// the entire point: a template carrying its own :root block is a hand-copy, and
+// a palette that is copied is a palette that diverges — one status colour off,
+// a surface black a shade wrong, a hairline solid where the house says a wash.
+// None of that is visible in a diff, and all of it is visible on the page.
 //
 // Vendored, not fetched at build time, and compiled in rather than served off
 // disk. @hanzo/brand publishes this file as a plain custom-property sheet
