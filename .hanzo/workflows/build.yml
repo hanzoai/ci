@@ -619,9 +619,18 @@ jobs:
           # both outside it: the protected-branch refusal is on the record as
           # `User -2 is not allowed to push to protected branch main`, measured on
           # hanzoai/java-sdk runs 20 and 21 and written up at the cut step below.
-          # Those three reads name HANZO_GIT_TOKEN and nothing else does.
-          HANZO_GIT_TOKEN=$(get HANZO_GIT_TOKEN)
-          if [ -n "$HANZO_GIT_TOKEN" ]; then echo "::add-mask::$HANZO_GIT_TOKEN"; echo "HANZO_GIT_TOKEN=$HANZO_GIT_TOKEN" >> "$GITHUB_ENV"; fi
+          # NO SEPARATE GIT CREDENTIAL. git.hanzo.ai accepts a Hanzo IAM access
+          # token as a git credential — services/auth/iam.go opens by saying so,
+          # and it exists precisely so nobody has to go and make a personal
+          # access token. The IAM JWT was already minted above as
+          # HANZO_API_TOKEN: /v1/kms/auth/login performs the client_credentials
+          # exchange and returns IAM's own JWT verbatim, scoped by its owner
+          # claim to this org.
+          #
+          # So reads and writes against git.hanzo.ai use that one machine
+          # identity, with one lifetime and one thing to rotate, which is what
+          # the comment above already claims the design is. A PAT beside it was
+          # a second auth system for the same subject.
           # The PACKAGE registry credential → buildx `package_token` secret, for an
           # image whose build installs the fabric's own npm or Go packages.
           # git.hanzo.ai serves those behind REQUIRE_SIGNIN_VIEW, so an anonymous
@@ -1026,7 +1035,7 @@ jobs:
         # — cloud's next release included — ask a client repo "which document are
         # you?" without running a generator.
         #
-        # CREDENTIAL: HANZO_GIT_TOKEN from KMS, contents:read on the spec repo and
+        # CREDENTIAL: HANZO_API_TOKEN from KMS, contents:read on the spec repo and
         # on hanzoai/openapi at git.hanzo.ai. Both are repos this run does not
         # belong to and at least one of them is private, which is exactly the
         # reach the per-job token does not have.
@@ -1050,7 +1059,7 @@ jobs:
         id: client
         env:
           # ONE HOST, SO ONE CREDENTIAL. The document lives on git.hanzo.ai and
-          # HANZO_GIT_TOKEN is what reads git.hanzo.ai. It arrives from KMS via
+          # HANZO_API_TOKEN is what reads git.hanzo.ai. It arrives from KMS via
           # the step above, so nothing is declared here.
           #
           # What stood here was a fallback chain, SPEC_TOKEN then GH_PAT, and both
@@ -1182,7 +1191,7 @@ jobs:
           # extraheader rather than a token in the URL: a clone URL is echoed by
           # git on failure and lands in the log verbatim.
           export OPENAPI="$RUNNER_TEMP/driver"
-          [ -d "$OPENAPI" ] || git -c http.extraheader="Authorization: token ${HANZO_GIT_TOKEN}" \
+          [ -d "$OPENAPI" ] || git -c http.extraheader="Authorization: Basic $(printf 'x-access-token:%s' "$HANZO_API_TOKEN" | base64 -w0)" \
             clone --depth 1 -q https://git.hanzo.ai/hanzoai/openapi "$OPENAPI"
 
           # AND AN INTERPRETER THAT CAN READ YAML, which is the driver's
@@ -1260,11 +1269,11 @@ jobs:
         # Longest prefix wins in git, so the owner-scoped Hanzo Git rule outranks the
         # bare github.com rule beneath it and every OTHER module still resolves
         # from github.com. Both rules are optional and independent: no
-        # HANZO_GIT_TOKEN (or a github.com-hosted run, where the server IS
+        # HANZO_API_TOKEN (or a github.com-hosted run, where the server IS
         # github.com) leaves the old behaviour exactly as it was.
         #
         # TWO RULES, TWO HOSTS, TWO CREDENTIALS, and they must not be confused for
-        # each other. The git.hanzo.ai rule takes HANZO_GIT_TOKEN and the
+        # each other. The git.hanzo.ai rule takes HANZO_API_TOKEN and the
         # github.com rule takes GIT_TOKEN, because a credential is only good on
         # the host that issued it. The per-job token cannot stand in for either:
         # the sibling modules it would be fetching (hanzoai/plans,
@@ -1292,7 +1301,7 @@ jobs:
           SCHEME="${SERVER%%://*}"; HOST="${SERVER#*://}"; HOST="${HOST%/}"
           wrote=0
 
-            if [ -n "${HANZO_GIT_TOKEN:-}" ] && [ "$HOST" != "github.com" ]; then
+            if [ -n "${HANZO_API_TOKEN:-}" ] && [ "$HOST" != "github.com" ]; then
               # THE OWNER OF THE REPO IS NOT THE OWNER OF ITS MODULES. This rewrote
               # only github.com/$OWNER/, taking the repository owner as if it also
               # named the module namespace. That held until a repo changed org: cloud
@@ -1311,7 +1320,7 @@ jobs:
                 case " $seen " in *" $o "*) continue ;; esac
                 seen="$seen $o"
                 GIT_CONFIG_GLOBAL="$CFG" git config --global \
-                  url."${SCHEME}://x:${HANZO_GIT_TOKEN}@${HOST}/${o}/".insteadOf \
+                  url."${SCHEME}://x-access-token:${HANZO_API_TOKEN}@${HOST}/${o}/".insteadOf \
                   "https://github.com/${o}/"
               done
               echo "our namespaces resolve from ${SCHEME}://${HOST}:$seen"
@@ -2062,7 +2071,7 @@ jobs:
           #
           # GITHUB_SERVER_URL is the host this run belongs to — Hanzo Git's
           # in-cluster address on a Hanzo Git runner — so the push is addressed the
-          # same way the checkout was, and HANZO_GIT_TOKEN is the credential that
+          # same way the checkout was, and HANZO_API_TOKEN is the credential that
           # host takes. The tag lands where the publish workflow that watches
           # for it also lives.
           #
@@ -2071,7 +2080,7 @@ jobs:
           # token's identity, and main is protected. Reaching for it because it is
           # the credential already on the wire is how that refusal happened the
           # first time.
-          [ -n "${HANZO_GIT_TOKEN:-}" ] || { echo "::error::the cut pushes the projection back to git.hanzo.ai past a protected branch, which the per-job token cannot do — seal HANZO_GIT_TOKEN (contents:write) in KMS for this org"; exit 1; }
+          [ -n "${HANZO_API_TOKEN:-}" ] || { echo "::error::the cut pushes the projection back to git.hanzo.ai and needs the IAM identity; HANZO_API_TOKEN is empty, so the KMS login above did not mint one"; exit 1; }
           REMOTE="${GITHUB_SERVER_URL:-https://git.hanzo.ai}"
           REMOTE="${REMOTE%/}/${{ github.repository }}"
           # CLEAR WHAT CHECKOUT WROTE FIRST. `http.extraHeader` is MULTI-VALUED
@@ -2094,7 +2103,7 @@ jobs:
           # checkout's own post-step only unsets what it still finds.
           git config --local --name-only --get-regexp '^http\..*extraheader$' 2>/dev/null \
             | while read -r k; do git config --local --unset-all "$k"; done
-          git config --local http.extraheader "Authorization: token ${HANZO_GIT_TOKEN}"
+          git config --local http.extraheader "Authorization: Basic $(printf 'x-access-token:%s' "$HANZO_API_TOKEN" | base64 -w0)"
           # The branch this run is on. act_runner leaves ref_name empty on an
           # ordinary push, and `HEAD:` with nothing after the colon is not a
           # refspec, so the default is spelled out rather than assumed.
