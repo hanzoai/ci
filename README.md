@@ -365,12 +365,12 @@ BuildKit Job in-cluster and pushes the image — pass `mode: delegate`:
 The job gates the commit exactly as it always does, then POSTs each image in
 `hanzo.yml` to that one door and exits in **seconds** — no runner buildx, no
 runner-side publish, no runner-side deploy. It is the same door this pipeline
-already names as the publisher for `binaries:`, reached on
-`PLATFORM_BUILD_CALLBACK_TOKEN` (org- or repo-level, picked up via
-`secrets: inherit`) — that door's machine path. The build states the repository,
-the commit this run gated, the output image and the Dockerfile; the organization
-is the door's to decide, so there is no field for one and nothing for a caller to
-get wrong.
+already names as the publisher for `binaries:`, and it needs **no secret of its
+own**: it presents this org's IAM identity, which the KMS login in the same job
+already mints from `KMS_CLIENT_ID` / `KMS_CLIENT_SECRET`. The build states the
+repository, the commit this run gated, the output image and the Dockerfile; the
+organization is the door's to read off that identity, so there is no field for
+one and nothing for a caller to get wrong.
 
 Three declarations the door cannot express, and the lane refuses each before it
 POSTs rather than publishing an image that is not the one the repo asked for:
