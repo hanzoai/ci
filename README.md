@@ -396,6 +396,52 @@ else on that host — the tools clone of public `hanzoai/ci` — rides the per-j
 token and needs nothing sealed. It is not interchangeable with `GIT_TOKEN`, which
 is github.com's.
 
+## Reading a failed run
+
+The forge's API is at **`/v1/`**, not `/api/v1/` — an unauthenticated `/api/v1/`
+call answers `Not found`, which reads like a missing repo rather than a wrong
+path, and sends people looking for a permissions problem they do not have.
+
+Three ids are in play and only one of them fetches a log. The number in the run
+URL is a **run index**; `/actions/tasks` returns a **task id**; the thing
+`/actions/jobs/{id}/logs` wants is a **job id**, which appears in neither. Get it
+from the run's job list:
+
+```sh
+H="Authorization: token $FORGE_TOKEN"
+B=https://git.hanzo.ai/v1/repos/<org>/<repo>/actions
+
+curl -s -H "$H" "$B/tasks?limit=5"            # run_number, status, head_sha, url
+curl -s -H "$H" "$B/runs/<run>/jobs"          # -> the JOB ids
+curl -s -H "$H" "$B/jobs/<job>/logs"          # the log
+```
+
+A run has one job row per attempt and only the last carries a log; the others
+answer `404`, so walk the list rather than taking the first.
+
+The log interleaves each step's **script source** with its output, so grepping
+for `::error::` mostly finds unfired `echo` lines inside the shell being run.
+The step that actually failed is the one marked `❌  Failure - Main <step name>`:
+
+```sh
+sed 's/\x1b\[[0-9;]*m//g' job.log | grep -nE '❌|✅  Success - Main|⭐ Run Main'
+```
+
+Two failures worth knowing because the message names neither cause:
+
+- **`destination path '/tmp/ci' already exists`** — a `test:` step cloning
+  `hanzoai/ci` for a tool. It is already cloned: `RUNNER_TEMP` is `/tmp` on the
+  fleet, so the pipeline's own tools checkout *is* `/tmp/ci`, exported as
+  `$CI_HOME`. Use `$CI_HOME/bin/<tool>`. And check first whether the tool is
+  already run for you — `certclaims`, `ignoretracked`, `modsize`,
+  `conflictmarkers` and `vendormark` all run in `Structural invariants` against
+  every caller, so declaring one again is a second home for one fact.
+- **`This project is configured to use <x> of pnpm. Your current pnpm is <y>`** —
+  corepack reads `packageManager` from the package.json in the *current*
+  directory. A repo whose package.json is in a subdirectory and whose `run:`
+  says `pnpm --dir sub` executes from the root, where there is none, so corepack
+  provisions its default and pnpm then refuses the pin it finds. `cd sub` first.
+
 ## Platform-native
 
 `hanzo.yml` is also read by platform.hanzo.ai: a repo on the platform webhook
