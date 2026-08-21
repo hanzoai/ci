@@ -195,7 +195,15 @@ fi
 # see.
 echo "release: $(human "$bytes") / $count files; manifest $(human "$body") of the $(human "$max_body") edge limit"
 
-: "${HANZO_DEPLOY_TOKEN:?HANZO_DEPLOY_TOKEN is unset. It is the ONE credential this needs; set it on the forge (git.hanzo.ai), which is what reads .hanzo/workflows — not on GitHub. Mint: POST /v1/keys {\"type\":\"secret\"}}"
+# Spelled out rather than ${VAR:?...}. That form reports through the shell, and
+# the EXIT trap above resets the status on its way out, so the refusal printed
+# and the script still exited 0 — a deploy that never happened, reported as a
+# success. The brace in the mint example also closed the expansion early, cutting
+# the message off mid-sentence.
+if [ -z "${HANZO_DEPLOY_TOKEN:-}" ]; then
+  echo "::error::HANZO_DEPLOY_TOKEN is unset. It is the ONE credential this needs; set it as an Actions secret on git.hanzo.ai, which is what reads .hanzo/workflows. Mint one: POST /v1/keys {\"type\":\"secret\"}" >&2
+  exit 1
+fi
 
 # ---- 0a. does the credential authenticate at all? ---------------------------
 # Every org-scoped route answers a rejected credential and an ABSENT one with the

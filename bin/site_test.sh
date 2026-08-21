@@ -122,10 +122,11 @@ fi
 shim="$tmp/bin"; mkdir -p "$shim"
 cat > "$shim/curl" <<'SHIM'
 #!/usr/bin/env bash
-out=/dev/null url= method=GET body= src= fields=()
+out=/dev/null hdr=/dev/null url= method=GET body= src= fields=()
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
+    -D) hdr="$2"; shift 2 ;;
     -X) method="$2"; shift 2 ;;
     -d) body="$2"; shift 2 ;;
     # The FILE, not its contents. `$(cat f)` strips trailing newlines, and the
@@ -154,10 +155,29 @@ case "$url" in
                    printf '{}' > "$out"
                    if [ "$n" -le "${T_5XX:-0}" ]; then printf '503'; else printf '200'; fi ;;
   https://s3.test/*) printf '%s\n' "$(IFS='|'; printf '%s' "${fields[*]}")" >> "$T_DIR/uploads" ;;
+  # The published page, read back. bin/site downloads the live URL and compares
+  # what arrived against the promised content-length, so an answer here is a body
+  # AND a header that agrees with it. T_BACK picks what the edge returns, which is
+  # what makes the verifier's own failure paths reachable.
+  https://a-slug.hanzo.app*)
+                   case "${T_BACK:-ok}" in
+                     empty) : > "$out";           len=0  ;;
+                     short) printf 'hi' > "$out"; len=99 ;;
+                     *)     printf '<h1>hi</h1>\n' > "$out"
+                            len=$(wc -c < "$out" | tr -d ' ') ;;
+                   esac
+                   printf 'content-length: %s\r\n' "$len" > "$hdr"
+                   printf '200' ;;
   *) echo "shim: unexpected url $url" >&2; exit 9 ;;
 esac
 SHIM
 chmod +x "$shim/curl"
+
+# The clock, faked for the same reason the wire is. Every sleep reachable from
+# here is a propagation or backoff delay whose LENGTH nothing asserts — the
+# retry cases count calls, not seconds — so the real ones spent the better part
+# of a minute per run proving something no case reads.
+printf '#!/usr/bin/env bash\nexit 0\n' > "$shim/sleep"; chmod +x "$shim/sleep"
 
 ENQ='{"id":"dep_x","version":7,"status":"queued","bucket":"hanzo-sites","prefix":"acme/a-slug",
       "upload":{"url":"https://s3.test/hanzo-sites","prefix":"acme/a-slug",
@@ -346,6 +366,33 @@ out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
       bash "$SD" a-slug "$site" 2>&1); rc=$?
 t "a plane that never recovers fails"   "$([ "$rc" != 0 ] && echo failed)"  "failed"
 t "it gives up rather than hammering"   "$(cat "$tmp/n")"  "5"
+
+# --- the published bytes are read back ----------------------------------------
+# The flip to live is not the end of a deploy: an object can be stored, reported
+# live, and still not load. A HEAD is blind to that by construction — it never
+# asks for a body — so bin/site downloads the live URL and compares what arrived
+# against what was promised.
+#
+# That check had no case here at all, which is how the shim came to not know its
+# address: every publish above walks the happy path, and a refused address reads
+# as the deploy failing rather than as the wire being incomplete.
+rm -f "$tmp/calls"
+out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
+      SITE_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_BACK=empty \
+      bash "$SD" a-slug "$site" 2>&1); rc=$?
+t "a live URL serving nothing fails"   "$([ "$rc" != 0 ] && echo failed)"  "failed"
+t "  ...and names it unreadable"       "$(printf '%s' "$out" | grep -c 'does not serve its own bytes')"  "1"
+
+# The subtler half: a truncated object answers 200 with a body SHORTER than the
+# content-length it promised. Reading only the status calls that a healthy
+# deploy, so the comparison is the whole check — and it is reported per attempt,
+# which is also what shows the retry ran.
+rm -f "$tmp/calls"
+out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
+      SITE_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_BACK=short \
+      bash "$SD" a-slug "$site" 2>&1); rc=$?
+t "a short read fails the deploy"      "$([ "$rc" != 0 ] && echo failed)"  "failed"
+t "  ...reporting both counts, thrice" "$(printf '%s' "$out" | grep -c 'content-length promised')"  "3"
 
 [ $fail -eq 0 ] && echo "PASS" || echo "FAIL"
 exit $fail
