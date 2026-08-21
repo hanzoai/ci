@@ -38,9 +38,9 @@ on:
       mode:
         description: >-
           Where the IMAGE is built. `buildx` (default) builds it on this runner.
-          `delegate` POSTs it to platform.hanzo.ai (`/v1/runner`), which builds
-          in-cluster with BuildKit and rolls the operator Service CR itself.
-          A repo opts in with `with: { mode: delegate }` and needs the
+          `delegate` POSTs it to the build door on api.hanzo.ai (`/v1/runner`),
+          which launches a BuildKit Job in-cluster and pushes the image. A repo
+          opts in with `with: { mode: delegate }` and needs the
           `PLATFORM_BUILD_CALLBACK_TOKEN` secret (via secrets: inherit).
 
           THE GATE RUNS IN BOTH MODES, and that is the whole point of the input
@@ -1663,77 +1663,98 @@ jobs:
           fi
           awk -F'\t' 'NR>1{printf "  %8s results  %s%s\n", $1, ($2=="1" ? "[runs tests] " : ""), $3}' "$r"
 
-      - name: Delegate build to platform (mode=delegate)
+      - name: Delegate build to the runner (mode=delegate)
         # Delegate moves WHERE the image is built. It does not move whether the
         # commit was gated — so this step sits AFTER `Test (per hanzo.yml)`, and
         # every step the gate needs runs in both modes. It used to sit fourth,
         # before any of them, and `mode: delegate` therefore skipped the gate
         # along with the build: 20 steps skipped, 0 executed, green. "ci gates,
-        # platform builds" was the design and the ordering said otherwise.
+        # the fabric builds" was the design and the ordering said otherwise.
         #
-        # What it does: POST each image in hanzo.yml to platform.hanzo.ai's
-        # direct-enqueue webhook (`/v1/runner`). Platform creates a build_job
-        # row, launches an in-cluster BuildKit Job on its own pool, pushes to the
-        # registry, and — for a system service — patches the operator Service CR
-        # to roll it. Downstream is IDENTICAL to the platform webhook path, so a
-        # delegated build behaves exactly like a platform-native one. What this
-        # job skips is buildx, publish and deploy — not the gate.
+        # ONE BUILD DOOR, and it is the one this file already names as the
+        # publisher for `binaries:` — POST /v1/runner on api.hanzo.ai (cloud
+        # apps/platform/runner.go). It launches a BuildKit Job in-cluster and
+        # pushes the image, so what this job skips is buildx, publish and deploy
+        # — not the gate.
+        #
+        # WHAT IT PRESENTS: the build-callback token, which is that door's
+        # machine path — a build credential a person never holds, compared in
+        # constant time. The organization is the door's to decide, and there is
+        # no field here to state one with: an attribution the caller cannot write
+        # is worth something, and one it can write is worth nothing.
+        #
+        # platform.hanzo.ai serves a second /v1/runner, and it is not this one.
+        # That door reads its organization off an IAM session pinned to
+        # platform's own browser client, so the only token it admits is one that
+        # a sign-in mints and no build holds one. One job, one address, and it is
+        # the address that can answer.
         if: inputs.mode == 'delegate'
         env:
-          ENQUEUE_URL: ${{ vars.PLATFORM_ENQUEUE_URL || 'https://platform.hanzo.ai/v1/runner' }}
-          ENQUEUE_TOKEN: ${{ secrets.PLATFORM_BUILD_CALLBACK_TOKEN }}
+          RUNNER_URL: https://api.hanzo.ai/v1/runner
+          BUILD_TOKEN: ${{ secrets.PLATFORM_BUILD_CALLBACK_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -z "${ENQUEUE_TOKEN:-}" ]; then
-            echo "::error::mode=delegate needs the PLATFORM_BUILD_CALLBACK_TOKEN secret (secrets: inherit)"; exit 1
-          fi
-          # `/v1/runner` has no way to carry a build_secret: its wire body accepts
-          # buildArgs, and platform resolves NO KMS name — its own secrets arrive
-          # as a KMSSecret CRD with a statically declared key list, which cannot
-          # serve a name discovered by reading a hanzo.yml at some SHA. A repo
-          # that declares build_secrets and delegates gets an image built without
-          # them: green run, empty credential, exactly the silence the KMS step
-          # refuses. Say so here rather than downstream, where this run shows no
-          # logs at all.
-          if [ -n "$(yq -r '[(.images // [])[] | (.build_secrets // [])[]] | unique | .[]' hanzo.yml 2>/dev/null || true)" ]; then
-            echo "::error::hanzo.yml declares build_secrets, which mode=delegate cannot deliver — platform builds with no KMS. Build on the runner (drop mode: delegate), or drop the build_secrets."; exit 1
-          fi
-          REPO="${{ github.repository }}"
+          TMP="${RUNNER_TEMP:-/tmp}"
+          refuse() { echo "::error::$1"; exit 1; }
+          [ -n "${BUILD_TOKEN:-}" ] || refuse "mode=delegate reaches the build door on PLATFORM_BUILD_CALLBACK_TOKEN and the secret is empty — the caller passes it with secrets: inherit"
+          # THREE THINGS A hanzo.yml CAN MEAN THAT THIS DOOR CANNOT BUILD, each
+          # refused here rather than downstream, where this run shows no logs at
+          # all. Every one of them is a green run publishing an image that is not
+          # the image the repo asked for, which is worse than a red one.
+          #
+          # A build secret: the door mounts no KMS, so a declared build_secret
+          # arrives empty and the image is built with a blank credential —
+          # exactly the silence the KMS step above refuses to ship.
+          [ -z "$(yq -r '[(.images // [])[] | (.build_secrets // [])[]] | unique | .[]' hanzo.yml 2>/dev/null || true)" ] \
+            || refuse "hanzo.yml declares build_secrets and the build door mounts no KMS, so the image would be built with empty credentials. Build on the runner (drop mode: delegate), or drop the build_secrets."
+          # The repository this build reads, at the commit this run gated. The
+          # door takes ONE git address and resolves nothing: state the commit and
+          # the image is of the commit that was tested, not of whatever the
+          # branch points at by the time the builder gets there.
+          REPO="${GITHUB_SERVER_URL:-https://github.com}/${{ github.repository }}.git"
           SHA="${{ github.sha }}"
           SHORT=$(echo "$SHA" | cut -c1-7)
-          REF="${{ github.ref }}"
-          BRANCH="${{ github.ref_name }}"
-          # One enqueue per (image, platform), mirroring the buildx tag shape the
-          # deploy path expects (`sha-<short>-<arch>[-<suffix>]`). Default arch is
-          # amd64 (single-arch), so an existing repo's tag shape is unchanged.
-          yq -o=json -I=0 '.images' hanzo.yml | jq -c '.[]' | while read -r img; do
+          yq -o=json -I=0 '.images' hanzo.yml | jq -c '.[]' > "$TMP/delegate.json"
+          # Read from a file, not a pipe: a `while` on the end of a pipeline is a
+          # subshell, and a refusal inside one is a message printed by a process
+          # whose exit nobody reads.
+          while read -r img; do
             name=$(echo "$img"|jq -r .name); repo=$(echo "$img"|jq -r .repo)
-            ctx=$(echo "$img"|jq -r .context); df=$(echo "$img"|jq -r '.dockerfile // (.context+"/Dockerfile")')
+            ctx=$(echo "$img"|jq -r '.context // "."')
+            df=$(echo "$img"|jq -r '.dockerfile // ((.context // ".")+"/Dockerfile")'); df="${df#./}"
             sfx=$(echo "$img"|jq -r '."tag-suffix" // ""')
+            # A build context below the repo root: the door's context is the
+            # repository itself, so a Dockerfile that COPYs from its own
+            # directory would copy the root instead and build a different image
+            # under the same tag.
+            [ "$ctx" = "." ] || refuse "images[$name] declares context: $ctx, and the build door's context is the whole repository at one commit — a relative COPY would read the root instead. Build on the runner (drop mode: delegate)."
+            # More than one platform, or one that is not amd64: the door builds
+            # on the pool it has, so a second tag would name a second image that
+            # was never built for that architecture.
+            plat=$(echo "$img"|jq -r '(.platforms // ["linux/amd64"]) | join(" ")')
+            [ "$plat" = "linux/amd64" ] || refuse "images[$name] declares platforms: $plat, and the build door builds linux/amd64 — the other tags would name images built for the wrong architecture. Build on the runner (drop mode: delegate)."
             # Same Go-builder check the buildx lane runs. It belongs here too:
             # delegating the build moves WHERE it runs, not whether the image
-            # can compile the module, and a mismatch enqueued to platform fails
-            # on a machine whose logs this run never shows. Cheap to check on
-            # the runner that already has the checkout; expensive to discover
-            # from the in-cluster builder.
+            # can compile the module, and a mismatch sent to the door fails on a
+            # machine whose logs this run never shows. Cheap to check on the
+            # runner that already has the checkout; expensive to discover from
+            # the in-cluster builder.
             "$CI_HOME/bin/gover" "$df" "$ctx"
-            echo "$img" | jq -r '(.platforms // ["linux/amd64"])[]' | while read -r plat; do
-              arch="${plat##*/}"
-              image="${repo}:sha-${SHORT}-${arch}${sfx:+-$sfx}"
-              body=$(jq -nc \
-                --arg repo "$REPO" --arg sha "$SHA" --arg image "$image" \
-                --arg ref "$REF" --arg branch "$BRANCH" \
-                --arg dockerfile "$df" --arg context "$ctx" --arg arch "$arch" \
-                '{repo:$repo,sha:$sha,image:$image,ref:$ref,branch:$branch,dockerfile:$dockerfile,context:$context,os:"linux",arch:$arch}')
-              echo "::group::delegate $name → $image"
-              code=$(curl -sS -o /tmp/enqueue.out -w '%{http_code}' -X POST "$ENQUEUE_URL" \
-                -H "Authorization: Bearer $ENQUEUE_TOKEN" -H 'Content-Type: application/json' -d "$body")
-              cat /tmp/enqueue.out; echo
-              # 202 Accepted = queued; 409 = no live runner for the pool (surface it loud).
-              if [ "$code" != "202" ]; then echo "::error::enqueue $image failed (HTTP $code)"; exit 1; fi
-              echo "::endgroup::"
-            done
-          done
+            # The tag shape the deploy path expects, sha-<short>-<arch>[-<suffix>].
+            image="${repo}:sha-${SHORT}-${plat##*/}${sfx:+-$sfx}"
+            body=$(jq -nc --arg repo "$REPO" --arg sha "$SHA" --arg image "$image" --arg dockerfile "$df" \
+              '{repo:$repo,sha:$sha,image:$image,dockerfile:$dockerfile}')
+            echo "::group::delegate $name -> $image"
+            code=$(curl -sS -o "$TMP/delegate.out" -w '%{http_code}' -X POST "$RUNNER_URL" \
+              -H "Authorization: Bearer $BUILD_TOKEN" -H 'Content-Type: application/json' -d "$body")
+            cat "$TMP/delegate.out"; echo
+            echo "::endgroup::"
+            # 202 = a build job was created. The door says why for everything
+            # else, so its answer is quoted rather than summarised: 403 is the
+            # token or an image outside the registries the fabric owns, 400 is
+            # the request, 429 is this org already holding every build slot.
+            [ "$code" = "202" ] || refuse "the build door refused $image (HTTP $code): $(head -c 400 "$TMP/delegate.out")"
+          done < "$TMP/delegate.json"
 
       - name: Build & push images (per hanzo.yml)
         # AFTER the gate, deliberately. This step used to run before `test:`,

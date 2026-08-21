@@ -349,11 +349,11 @@ self-hosted runners, pass their labels:
     secrets: inherit
 ```
 
-## Delegate to platform (skip runner buildx)
+## Delegate the build (skip runner buildx)
 
-By default the build runs buildx **on** the runner. To instead hand the build
-to **platform.hanzo.ai** — which builds in-cluster with BuildKit and rolls the
-service itself — pass `mode: delegate`:
+By default the build runs buildx **on** the runner. To instead hand the build to
+the fabric's build door — `POST /v1/runner` on **api.hanzo.ai**, which launches a
+BuildKit Job in-cluster and pushes the image — pass `mode: delegate`:
 
 ```yaml
     uses: hanzoai/ci/.hanzo/workflows/build.yml@v1
@@ -362,16 +362,21 @@ service itself — pass `mode: delegate`:
     secrets: inherit
 ```
 
-The GitHub job then just POSTs each image in `hanzo.yml` to platform's direct
-build webhook (`/v1/runner`) and exits in **seconds** — no runner buildx,
-no KMS, no runner-side deploy. Platform creates the build job, launches an
-in-cluster BuildKit Job on its own pool, pushes to the registry, and patches the
-operator `Service` CR to roll it. It's the same build path as the platform
-GitHub-App webhook — one build path, two front doors.
+The job gates the commit exactly as it always does, then POSTs each image in
+`hanzo.yml` to that one door and exits in **seconds** — no runner buildx, no
+runner-side publish, no runner-side deploy. It is the same door this pipeline
+already names as the publisher for `binaries:`, reached on
+`PLATFORM_BUILD_CALLBACK_TOKEN` (org- or repo-level, picked up via
+`secrets: inherit`) — that door's machine path. The build states the repository,
+the commit this run gated, the output image and the Dockerfile; the organization
+is the door's to decide, so there is no field for one and nothing for a caller to
+get wrong.
 
-Requires one extra secret, `PLATFORM_BUILD_CALLBACK_TOKEN` (org- or repo-level,
-picked up via `secrets: inherit`). Override the endpoint with the
-`PLATFORM_ENQUEUE_URL` repo/org variable (default `https://platform.hanzo.ai/v1/runner`).
+Three declarations the door cannot express, and the lane refuses each before it
+POSTs rather than publishing an image that is not the one the repo asked for:
+`build_secrets` (it mounts no KMS), a `context` below the repository root (its
+context is the whole repository at one commit), and a `platforms` list that is
+anything but `linux/amd64`.
 
 `mode: buildx` (the default) is unchanged — existing repos keep running buildx on
 the fleet runner, so delegation is strictly opt-in.
