@@ -1324,29 +1324,20 @@ jobs:
         # already committed. A Hanzo Git serving different bytes fails the build
         # loudly instead of shipping them.
         #
-        # Longest prefix wins in git, so the owner-scoped Hanzo Git rule outranks the
-        # bare github.com rule beneath it and every OTHER module still resolves
-        # from github.com. Both rules are optional and independent: no
-        # HANZO_API_TOKEN (or a github.com-hosted run, where the server IS
-        # github.com) leaves the old behaviour exactly as it was.
+        # ONE WAY, AND IT IS THE MODULE PATH. A module path is a NAME, and
+        # github.com/hanzoai/x names github.com — so that is where it is fetched
+        # and this step's only job is to put a credential on that host.
         #
-        # TWO RULES, TWO HOSTS, TWO CREDENTIALS, and they must not be confused for
-        # each other. The git.hanzo.ai rule takes HANZO_API_TOKEN and the
-        # github.com rule takes GIT_TOKEN, because a credential is only good on
-        # the host that issued it. The per-job token cannot stand in for either:
-        # the sibling modules it would be fetching (hanzoai/plans,
-        # hanzoai/dashscopego, hanzoai/commerce) are private repos this run does
-        # not belong to, and Hanzo Git answers those 404 for a scoped token —
-        # which `go` reports as a module that could not be placed.
+        # It used to also rewrite our namespaces at the in-cluster forge, which
+        # made "which host served this module" a question with two answers and no
+        # way to tell from the failure which one had been asked. When that forge
+        # could not serve a repo it answered 404 rather than 403, `go` called it a
+        # module it could not place, and ONE unplaced module failed the whole
+        # package load — so every package in the graph came back
+        # `invalid package name: ""`, naming no host and no credential. Fourteen
+        # consecutive cloud runs read as broken code against a tree that builds.
         #
-        # SPLIT THE SERVER, do not strip a scheme you assumed. GITHUB_SERVER_URL
-        # on this fleet's runners is `http://hanzo-git.hanzo.svc` — Hanzo Git's
-        # in-cluster address, plain http — and a `${SERVER#https://}` that only
-        # knows the https spelling passes it through whole, producing
-        # `https://http://hanzo-git.hanzo.svc/...` and a git that resolves the host
-        # `http`. Take the scheme and the host as the two values they are, and
-        # compare the HOST against github.com so the guard cannot be fooled by a
-        # spelling either.
+        # Choosing a host is not this step's concern. Authenticating one is.
         if: steps.gomod.outputs.file != ''
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
@@ -1355,81 +1346,16 @@ jobs:
         run: |
           set -uo pipefail
           CFG="$RUNNER_TEMP/gitconfig-go-test"; : > "$CFG"
-          SERVER="${GITHUB_SERVER_URL:-https://github.com}"
-          SCHEME="${SERVER%%://*}"; HOST="${SERVER#*://}"; HOST="${HOST%/}"
           wrote=0
 
-            if [ -n "${HANZO_API_TOKEN:-}" ] && [ "$HOST" != "github.com" ]; then
-              # THE OWNER OF THE REPO IS NOT THE OWNER OF ITS MODULES. This rewrote
-              # only github.com/$OWNER/, taking the repository owner as if it also
-              # named the module namespace. That held until a repo changed org: cloud
-              # became hanzo-inc/cloud while every module it requires is still called
-              # github.com/hanzoai/*, so the rewrite stopped matching and said nothing.
-              # The private ones then fell through to the public proxy, which cannot
-              # serve them, and the closure lost 7 packages with no fetch error
-              # anywhere — a rewrite that never fires leaves no trace.
-              #
-              # Rewrite OUR namespaces, not the repo's owner and not every namespace
-              # in go.mod: redirecting golang/ or google/ at our Hanzo Git would break the
-              # whole graph. Ours are the brands we publish under; Hanzo Git is where
-              # they live, and a module path is a name rather than an address.
-              # PROVE THE REWRITE BEFORE TRUSTING IT. This rule is a LONGER prefix
-              # than the github.com one below, so insteadOf — longest match wins —
-              # makes it the only rule that ever fires for our modules. That is
-              # correct when the forge can serve them and catastrophic when it
-              # cannot: Hanzo Git answers 404 for a repository an identity cannot
-              # see, `go` reports a module that could not be placed, and ONE
-              # unplaced module fails the whole package load, so every package in
-              # the graph comes back `invalid package name: ""`. Nothing in that
-              # sentence names a credential, which is why it reads as broken code.
-              #
-              # So ask once, with the token we are about to write in, whether the
-              # forge actually serves one of our modules. If it does not, write no
-              # forge rule and let the modules resolve from the address in their
-              # own path — github.com, with the token below. Falling back is safe
-              # in a way that failing is not: a module path is a name, and
-              # github.com is where that name resolves for anyone outside this
-              # cluster.
-              # `seen` is the list of OUR namespaces and is set either way. It is
-              # what the GOPRIVATE probe below iterates, and a module that is not
-              # on the public proxy needs naming there whichever host serves it —
-              # tying it to the forge rewrite would trade one broken fetch for
-              # another.
-              seen=""
-              for o in hanzoai hanzo-inc hanzo-ds hanzokv hanzos3 luxfi luxwallet zooai "$OWNER"; do
-                case " $seen " in *" $o "*) continue ;; esac
-                seen="$seen $o"
-              done
-              # PROBE WHAT THIS BUILD ACTUALLY NEEDS, not a name chosen in advance. A
-              # hardcoded target proves only that the forge serves THAT repo: the first
-              # spelling of this asked for hanzoai/dbx, which the forge serves to anyone,
-              # so it passed on a runner whose token could not read hanzoai/account — and
-              # the rewrite was written anyway, which is the failure it was added to catch.
-              # Take the first of our modules out of this repo's own go.mod and ask for
-              # that; it is by definition a module this build has to place.
-              probe_mod=""
-              if [ -n "${GOMOD:-}" ] && [ -f "$GOMOD" ]; then
-                for o in $seen; do
-                  # A VERSION MUST FOLLOW IT, which is what makes this a REQUIREMENT and
-                  # not the `module` line naming this repo itself — probing your own
-                  # module proves nothing about the dependencies you cannot place.
-                  probe_mod=$(grep -oE "github[.]com/${o}/[a-z0-9._-]+ v[0-9][^ ]*" "$GOMOD" | head -1 | cut -d" " -f1)
-                  [ -n "$probe_mod" ] && break
-                done
-              fi
-              probe="${SCHEME}://x-access-token:${HANZO_API_TOKEN}@${HOST}/${probe_mod#github.com/}"
-              if [ -n "$probe_mod" ] && git ls-remote --heads "$probe" >/dev/null 2>&1; then
-                for o in $seen; do
-                  GIT_CONFIG_GLOBAL="$CFG" git config --global \
-                    url."${SCHEME}://x-access-token:${HANZO_API_TOKEN}@${HOST}/${o}/".insteadOf \
-                    "https://github.com/${o}/"
-                done
-                echo "our namespaces resolve from ${SCHEME}://${HOST}:$seen"
-                wrote=1
-              else
-                echo "::warning::${HOST} did not serve ${probe_mod:-our modules} to this identity, so they resolve from github.com instead. Give HANZO_API_TOKEN read access to that namespace on the forge to fetch them in-cluster."
-              fi
-            fi
+          # `seen` names OUR namespaces, and is used for one thing: the GOPRIVATE
+          # probe below. A module the public proxy cannot serve has to be named
+          # there or `go` verifies it against a sumdb that never heard of it.
+          seen=""
+          for o in hanzoai hanzo-inc hanzo-ds hanzokv hanzos3 luxfi luxwallet zooai "$OWNER"; do
+            case " $seen " in *" $o "*) continue ;; esac
+            seen="$seen $o"
+          done
 
           TOKEN="${GIT_TOKEN:-${GH_PAT:-}}"
           if [ -n "$TOKEN" ]; then
