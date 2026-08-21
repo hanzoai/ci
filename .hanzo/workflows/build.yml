@@ -1373,16 +1373,45 @@ jobs:
               # in go.mod: redirecting golang/ or google/ at our Hanzo Git would break the
               # whole graph. Ours are the brands we publish under; Hanzo Git is where
               # they live, and a module path is a name rather than an address.
+              # PROVE THE REWRITE BEFORE TRUSTING IT. This rule is a LONGER prefix
+              # than the github.com one below, so insteadOf — longest match wins —
+              # makes it the only rule that ever fires for our modules. That is
+              # correct when the forge can serve them and catastrophic when it
+              # cannot: Hanzo Git answers 404 for a repository an identity cannot
+              # see, `go` reports a module that could not be placed, and ONE
+              # unplaced module fails the whole package load, so every package in
+              # the graph comes back `invalid package name: ""`. Nothing in that
+              # sentence names a credential, which is why it reads as broken code.
+              #
+              # So ask once, with the token we are about to write in, whether the
+              # forge actually serves one of our modules. If it does not, write no
+              # forge rule and let the modules resolve from the address in their
+              # own path — github.com, with the token below. Falling back is safe
+              # in a way that failing is not: a module path is a name, and
+              # github.com is where that name resolves for anyone outside this
+              # cluster.
+              probe="${SCHEME}://x-access-token:${HANZO_API_TOKEN}@${HOST}/hanzoai/dbx"
+              # `seen` is the list of OUR namespaces and is set either way. It is
+              # what the GOPRIVATE probe below iterates, and a module that is not
+              # on the public proxy needs naming there whichever host serves it —
+              # tying it to the forge rewrite would trade one broken fetch for
+              # another.
               seen=""
               for o in hanzoai hanzo-inc hanzo-ds hanzokv hanzos3 luxfi luxwallet zooai "$OWNER"; do
                 case " $seen " in *" $o "*) continue ;; esac
                 seen="$seen $o"
-                GIT_CONFIG_GLOBAL="$CFG" git config --global \
-                  url."${SCHEME}://x-access-token:${HANZO_API_TOKEN}@${HOST}/${o}/".insteadOf \
-                  "https://github.com/${o}/"
               done
-              echo "our namespaces resolve from ${SCHEME}://${HOST}:$seen"
-              wrote=1
+              if git ls-remote --heads "$probe" >/dev/null 2>&1; then
+                for o in $seen; do
+                  GIT_CONFIG_GLOBAL="$CFG" git config --global \
+                    url."${SCHEME}://x-access-token:${HANZO_API_TOKEN}@${HOST}/${o}/".insteadOf \
+                    "https://github.com/${o}/"
+                done
+                echo "our namespaces resolve from ${SCHEME}://${HOST}:$seen"
+                wrote=1
+              else
+                echo "::warning::${HOST} did not serve hanzoai/dbx to this identity, so our modules resolve from github.com instead. Give HANZO_API_TOKEN read access to the hanzoai namespace to fetch them in-cluster."
+              fi
             fi
 
           TOKEN="${GIT_TOKEN:-${GH_PAT:-}}"
