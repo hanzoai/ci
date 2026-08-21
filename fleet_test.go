@@ -78,14 +78,14 @@ func TestShippedRunStillCountsAsBuilt(t *testing.T) {
 }
 
 // TestAbsentIsNotFailure keeps the two apart. A failing run can be opened and
-// read; a commit the forge never built a run for cannot, and sending someone to
+// read; a commit Hanzo Git never built a run for cannot, and sending someone to
 // look for a log that does not exist is its own delay.
 func TestAbsentIsNotFailure(t *testing.T) {
 	old := time.Now().Add(-time.Hour)
 	if got := verdict(Run{}, nil, old); got.State != "absent" {
 		t.Errorf("no run for an hour-old commit = %q; want absent", got.State)
 	}
-	// A commit that has only just landed has no run yet because the forge is
+	// A commit that has only just landed has no run yet because Hanzo Git is
 	// still constructing one. Calling that absent would alarm on every push.
 	if got := verdict(Run{}, nil, time.Now()); got.State != "running" {
 		t.Errorf("no run for a commit pushed seconds ago = %q; want running", got.State)

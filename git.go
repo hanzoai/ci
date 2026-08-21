@@ -10,20 +10,20 @@ import (
 	"time"
 )
 
-// forge.go reads the two things the forge knows that the run list does not: what
+// git.go reads the two things Hanzo Git knows that the run list does not: what
 // hanzoai/universe declares, and which commit last produced a proved image.
 //
 // Both come from the same host over the same token this service already holds.
-// The universe repo lives on the forge, so the declared state of the fleet is a
+// The universe repo lives on Hanzo Git, so the declared state of the fleet is a
 // file read — no second credential, no checkout, no clone on disk.
 
 // A commit that has just landed has no run for a moment. Below this age a
-// missing run is the forge still constructing one, and calling that absent would
+// missing run is Hanzo Git still constructing one, and calling that absent would
 // alarm on every push.
 const settling = 5 * time.Minute
 
 // How far back the walk looks for the last commit that built. Every step is a
-// read against the forge, and past this depth the answer is already "this has not
+// read against Hanzo Git, and past this depth the answer is already "this has not
 // built in a long time", which the count says without another call.
 const reach = 12
 
@@ -197,7 +197,7 @@ func (g *gitSource) links(ctx context.Context, logger *slog.Logger, pins []pin) 
 //
 // Where that repo does not exist the publisher sits in another org — ghcr.io/
 // hanzoai/cloud is built by hanzo-inc/cloud — and there the name alone is
-// ambiguous, because half a dozen orgs on this forge hold a repo called cloud.
+// ambiguous, because half a dozen orgs on Hanzo Git hold a repo called cloud.
 // Then the declared tag decides: the repo carrying the tag the fleet is running
 // is the repo that cut it. An image no candidate can be shown to publish stays
 // unlinked, and the page says so rather than showing a guess.
@@ -267,7 +267,7 @@ func (g *gitSource) holds(ctx context.Context, repo, tag string) bool {
 	return g.getJSON(ctx, "/v1/repos/"+repo+"/tags/"+url.PathEscape(tag), &out) == nil && out.Name != ""
 }
 
-// link reads the forge end of the line: what we wrote, and what was last proved.
+// link reads the Hanzo Git end of the line: what we wrote, and what was last proved.
 func (g *gitSource) link(ctx context.Context, repo, branch string) (link, error) {
 	org, _ := splitFullName(repo)
 	c := link{Repo: repo, Org: org}
@@ -421,7 +421,7 @@ func (g *gitSource) built(ctx context.Context, repo string, r Run, at time.Time)
 // which job failed, and whether an artifact exists, is what the page turns on.
 func verdict(r Run, jobs []job, at time.Time) Build {
 	if r.ID == 0 {
-		// No run for this commit. A push that has only just landed is the forge
+		// No run for this commit. A push that has only just landed is Hanzo Git
 		// still constructing one; older than that, the run is genuinely absent —
 		// a workflow that could not be parsed or a reference that would not
 		// resolve, which leaves no failed run to open.
@@ -503,7 +503,7 @@ func (g *gitSource) jobs(ctx context.Context, repo string, run int64) ([]job, er
 }
 
 // each runs fn over items with a small fixed fan-out. The cap is deliberately
-// low: these are reads against the forge that schedules every build in the
+// low: these are reads against the server that schedules every build in the
 // fleet, and a dashboard is never worth degrading it.
 func each[T any](ctx context.Context, items []T, fn func(context.Context, T) error) error {
 	const workers = 4
