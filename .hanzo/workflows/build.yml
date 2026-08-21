@@ -1242,7 +1242,12 @@ jobs:
                       | base64 -d 2>/dev/null || true)
               sub=$(printf '%s' "$claim" | jq -r '.sub // "unreadable"' 2>/dev/null || echo unreadable)
               iss=$(printf '%s' "$claim" | jq -r '.iss // "unreadable"' 2>/dev/null || echo unreadable)
-              echo "::error::hanzoai/openapi is private and git.hanzo.ai refused this org's IAM token. The token is a MACHINE identity from the KMS client-credentials exchange — subject ${sub}, issued by ${iss} — and git.hanzo.ai resolves an IAM subject through the account it is linked to (services/auth/iam.go). A machine subject no sign-in ever linked resolves to nobody, so the credential verifies and still authorizes nothing. Link ${sub} to a service account on git.hanzo.ai, or let the driver repo be readable by it." >&2
+              # The subject prints masked when the app name is also registered as
+              # a secret here, which is exactly the case that needs diagnosing.
+              # A SHA-256 of it is not: it cannot carry the value out, and it
+              # still lets a candidate be confirmed by hashing it and comparing.
+              subh=$(printf '%s' "$sub" | sha256sum | cut -c1-16)
+              echo "::error::hanzoai/openapi is private and git.hanzo.ai refused this org's IAM token. The token is a MACHINE identity from the KMS client-credentials exchange — subject ${sub} (sha256:${subh}), issued by ${iss} — and git.hanzo.ai resolves an IAM subject through the account it is linked to (services/auth/iam.go). A machine subject no sign-in ever linked resolves to nobody, so the credential verifies and still authorizes nothing. Link ${sub} to a service account on git.hanzo.ai, or let the driver repo be readable by it." >&2
               exit 1
             }
           fi
