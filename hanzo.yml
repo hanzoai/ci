@@ -94,7 +94,7 @@ test:
       set -e
       f=.hanzo/workflows/build.yml
       t=$(grep -n '^      - name: Test (per hanzo.yml)$'                       "$f" | cut -d: -f1)
-      d=$(grep -n '^      - name: Delegate build to platform (mode=delegate)$' "$f" | cut -d: -f1)
+      d=$(grep -n '^      - name: Delegate build to the runner (mode=delegate)$' "$f" | cut -d: -f1)
       [ -n "$t" ] && [ -n "$d" ] || { echo "::error::cannot find the test gate ($t) or the delegate step ($d) — a rename broke this assertion, fix the assertion"; exit 1; }
       [ "$d" -gt "$t" ] || { echo "::error::the delegate step (line $d) runs BEFORE the test gate (line $t) — a delegated build would ship an ungated commit"; exit 1; }
       if sed -n "${t}p;$((t+1)),$((t+80))p" "$f" | grep -m1 '^        if: ' | grep -q "mode != 'delegate'"; then
@@ -165,10 +165,10 @@ test:
       f=.hanzo/workflows/build.yml
       line() { grep -n "^      - name: $1\$" "$f" | cut -d: -f1; }
       t=$(line 'Test (per hanzo.yml)'); o=$(line 'Tests not run (declared by caller)')
-      v=$(line 'Test verdict');         d=$(line 'Delegate build to platform (mode=delegate)')
+      v=$(line 'Test verdict');         d=$(line 'Delegate build to the runner (mode=delegate)')
       b=$(line 'Build & push images (per hanzo.yml)')
       for pair in "t:Test (per hanzo.yml)" "o:Tests not run (declared by caller)" "v:Test verdict" \
-                  "d:Delegate build to platform (mode=delegate)" "b:Build & push images (per hanzo.yml)"; do
+                  "d:Delegate build to the runner (mode=delegate)" "b:Build & push images (per hanzo.yml)"; do
         eval "x=\$${pair%%:*}"
         [ -n "$x" ] || { echo "::error::the step named '${pair#*:}' is gone from $f — a rename broke this assertion, fix the assertion"; exit 1; }
       done
