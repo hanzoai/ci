@@ -1224,8 +1224,17 @@ jobs:
           # two lines that describe the shell and the transport, and neither one
           # says which credential nobody handed this step.
           [ -n "${HANZO_API_TOKEN:-}" ] || { echo "::error::the client lane clones the driver from git.hanzo.ai with this org's IAM identity, and HANZO_API_TOKEN is empty — the KMS login earlier in this job is what mints it, so it did not run or did not succeed"; exit 1; }
-          [ -d "$OPENAPI" ] || git -c http.extraheader="Authorization: Basic $(printf 'x-access-token:%s' "$HANZO_API_TOKEN" | base64 -w0)" \
-            clone --depth 1 -q https://git.hanzo.ai/hanzoai/openapi "$OPENAPI"
+          # A 401 here arrives as "could not read Username": git has no terminal to
+          # prompt on, so a REFUSED credential and an ABSENT one read identically.
+          # Say which one it was, because they have different fixes.
+          if [ ! -d "$OPENAPI" ]; then
+            git -c http.extraheader="Authorization: Basic $(printf 'x-access-token:%s' "$HANZO_API_TOKEN" | base64 -w0)" \
+              clone --depth 1 -q https://git.hanzo.ai/hanzoai/openapi "$OPENAPI" 2>"$RUNNER_TEMP/driver.err" || {
+              sed 's/^/  /' "$RUNNER_TEMP/driver.err" >&2
+              echo "::error::hanzoai/openapi is private and git.hanzo.ai refused this org's IAM token. That token is a MACHINE identity from the KMS client-credentials exchange, and git.hanzo.ai resolves an IAM subject through the account it is linked to (services/auth/iam.go) — a machine subject no sign-in ever linked resolves to nobody, so the credential is valid and still authorizes nothing. Link the machine identity to a service account there, or let the driver repo be readable by it." >&2
+              exit 1
+            }
+          fi
 
           # AND AN INTERPRETER THAT CAN READ YAML, which is the driver's
           # requirement and not any one language's. The parse toolchain above
