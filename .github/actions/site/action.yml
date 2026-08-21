@@ -19,7 +19,7 @@ description: Publish a built static export to the Hanzo PaaS Sites plane.
 # ONE credential, read from ONE place. The deploy key comes from KMS, which is
 # where a secret lives: it rotates by resealing, and every site that publishes
 # reads the same value the moment it changes. It was `secrets.HANZO_DEPLOY_TOKEN`
-# on the forge — one copy per org that nobody can read back, so nobody could tell
+# on Hanzo Git — one copy per org that nobody can read back, so nobody could tell
 # it had stopped resolving, and cloud answered 403 on every call for the repos
 # still carrying it while the one repo that had moved to KMS published fine.
 #
@@ -62,7 +62,7 @@ runs:
     - name: Fetch site
       shell: bash
       # The action ref is the script ref: an action pinned to @v1 runs v1's
-      # site. Both forges, because this repo is served from each.
+      # site. Both hosts, because this repo is served from each.
       run: |
         set -euo pipefail
         ref="${GITHUB_ACTION_REF:-v1}"
