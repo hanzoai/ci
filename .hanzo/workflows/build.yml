@@ -951,6 +951,33 @@ jobs:
         if: hashFiles('bun.lock', '**/bun.lock', 'bun.lockb', '**/bun.lockb') != ''
         uses: oven-sh/setup-bun@v2
 
+      - name: Provision uv (python test gates)
+        # The same hole the Go, Node, Rust and bun steps close, for the language
+        # that had none. A python `test:` gate runs DIRECTLY on the runner and
+        # every one in this fleet invokes `uv run …` — the client-codegen lane
+        # below even says so — but uv was installed ONLY in that lane, so a gate
+        # reached it first and died at
+        #     bash: line 1: uv: command not found   (exit 127)
+        # which is byte-for-byte the failure the Node step's comment describes.
+        # Measured on hanzoai/bootnode: `cd api && uv run pytest` on a Go repo,
+        # exit 127, no image published from that repo while it stood.
+        #
+        # NESTED glob for the reason the Node step gives: a Go repo whose python
+        # lives in a subtree is still a python caller. bootnode keeps its API in
+        # api/, so a root-only hashFiles would skip this and the gate would die
+        # exactly as before.
+        #
+        # uv rather than setup-python: it carries its own interpreter and its own
+        # dependency resolution, needs no root, and is what the gates already
+        # spell. Guarded, so it is a no-op once a runner image bakes it in.
+        if: hashFiles('pyproject.toml', '**/pyproject.toml', 'requirements.txt', '**/requirements.txt', 'uv.lock', '**/uv.lock') != ''
+        shell: bash
+        run: |
+          command -v uv >/dev/null 2>&1 || {
+            curl -fsSL https://astral.sh/uv/install.sh | sh
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          }
+
       - name: Provision Rust toolchain (cargo test gates)
         # Same hole the Go and Node steps close, for the third language this fleet
         # actually ships: hanzoai/cli is Rust, and its gate — `genspec --check`,
