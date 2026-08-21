@@ -1116,21 +1116,23 @@ jobs:
           # The payload is senior; the input is how a workflow_dispatch says it.
           [ -n "$VERSION" ] || VERSION="${SPEC_VERSION_IN:-}"
 
-          [ -n "${HANZO_GIT_TOKEN:-}" ] || { echo "::error::the client: lane reads ${SPEC_REPO} and hanzoai/openapi from git.hanzo.ai, which the per-job token cannot reach — seal HANZO_GIT_TOKEN (contents:read on both) in KMS for this org"; exit 1; }
-
-          # GIT.HANZO.AI IS WHERE THE DOCUMENT IS. This lane runs on git.hanzo.ai's
-          # own runners against a repo whose canonical home is git.hanzo.ai, and
-          # it used to reach across to api.github.com for the bytes — a mirror
-          # that trails hanzoai/cloud by thousands of commits and does not serve
-          # openapi.yaml at all, so the fetch could only 404. Asking a mirror is
-          # not a weaker version of asking the source; it is asking a different
-          # question, and one whose answer no release ever produced.
+          # THE DEPLOYMENT IS THE DOCUMENT. api.hanzo.ai publishes what the
+          # running code answers for, at /v1/openapi.json, to anyone — so this
+          # read needs no credential at all, and the lane stops depending on a
+          # cross-org read of a private repository that the per-job token is not
+          # allowed to make.
           #
-          # The Hanzo Git serves its API at /v1/, NOT /api/v1/ — /api/v1 returns a 404
-          # that reads exactly like a rejected credential. Same route the CLI's
-          # Makefile takes, because there is one document at one address.
-          curl -fsSL -H "Authorization: token ${HANZO_GIT_TOKEN}" \
-            "https://git.hanzo.ai/v1/repos/${SPEC_REPO}/raw/${SPEC_PATH}?ref=${REF}" -o "$RUNNER_TEMP/spec"
+          # This is what hanzo.yml already says the source of truth is: "a
+          # document the running code writes beats one a person maintains beside
+          # it". Reading a repository instead was how the pin drifted 132 commits
+          # behind and published three routes api.hanzo.ai refutes. A client
+          # generated from what production serves cannot describe a version
+          # nobody shipped, because there is no second version to describe.
+          #
+          # SPEC_URL stays overridable for a repo that genuinely projects a
+          # different surface; the default is the one everyone should want.
+          SPEC_URL=$(yq -r '.client.spec.url // "https://api.hanzo.ai/v1/openapi.json"' hanzo.yml)
+          curl -fsSL "$SPEC_URL" -o "$RUNNER_TEMP/spec"
           GOT=$(sha256sum "$RUNNER_TEMP/spec" | cut -d' ' -f1)
 
           # G2: one release, one document. A digest that does not match the one
