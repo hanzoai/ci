@@ -22,7 +22,7 @@ import (
 // Every arrow is a job of the pipeline this repo publishes, so a service is
 // current exactly when all four agree, and each way they can disagree names the
 // arrow that did not happen. Reading all four from the systems that own them —
-// the forge, the universe repo, the cluster — is what makes this a measurement
+// Hanzo Git, the universe repo, the cluster — is what makes this a measurement
 // rather than a restatement of the last log line the pipeline wrote about itself.
 //
 // Three matching values are NOT health, which is the whole reason head is read:
@@ -48,11 +48,11 @@ type Version struct {
 
 func (v Version) known() bool { return v.Tag != "" || v.Digest != "" }
 
-// Build is what the forge did with one commit.
+// Build is what Hanzo Git did with one commit.
 type Build struct {
 	// State is success | failure | running | absent. `absent` is not a kind of
 	// failure and is kept apart from one: a failing run is a build that ran and
-	// said no, while an absent run is the forge never having constructed a run
+	// said no, while an absent run is Hanzo Git never having constructed a run
 	// for the commit at all — a workflow it cannot parse or a reference it
 	// cannot resolve. There is no log to open for the second, so a page that
 	// draws them the same sends you looking for one that does not exist.
@@ -96,7 +96,7 @@ type Service struct {
 	Name      string `json:"name"`      // cloud
 	Namespace string `json:"namespace"` // hanzo
 	Image     string `json:"image"`     // ghcr.io/hanzoai/cloud
-	Org       string `json:"org"`       // forge owner; empty when the repo is unresolved
+	Org       string `json:"org"`       // Hanzo Git owner; empty when the repo is unresolved
 	Repo      string `json:"repo"`      // hanzo-inc/cloud
 
 	Head     Head    `json:"head"`
@@ -237,7 +237,7 @@ type live struct {
 	Want      int
 }
 
-// link is one repo as the forge accounts for it.
+// link is one repo as Hanzo Git accounts for it.
 type link struct {
 	Repo   string
 	Org    string
@@ -256,7 +256,7 @@ type link struct {
 // against another's running version, which manufactures drift that is not there.
 //
 // So the namespace and name carry the row, the cluster is matched on the same
-// pair, and the IMAGE is what joins to the forge — several services legitimately
+// pair, and the IMAGE is what joins to Hanzo Git — several services legitimately
 // share one repo, and then they share its head and its last build too.
 func assemble(pins []pin, lives []live, links map[string]link) []Service {
 	at := func(namespace, name string) string { return namespace + "/" + name }
@@ -421,8 +421,8 @@ func orgsOfServices(services []Service) []string {
 // watch refreshes the fleet snapshot on its own interval.
 //
 // It is slower than the run poll because the values it reads move on deploy
-// cadence rather than push cadence, and each cycle costs the forge a read per
-// service. Nothing about a dashboard justifies loading the forge that schedules
+// cadence rather than push cadence, and each cycle costs Hanzo Git a read per
+// service. Nothing about a dashboard justifies loading the server that schedules
 // every build in the fleet harder than the fleet itself does.
 func watch(ctx context.Context, logger *slog.Logger, src *gitSource, cl *cluster, cache *fleetCache, cfg config) {
 	refresh := func() {
