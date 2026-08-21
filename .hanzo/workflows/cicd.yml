@@ -6,9 +6,12 @@ name: CI/CD
 # ~7-line caller, exactly like cloud/commerce/console/git.
 #
 # Self-referential on purpose: this repo's dashboard image is built by this
-# repo's own reusable pipeline, pinned at the @v2 TAG rather than at the working
-# tree. That pin is what keeps a broken edit to build.yml from also breaking the
-# build that would have caught it — the tag moves only when a release is cut.
+# repo's own reusable pipeline, pinned at the last RELEASE tag rather than at the
+# working tree. That pin is what keeps a broken edit to build.yml from also
+# breaking the build that would have caught it — it moves only when a release is
+# cut, and moving it here is what proves that release before the fleet's @v1
+# follows. Named as a role, not a number: the prose said @v2 while the pin below
+# read @v1, because a version written into a sentence goes stale on the next one.
 on:
   push:
     branches: [main]
@@ -23,5 +26,5 @@ concurrency:
   cancel-in-progress: true
 jobs:
   gate:
-    uses: hanzoai/ci/.hanzo/workflows/build.yml@v1
+    uses: hanzoai/ci/.hanzo/workflows/build.yml@v1.0.78
     secrets: inherit
