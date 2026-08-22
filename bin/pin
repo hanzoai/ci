@@ -95,31 +95,54 @@ for repo in "$@"; do
   w=$(mktemp -d)/wt
   git -C "$repo" worktree add -q --detach "$w" "$remote/main" 2>/dev/null || {
     printf '%-16s %-10s WORKTREE FAILED\n' "$name" "$have"; broke=$((broke + 1)); continue; }
-  if ! (cd "$w" && go get "$mod@$latest" >/dev/null 2>&1 && go mod tidy >/dev/null 2>&1); then
-    printf '%-16s %-10s GET FAILED\n' "$name" "$have"; broke=$((broke + 1))
-  elif ! (cd "$w" && go build ./... >/dev/null 2>&1); then
-    printf '%-16s %-10s BUILD FAILED at %s\n' "$name" "$have" "$latest"; broke=$((broke + 1))
-  elif ! (cd "$w" && go test ./... >/dev/null 2>&1); then
-    printf '%-16s %-10s TESTS FAILED at %s\n' "$name" "$have" "$latest"; broke=$((broke + 1))
-  else
-    # Building and testing takes minutes, and main can move in them — it did, on
-    # the first sweep. Rebase onto whatever main is NOW and try once more, then
-    # report what git actually said rather than that something went wrong.
-    # Nothing staged means the bump changed no file. That is not a push failure,
-    # and reporting it as one sent a reader looking at git credentials for a
-    # module that was simply already satisfied by another requirement.
+  # ship commits whatever the bump left in the worktree and pushes it, rebasing
+  # once if main moved while the build and tests ran — it did, on the first sweep.
+  ship() {
+    # Nothing staged means the bump changed no file: not a push failure, and
+    # reporting it as one sent a reader looking at git credentials for a module
+    # another requirement already satisfied.
     if ! (cd "$w" && git add -A && ! git diff --cached --quiet); then
-      printf '%-16s %-10s no change at %s\n' "$name" "$have" "$latest"
-    elif out=$(cd "$w" &&
+      printf '%-16s %-10s no change at %s\n' "$name" "$have" "$latest"; return
+    fi
+    local out
+    if out=$(cd "$w" &&
       git -c user.name=hanzo-dev -c user.email=dev@hanzo.ai commit -q -m "Depend on $mod $latest" &&
       { git push "$remote" HEAD:main ||
         { git fetch -q "$remote" &&
           git -c user.name=hanzo-dev -c user.email=dev@hanzo.ai rebase "$remote/main" &&
           git push "$remote" HEAD:main; }; } 2>&1); then
-      printf '%-16s %-10s -> %s pushed\n' "$name" "$have" "$latest"; moved=$((moved + 1))
+      printf '%-16s %-10s -> %s %s\n' "$name" "$have" "$latest" "${1:-pushed}"
+      moved=$((moved + 1))
     else
       printf '%-16s %-10s PUSH FAILED: %s\n' "$name" "$have" \
         "$(grep -viE 'lefthook|^remote:|^To |^ ' <<<"$out" | grep -m1 .)"
+      broke=$((broke + 1))
+    fi
+  }
+  # red lists the packages a run reported failing, so two runs can be compared by
+  # WHICH failed rather than how many.
+  red() { grep -oE '^FAIL[[:space:]]+[^[:space:]]+' "$1" 2>/dev/null | awk '{print $2}' | sort -u; }
+  runs=$(dirname "$w")
+
+  if ! (cd "$w" && go get "$mod@$latest" >/dev/null 2>&1 && go mod tidy >/dev/null 2>&1); then
+    printf '%-16s %-10s GET FAILED\n' "$name" "$have"; broke=$((broke + 1))
+  elif ! (cd "$w" && go build ./... >/dev/null 2>&1); then
+    printf '%-16s %-10s BUILD FAILED at %s\n' "$name" "$have" "$latest"; broke=$((broke + 1))
+  elif (cd "$w" && go test ./... >"$runs/after" 2>&1); then
+    ship
+  else
+    # A RED SUITE IS NOT A REASON TO HOLD BACK A BUMP. It is a reason to ask
+    # whether the bump made it redder. commerce fails 20 packages on its own main
+    # and failed the same 20 after; holding it back on "tests failed" would pin a
+    # repo to a ten-minor-old library forever, because the bar could never be met.
+    # The baseline is only paid for here, where the answer changes the decision.
+    (cd "$w" && git checkout -q -- . && git clean -qfd && go test ./... >"$runs/before" 2>&1)
+    if diff -q <(red "$runs/before") <(red "$runs/after") >/dev/null 2>&1; then
+      (cd "$w" && go get "$mod@$latest" >/dev/null 2>&1 && go mod tidy >/dev/null 2>&1)
+      ship "pushed (main already red in $(red "$runs/before" | wc -l | tr -d ' '), unchanged)"
+    else
+      printf '%-16s %-10s TESTS REGRESSED at %s: %s\n' "$name" "$have" "$latest" \
+        "$(comm -13 <(red "$runs/before") <(red "$runs/after") | tr '\n' ' ')"
       broke=$((broke + 1))
     fi
   fi
