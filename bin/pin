@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# pin — report, and optionally close, the gap between what a repo DEPENDS ON and
+# what that dependency has released. One implementation, every repo.
+#
+#   pin <module> <repo>...            # report: current -> latest, per repo
+#   pin --apply <module> <repo>...    # bump, build, test; push only what is green
+#
+# WHY THIS IS A TOOL AND NOT A LOOP SOMEBODY TYPES
+#
+# A shared library's fix reaches nobody until every consumer moves, and nothing
+# in the estate reports who has not. Measured on github.com/zap-proto/zip: 22
+# repos depend on it and 2 were current. Twelve were more than ten minors
+# behind, one by twenty-six. Each of those is a fix somebody wrote, tested and
+# tagged, that no running service has.
+#
+# The gap is invisible because nothing fails. A stale pin compiles, passes and
+# serves; it just serves the OLD behaviour. That is the failure mode this exists
+# for — not a broken build, a silent one.
+#
+# READ THE PIN FROM THE BRANCH, NOT THE CHECKOUT
+#
+# Every read here is `git show <remote-main>:go.mod`. A working copy is whatever
+# somebody last left it as: on the sweep that prompted this, four repos' local
+# go.mod disagreed with their own main, two of them by enough to invert the
+# answer — a repo reported ten minors behind was already current. A checkout is
+# a claim; the branch is the fact.
+#
+# The remote is `forge` where it exists and `origin` otherwise, because the
+# forge is canonical for the repos that have one and a build reads from there.
+#
+# GREEN MEANS BUILT AND TESTED, NOT EDITED
+#
+# --apply refuses to push a repo whose build or tests fail after the bump, and
+# says which. A bump that compiles is not a bump that works: a library can widen
+# behaviour without changing a signature, which is exactly what a consumer's
+# tests are for. Repos are independent, so one failure never blocks the rest.
+set -uo pipefail
+
+apply=0
+[ "${1:-}" = "--apply" ] && { apply=1; shift; }
+mod=${1:-}; shift || true
+[ -z "$mod" ] || [ $# -eq 0 ] && {
+  echo "usage: pin [--apply] <module> <repo>..." >&2; exit 2; }
+
+# latest asks the module proxy, so the answer is what a consumer would actually
+# resolve — not what a local clone of the library happens to have tagged.
+latest=$(go list -m -f '{{.Version}}' "$mod@latest" 2>/dev/null)
+[ -z "$latest" ] && { echo "pin: cannot resolve $mod@latest" >&2; exit 1; }
+echo "$mod latest $latest"
+
+# A repo that does not depend on the module is not a finding, and neither is a
+# path that is not a repo. Printing them buries the answer under the corpus —
+# the first sweep printed 26 rows that mattered among 400 that did not.
+behind=0 moved=0 broke=0 seen=0
+for repo in "$@"; do
+  name=$(basename "$repo")
+  [ -d "$repo/.git" ] || continue
+  remote=origin
+  git -C "$repo" rev-parse --verify -q forge/main >/dev/null 2>&1 && remote=forge
+  git -C "$repo" fetch -q "$remote" 2>/dev/null
+  have=$(git -C "$repo" show "$remote/main:go.mod" 2>/dev/null |
+    grep -m1 -oE "${mod//\//\\/} v[0-9][0-9.]*" | awk '{print $2}')
+  [ -z "$have" ] && continue
+  seen=$((seen + 1))
+  [ "$have" = "$latest" ] && continue
+  behind=$((behind + 1))
+  [ $apply -eq 0 ] && { printf '%-16s %-10s -> %s\n' "$name" "$have" "$latest"; continue; }
+
+  # Work on a detached worktree of the branch, never the checkout: a sweep must
+  # not touch whatever somebody has in progress.
+  w=$(mktemp -d)/wt
+  git -C "$repo" worktree add -q --detach "$w" "$remote/main" 2>/dev/null || {
+    printf '%-16s %-10s WORKTREE FAILED\n' "$name" "$have"; broke=$((broke + 1)); continue; }
+  if ! (cd "$w" && go get "$mod@$latest" >/dev/null 2>&1 && go mod tidy >/dev/null 2>&1); then
+    printf '%-16s %-10s GET FAILED\n' "$name" "$have"; broke=$((broke + 1))
+  elif ! (cd "$w" && go build ./... >/dev/null 2>&1); then
+    printf '%-16s %-10s BUILD FAILED at %s\n' "$name" "$have" "$latest"; broke=$((broke + 1))
+  elif ! (cd "$w" && go test ./... >/dev/null 2>&1); then
+    printf '%-16s %-10s TESTS FAILED at %s\n' "$name" "$have" "$latest"; broke=$((broke + 1))
+  else
+    (cd "$w" && git add -A &&
+      git -c user.name=hanzo-dev -c user.email=dev@hanzo.ai commit -q \
+        -m "Depend on $mod $latest" &&
+      git push -q "$remote" HEAD:main) 2>/dev/null &&
+      { printf '%-16s %-10s -> %s pushed\n' "$name" "$have" "$latest"; moved=$((moved + 1)); } ||
+      { printf '%-16s %-10s PUSH FAILED\n' "$name" "$have"; broke=$((broke + 1)); }
+  fi
+  git -C "$repo" worktree remove --force "$w" 2>/dev/null
+  rm -rf "$(dirname "$w")"
+done
+
+if [ $apply -eq 1 ]; then
+  echo "$moved moved, $broke held back"
+  [ $broke -gt 0 ] && exit 1
+else
+  echo "$behind of $seen behind"
+fi
+exit 0
