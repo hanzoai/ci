@@ -56,6 +56,7 @@ repo nodep
 # THE POINT OF THE TOOL: the branch is read, not the checkout. The working copy
 # says v9.9.9; main says v1.0.0; the report must say v1.0.0.
 t "reads the branch not the checkout" "behind           v1.0.0     -> v2.0.0" example.com/lib "$tmp/behind"
+t "the row names the remote it read" "(origin)" example.com/lib "$tmp/behind"
 t "a current repo is silent" "0 of 1 behind" example.com/lib "$tmp/current"
 t "counts what is behind, out of what depends" "1 of 2 behind" example.com/lib "$tmp/behind" "$tmp/current"
 t "a repo with no such dependency is not counted" "0 of 0 behind" example.com/lib "$tmp/nodep"
@@ -136,7 +137,7 @@ mirror
 # pin cannot fetch the rewritten URL, so it reads the ref it already has — which
 # is the point: the ref it keeps for the FORGE remote, not the mirror's.
 out=$(PATH="$tmp/stub:$PATH" bash "$PIN" example.com/lib "$tmp/twohome" 2>&1)
-grep -q "twohome          v1.0.0     -> v2.0.0" <<<"$out" &&
+grep -q "twohome          v1.0.0     -> v2.0.0     (origin)" <<<"$out" &&
   echo "ok   the forge is chosen by URL, not by remote name" ||
   { echo "FAIL two-remote pick: $out"; fail=1; }
 
