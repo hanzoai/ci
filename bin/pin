@@ -55,21 +55,40 @@ behind=0 moved=0 broke=0 seen=0
 for repo in "$@"; do
   name=$(basename "$repo")
   [ -d "$repo/.git" ] || continue
-  # Canonical is the FORGE, and a remote's name does not say which one it is:
-  # gateway's forge is named origin and its GitHub mirror is named github, so
-  # picking by name pushed a fix to the mirror and left the forge — which is what
-  # a build reads — untouched. Pick by URL, and fall back to origin.
-  remote=$(git -C "$repo" remote -v 2>/dev/null |
-    awk '/git\.hanzo\.ai.*\(fetch\)/ {print $1; exit}')
-  [ -z "$remote" ] && remote=origin
+  # WHICH REMOTE IS THIS REPO'S HOME. Measured across the workspace, nothing
+  # answers it reliably on its own: a repo may have four remotes, two of them on
+  # the forge with one archived (iam), or none named origin at all (cloud, ai),
+  # and branch tracking points at a GitHub mirror as often as not.
+  #
+  # So: the forge is canonical, `origin` is the conventional name for it, and a
+  # forge URL under any other name is the fallback for a repo that has no origin.
+  # Right on all ten laid out by hand — and PRINTED beside every row, because a
+  # rule this shape will eventually be wrong somewhere, and a wrong reading that
+  # is visible costs a glance where a silent one costs a release.
+  forge() { git -C "$repo" remote get-url "$1" 2>/dev/null | grep -q 'git\.hanzo\.ai'; }
+  if forge origin; then
+    remote=origin
+  else
+    remote=$(git -C "$repo" remote -v 2>/dev/null |
+      awk '/git\.hanzo\.ai.*\(fetch\)/ {print $1; exit}')
+    [ -z "$remote" ] && remote=origin
+  fi
+  # Ask the ref we already have BEFORE fetching. Most of a workspace does not
+  # depend on any one module — the first sweep fetched 400 repos to answer about
+  # 28 and ran past ten minutes. A repo with no such require line cannot become
+  # one by fetching.
+  version() {
+    git -C "$repo" show "$remote/main:go.mod" 2>/dev/null |
+      grep -m1 -oE "${mod//\//\\/} v[0-9][0-9.]*" | awk '{print $2}'
+  }
+  [ -z "$(version)" ] && continue
   git -C "$repo" fetch -q "$remote" 2>/dev/null
-  have=$(git -C "$repo" show "$remote/main:go.mod" 2>/dev/null |
-    grep -m1 -oE "${mod//\//\\/} v[0-9][0-9.]*" | awk '{print $2}')
+  have=$(version)
   [ -z "$have" ] && continue
   seen=$((seen + 1))
   [ "$have" = "$latest" ] && continue
   behind=$((behind + 1))
-  [ $apply -eq 0 ] && { printf '%-16s %-10s -> %s\n' "$name" "$have" "$latest"; continue; }
+  [ $apply -eq 0 ] && { printf '%-16s %-10s -> %-10s (%s)\n' "$name" "$have" "$latest" "$remote"; continue; }
 
   # Work on a detached worktree of the branch, never the checkout: a sweep must
   # not touch whatever somebody has in progress.
