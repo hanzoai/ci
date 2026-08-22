@@ -78,4 +78,38 @@ out=$(PATH="$tmp/stub:$PATH" bash "$PIN" example.com/lib "$tmp/behind" 2>&1); rc
   echo "ok   an unresolvable module is fatal" ||
   { echo "FAIL unresolvable: rc=$rc $out"; fail=1; }
 
+# --apply is the half that writes, and it was the half with no test — a sweep
+# reported a syntax error from a block nothing had ever run. The stub `go`
+# answers every command, so the build and test steps pass and what is exercised
+# here is the part that broke: commit, push, and the report of both.
+# The unresolvable case above left the stub failing on purpose; put it back — and
+# this one WRITES the bump, because a `go get` that changes nothing leaves nothing
+# to commit and would test only git's refusal of an empty commit.
+cat >"$tmp/stub/go" <<STUB
+#!/usr/bin/env bash
+[ "\${1:-}" = "list" ] && { echo "v2.0.0"; exit 0; }
+[ "\${1:-}" = "get" ] && { sed -i 's/v1.0.0/v2.0.0/' go.mod 2>/dev/null; exit 0; }
+exit 0
+STUB
+chmod +x "$tmp/stub/go"
+
+repo applyme v1.0.0
+out=$(PATH="$tmp/stub:$PATH" bash "$PIN" --apply example.com/lib "$tmp/applyme" 2>&1)
+if grep -q "applyme          v1.0.0     -> v2.0.0 pushed" <<<"$out"; then
+  echo "ok   --apply commits and pushes"
+else
+  echo "FAIL --apply: $out"; fail=1
+fi
+# The push must have actually LANDED on the branch, not merely been reported.
+if git -C "$tmp/applyme.git" show main:go.mod 2>/dev/null | grep -q 'v2.0.0'; then
+  echo "ok   --apply lands the bump on the branch"
+else
+  echo "FAIL --apply did not land: $(git -C "$tmp/applyme.git" show main:go.mod 2>&1 | tr '\n' ' ')"; fail=1
+fi
+# And the repo is now current, so a second run finds nothing to do.
+out=$(PATH="$tmp/stub:$PATH" bash "$PIN" example.com/lib "$tmp/applyme" 2>&1)
+grep -q "0 of 1 behind" <<<"$out" &&
+  echo "ok   a bumped repo is no longer behind" ||
+  { echo "FAIL second run: $out"; fail=1; }
+
 exit $fail
