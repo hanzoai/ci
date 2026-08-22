@@ -141,4 +141,48 @@ grep -q "twohome          v1.0.0     -> v2.0.0     (origin)" <<<"$out" &&
   echo "ok   the forge is chosen by URL, not by remote name" ||
   { echo "FAIL two-remote pick: $out"; fail=1; }
 
+# A RED SUITE IS NOT A REGRESSION. This stub fails the same package whether or
+# not the bump is applied, which is commerce's real shape: 20 packages red on
+# main and the same 20 after. The bump must ship, or a repo whose suite is
+# already red can never move off an old library.
+cat >"$tmp/stub/go" <<STUB
+#!/usr/bin/env bash
+[ "\${1:-}" = "list" ] && { echo "v2.0.0"; exit 0; }
+[ "\${1:-}" = "get" ] && { sed -i 's/v1.0.0/v2.0.0/' go.mod 2>/dev/null; exit 0; }
+[ "\${1:-}" = "test" ] && { echo "FAIL	example.com/x/broken	0.1s"; exit 1; }
+exit 0
+STUB
+chmod +x "$tmp/stub/go"
+repo alreadyred v1.0.0
+out=$(PATH="$tmp/stub:$PATH" bash "$PIN" --apply example.com/lib "$tmp/alreadyred" 2>&1)
+grep -q "main already red in 1, unchanged" <<<"$out" &&
+  echo "ok   an unchanged red suite still ships" ||
+  { echo "FAIL already-red: $out"; fail=1; }
+git -C "$tmp/alreadyred.git" show main:go.mod 2>/dev/null | grep -q 'v2.0.0' &&
+  echo "ok   and the bump lands" ||
+  { echo "FAIL already-red did not land"; fail=1; }
+
+# A NEW failure IS a regression, and is held back. The stub fails an extra
+# package only once the bump is in go.mod.
+cat >"$tmp/stub/go" <<STUB
+#!/usr/bin/env bash
+[ "\${1:-}" = "list" ] && { echo "v2.0.0"; exit 0; }
+[ "\${1:-}" = "get" ] && { sed -i 's/v1.0.0/v2.0.0/' go.mod 2>/dev/null; exit 0; }
+if [ "\${1:-}" = "test" ]; then
+  echo "FAIL	example.com/x/broken	0.1s"
+  grep -q 'v2.0.0' go.mod && echo "FAIL	example.com/x/newlybroken	0.1s"
+  exit 1
+fi
+exit 0
+STUB
+chmod +x "$tmp/stub/go"
+repo regressed v1.0.0
+out=$(PATH="$tmp/stub:$PATH" bash "$PIN" --apply example.com/lib "$tmp/regressed" 2>&1)
+grep -q "TESTS REGRESSED at v2.0.0: example.com/x/newlybroken" <<<"$out" &&
+  echo "ok   a new failure is a regression and names it" ||
+  { echo "FAIL regression: $out"; fail=1; }
+git -C "$tmp/regressed.git" show main:go.mod 2>/dev/null | grep -q 'v1.0.0' &&
+  echo "ok   and a regression does not land" ||
+  { echo "FAIL a regression landed anyway"; fail=1; }
+
 exit $fail
