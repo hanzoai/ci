@@ -55,8 +55,13 @@ behind=0 moved=0 broke=0 seen=0
 for repo in "$@"; do
   name=$(basename "$repo")
   [ -d "$repo/.git" ] || continue
-  remote=origin
-  git -C "$repo" rev-parse --verify -q forge/main >/dev/null 2>&1 && remote=forge
+  # Canonical is the FORGE, and a remote's name does not say which one it is:
+  # gateway's forge is named origin and its GitHub mirror is named github, so
+  # picking by name pushed a fix to the mirror and left the forge — which is what
+  # a build reads — untouched. Pick by URL, and fall back to origin.
+  remote=$(git -C "$repo" remote -v 2>/dev/null |
+    awk '/git\.hanzo\.ai.*\(fetch\)/ {print $1; exit}')
+  [ -z "$remote" ] && remote=origin
   git -C "$repo" fetch -q "$remote" 2>/dev/null
   have=$(git -C "$repo" show "$remote/main:go.mod" 2>/dev/null |
     grep -m1 -oE "${mod//\//\\/} v[0-9][0-9.]*" | awk '{print $2}')
