@@ -112,4 +112,32 @@ grep -q "0 of 1 behind" <<<"$out" &&
   echo "ok   a bumped repo is no longer behind" ||
   { echo "FAIL second run: $out"; fail=1; }
 
+# A remote's NAME does not say whether it is the forge. Build a repo whose forge
+# is named `origin` and whose mirror is named `github`, with the mirror AHEAD:
+# picking by name reads the mirror and reports the wrong version, which is how a
+# real fix went to a mirror while the forge — what a build reads — stayed behind.
+mirror() {
+  local d="$tmp/twohome" fake="$tmp/twohome-forge.git" gh="$tmp/twohome-github.git"
+  git init -q --bare "$fake"; git init -q --bare "$gh"
+  git init -q "$d"; cd "$d"
+  git config user.email t@t; git config user.name t
+  printf 'module x\n\ngo 1.26\n\nrequire example.com/lib v1.0.0\n' >go.mod
+  git add -A; git commit -qm one; git branch -M main
+  git remote add origin "$fake"; git push -q origin main
+  # the mirror is AHEAD and already current, so reading it hides the real gap
+  printf 'module x\n\ngo 1.26\n\nrequire example.com/lib v2.0.0\n' >go.mod
+  git commit -qam two; git remote add github "$gh"; git push -q github main
+  git reset -q --hard origin/main
+  # git.hanzo.ai is the forge in production; name the fake one so pin sees it
+  git remote set-url origin "https://git.hanzo.ai/fake/twohome.git"
+  cd - >/dev/null
+}
+mirror
+# pin cannot fetch the rewritten URL, so it reads the ref it already has — which
+# is the point: the ref it keeps for the FORGE remote, not the mirror's.
+out=$(PATH="$tmp/stub:$PATH" bash "$PIN" example.com/lib "$tmp/twohome" 2>&1)
+grep -q "twohome          v1.0.0     -> v2.0.0" <<<"$out" &&
+  echo "ok   the forge is chosen by URL, not by remote name" ||
+  { echo "FAIL two-remote pick: $out"; fail=1; }
+
 exit $fail
