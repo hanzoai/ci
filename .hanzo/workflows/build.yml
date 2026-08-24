@@ -461,7 +461,19 @@ jobs:
             # create their own repo-linked package on first push. The fix is that
             # the log now names the door it went through.
             echo "::warning::GH_PAT is empty — pushing with the automatic token, which can write ONLY a package linked to this repo. An unlinked package will fail at push with 'does not match expected scopes'."
-            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+            # AND THE WARNING HAS TO BE ONE. The line above says this branch is not
+            # a refusal, but the login below exits non-zero when the registry says
+            # `denied: denied`, so the job died here — three steps in, before a
+            # single test, in a repo that publishes no image at all. Measured on
+            # zap-proto/zip, whose hanzo.yml declares `binaries:` and no `images:`:
+            # its gate could not run for want of a credential it never spends.
+            #
+            # A login is not the gate; the PUSH is, and it still refuses loudly with
+            # the scopes message this comment already predicts. Keep the GH_PAT
+            # branch strict — if the org owner's own credential is rejected, that is
+            # a real fault and not a fork landing on the fallback.
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin \
+              || echo "::warning::the automatic token could not sign in to ghcr.io. A build that pushes an image will fail at the push; one that publishes no image is unaffected."
           fi
 
       - name: Fetch deploy credentials from KMS
