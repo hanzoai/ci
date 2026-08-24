@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# kms — read one secret from Hanzo KMS. One implementation, every caller.
+#
+#   kms <NAME> [env]                 # prints the value, or exits non-zero
+#
+# Needs KMS_CLIENT_ID and KMS_CLIENT_SECRET in the environment. KMS_ENDPOINT
+# defaults to https://kms.hanzo.ai; both it and api.hanzo.ai are Ingresses onto
+# the same cloud service, so the host is a preference and not a fallback.
+#
+# WHY THIS IS A SCRIPT AND NOT INLINE SHELL, which is the same reason imgver is:
+# three callers each carried their own copy — this repo's site action, this
+# repo's build.yml, and hanzoai/gui's npm-token action. Written three times it
+# was wrong in three different ways at once. Two of them piped the body straight
+# into jq, so a gateway timeout died as "Invalid numeric literal at line 1,
+# column 6" and one reported "NPM_TOKEN absent from KMS" about a sealed secret;
+# the third retried only a lost connection, not a 5xx.
+#
+# THE READ IS FLAT. KMS resolves a name at the credential's own scope root, so
+# `HANZO_DEPLOY_TOKEN` finds the value sealed for this org, while a
+# path-qualified `deploy/HANZO_DEPLOY_TOKEN` finds nothing and reads exactly like
+# an absent secret.
+#
+# ASK AGAIN ONLY WHERE ASKING AGAIN CAN HELP: nothing arrived, 429, or any 5xx —
+# the network saying "not now". 401, 403 and 404 are KMS itself answering and are
+# taken on the first try.
+#
+# THE SCHEDULE IS SHORT ON PURPOSE — 17 seconds over four tries. It exists to
+# survive a dropped response, a 502 or a pod coming back, which are seconds. It
+# does NOT exist to ride out a wedged store: that lasted fifteen minutes on
+# 2026-08-24 and no schedule a build step can afford would have covered it. A
+# minute of waiting before the same failure only makes the build slower and the
+# test that pins this behaviour slower still.
+#
+# EVERY FAILURE NAMES WHICH OF THE THREE IT WAS — an outage, a refusal, or an
+# unsealed secret — because the whole cost of the old copies was that they all
+# looked alike in a log.
+set -uo pipefail
+
+name=${1:-}
+env=${2:-prod}
+endpoint=${KMS_ENDPOINT:-https://kms.hanzo.ai}
+[ -n "$name" ] || { echo "::error::kms: usage: kms <NAME> [env]" >&2; exit 2; }
+[ -n "${KMS_CLIENT_ID:-}" ] && [ -n "${KMS_CLIENT_SECRET:-}" ] || {
+  echo "::error::kms: KMS_CLIENT_ID and KMS_CLIENT_SECRET are unset — set them from the org-level secrets on git.hanzo.ai" >&2
+  exit 1
+}
+
+body=$(mktemp); trap 'rm -f "$body"' EXIT
+
+# ask <what> <url> [curl args...] -> body on stdout when 2xx.
+#
+# `|| code=000` on the ASSIGNMENT, never `|| echo 000` inside the substitution:
+# curl's -w already prints 000 when the request fails, so echoing a second one
+# yields "000000", which matches no case below and turns an outage into a
+# refusal that never retries.
+ask() {
+  local what=$1 url=$2; shift 2
+  local code
+  for wait in 0 2 5 10; do
+    [ "$wait" = 0 ] || sleep "$wait"
+    code=$(curl -sS -m 30 -o "$body" -w '%{http_code}' "$url" "$@") || code=000
+    case "$code" in
+      2*) cat "$body"; return 0 ;;
+      000|429|5*) continue ;;
+      *) echo "::error::kms: $endpoint refused the $what: HTTP $code — $(head -c 300 "$body")" >&2; return 1 ;;
+    esac
+  done
+  echo "::error::kms: $endpoint did not answer the $what — HTTP $code over four tries: $(head -c 300 "$body"). An outage, not a missing secret." >&2
+  return 1
+}
+
+token=$(ask login "$endpoint/v1/kms/auth/login" \
+  -H 'Content-Type: application/json' \
+  -d "{\"clientId\":\"$KMS_CLIENT_ID\",\"clientSecret\":\"$KMS_CLIENT_SECRET\"}" \
+  | jq -r '.accessToken // empty' 2>/dev/null) || exit 1
+[ -n "$token" ] || { echo "::error::kms: login returned no accessToken at $endpoint/v1/kms/auth/login" >&2; exit 1; }
+
+value=$(ask "secret $name" "$endpoint/v1/kms/secrets/$name?env=$env" \
+  -H "Authorization: Bearer $token" | jq -r '.value // empty' 2>/dev/null) || exit 1
+[ -n "$value" ] || { echo "::error::kms: no value for $name at $endpoint/v1/kms/secrets/$name?env=$env — seal it there" >&2; exit 1; }
+
+printf '%s' "$value"
