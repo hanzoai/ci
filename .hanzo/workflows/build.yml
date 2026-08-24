@@ -585,17 +585,27 @@ jobs:
           # unix socket, and that socket drops responses mid-write under load — measured
           # at 47 `kms.sock … broken pipe` in one hour on a pod with zero restarts, and
           # kms is not the only plugin it happens to. `curl -sf` reports that the same
-          # way it reports a 404: empty. So these ask again ONLY when nothing came back;
-          # a real answer — 401, 403, 404 — is taken on the first try, as before.
+          # way it reports a 404: empty. So these ask again when nothing came back —
+          # and when the EDGE answered for the origin, which is the same class: a 5xx
+          # or a 429 is the network saying "not now", while 401, 403 and 404 are KMS
+          # itself and are taken on the first try, as before.
+          #
+          # The wait grows, because the thing being waited out lasts minutes: an edge
+          # timing out at kms.hanzo.ai stopped every site publish in the estate on
+          # 2026-08-24, and three tries three seconds apart would have ridden none of it.
           kms() {  # kms <url> [curl args...] -> body on stdout, empty unless 200
             local url="$1"; shift
             local code=""
-            for _ in 1 2 3; do
+            for wait in 0 5 15 45; do
+              [ "$wait" = 0 ] || sleep "$wait"
               code="$(curl -s -o /tmp/kms.body -w '%{http_code}' --max-time 30 "$url" "$@")" || code=000
-              [ "$code" = "000" ] || break
-              sleep 3
+              case "$code" in 000|429|5*) continue ;; *) break ;; esac
             done
-            [ "$code" = "200" ] && cat /tmp/kms.body
+            case "$code" in
+              200) cat /tmp/kms.body ;;
+              000|429|5*) echo "::warning::KMS did not answer $url — HTTP $code over four tries: $(head -c 200 /tmp/kms.body). An outage, not a missing secret." >&2 ;;
+              *) echo "::warning::KMS answered $code for $url: $(head -c 200 /tmp/kms.body)" >&2 ;;
+            esac
           }
           TOKEN=$(kms "$KMS_ENDPOINT/v1/kms/auth/login" \
             -H 'Content-Type: application/json' \
