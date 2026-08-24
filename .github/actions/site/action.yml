@@ -90,13 +90,43 @@ runs:
       # so `HANZO_DEPLOY_TOKEN` finds the value sealed for this org — while a
       # path-qualified name like `deploy/HANZO_DEPLOY_TOKEN` finds nothing and
       # reads exactly like an absent secret.
+      #
+      # ASK AGAIN, AND SAY WHAT CAME BACK. A gateway timeout is not a refusal and
+      # it is not a missing secret, and this step used to report it as neither:
+      # the body was piped straight into jq, so an edge answering `error code:
+      # 524` in plain text killed the step at `Invalid numeric literal at line 1,
+      # column 6` with `set -e`, before either `::error::` line below could run.
+      # Every site publish in the estate reads its token here, so one minute of
+      # edge trouble stopped all of them and the log named jq.
+      #
+      # So: capture the code and the body separately, retry the codes that mean
+      # "ask again" (nothing arrived, or the edge answered for the origin), and
+      # parse only what is JSON. A 5xx now reads as an outage, a 401 as a
+      # credential, an empty field as an unsealed secret — three different
+      # sentences for three different problems.
       run: |
         set -euo pipefail
-        val() { jq -r --arg f "$1" '.[$f] // ""'; }
-        kt=$(curl -sS "$KMS/v1/kms/auth/login" -H 'Content-Type: application/json' \
+        # $1 name, $2 url, rest: curl args. Echoes the body on success.
+        ask() {
+          local what=$1 url=$2; shift 2
+          local code body
+          for wait in 0 5 15 45; do
+            [ "$wait" = 0 ] || sleep "$wait"
+            code=$(curl -sS -m 30 -o /tmp/kms.body -w '%{http_code}' "$url" "$@" || echo 000)
+            case "$code" in
+              2*) cat /tmp/kms.body; return 0 ;;
+              000|429|5*) continue ;;
+              *) echo "::error::KMS refused the $what: HTTP $code from $url — $(head -c 300 /tmp/kms.body)" >&2; return 1 ;;
+            esac
+          done
+          echo "::error::KMS did not answer the $what: HTTP $code from $url over four tries — $(head -c 300 /tmp/kms.body). This is an outage, not a missing secret." >&2
+          return 1
+        }
+        val() { jq -r --arg f "$1" '.[$f] // ""' 2>/dev/null || true; }
+        kt=$(ask login "$KMS/v1/kms/auth/login" -H 'Content-Type: application/json' \
                -d "{\"clientId\":\"${KMS_CLIENT_ID:-}\",\"clientSecret\":\"${KMS_CLIENT_SECRET:-}\"}" | val accessToken)
-        [ -n "$kt" ] || { echo "::error::KMS login refused at $KMS/v1/kms/auth/login — set KMS_CLIENT_ID and KMS_CLIENT_SECRET on this step (org-level secrets on git.hanzo.ai)"; exit 1; }
-        key=$(curl -sS "$KMS/v1/kms/secrets/HANZO_DEPLOY_TOKEN?env=prod" -H "Authorization: Bearer $kt" | val value)
+        [ -n "$kt" ] || { echo "::error::KMS login returned no accessToken at $KMS/v1/kms/auth/login — set KMS_CLIENT_ID and KMS_CLIENT_SECRET on this step (org-level secrets on git.hanzo.ai)"; exit 1; }
+        key=$(ask secret "$KMS/v1/kms/secrets/HANZO_DEPLOY_TOKEN?env=prod" -H "Authorization: Bearer $kt" | val value)
         [ -n "$key" ] || { echo "::error::no HANZO_DEPLOY_TOKEN at $KMS/v1/kms/secrets/HANZO_DEPLOY_TOKEN?env=prod — seal a live sk- key there"; exit 1; }
         # Masked before it is ever an output, so it cannot surface in a log.
         echo "::add-mask::$key"
