@@ -581,7 +581,23 @@ jobs:
             fi
             echo "::notice::KMS not configured (no KMS_CLIENT_ID or org) — skipping; GHCR push uses the workflow token"; exit 0
           fi
-          TOKEN=$(curl -sf "$KMS_ENDPOINT/v1/kms/auth/login" \
+          # A LOST answer is not an absent secret. cloud serves KMS as a plugin over a
+          # unix socket, and that socket drops responses mid-write under load — measured
+          # at 47 `kms.sock … broken pipe` in one hour on a pod with zero restarts, and
+          # kms is not the only plugin it happens to. `curl -sf` reports that the same
+          # way it reports a 404: empty. So these ask again ONLY when nothing came back;
+          # a real answer — 401, 403, 404 — is taken on the first try, as before.
+          kms() {  # kms <url> [curl args...] -> body on stdout, empty unless 200
+            local url="$1"; shift
+            local code=""
+            for _ in 1 2 3; do
+              code="$(curl -s -o /tmp/kms.body -w '%{http_code}' --max-time 30 "$url" "$@")" || code=000
+              [ "$code" = "000" ] || break
+              sleep 3
+            done
+            [ "$code" = "200" ] && cat /tmp/kms.body
+          }
+          TOKEN=$(kms "$KMS_ENDPOINT/v1/kms/auth/login" \
             -H 'Content-Type: application/json' \
             -d "{\"clientId\":\"$KMS_CLIENT_ID\",\"clientSecret\":\"$KMS_CLIENT_SECRET\"}" | jq -r '.accessToken // empty')
           if [ -z "$TOKEN" ]; then
@@ -596,9 +612,9 @@ jobs:
           # host also holds a STALE key cloud 403s, so reading it ships a dead one.
           # Embedded first, standalone as fallback.
           get() {
-            v=$(curl -sf "$KMS_ENDPOINT/v1/kms/secrets/$PATHQ/$1?env=$ENV" -H "Authorization: Bearer $TOKEN" | jq -r '.value // empty')
+            v=$(kms "$KMS_ENDPOINT/v1/kms/secrets/$PATHQ/$1?env=$ENV" -H "Authorization: Bearer $TOKEN" | jq -r '.value // empty')
             if [ -z "$v" ]; then
-              v=$(curl -sf "$KMS_ENDPOINT/v1/kms/orgs/$ORG/secrets/$PATHQ/$1?env=$ENV" -H "Authorization: Bearer $TOKEN" | jq -r '.secret.value // empty')
+              v=$(kms "$KMS_ENDPOINT/v1/kms/orgs/$ORG/secrets/$PATHQ/$1?env=$ENV" -H "Authorization: Bearer $TOKEN" | jq -r '.secret.value // empty')
             fi
             printf '%s' "$v"
           }
