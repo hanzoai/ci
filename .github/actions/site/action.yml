@@ -112,7 +112,11 @@ runs:
           local code body
           for wait in 0 5 15 45; do
             [ "$wait" = 0 ] || sleep "$wait"
-            code=$(curl -sS -m 30 -o /tmp/kms.body -w '%{http_code}' "$url" "$@" || echo 000)
+            # `|| code=000` on the ASSIGNMENT, not `|| echo 000` inside the
+            # substitution: -w already prints 000 when curl fails, so echoing a
+            # second one made the variable "000000", which matched no case here
+            # and turned an outage into a refusal that never retried.
+            code=$(curl -sS -m 30 -o /tmp/kms.body -w '%{http_code}' "$url" "$@") || code=000
             case "$code" in
               2*) cat /tmp/kms.body; return 0 ;;
               000|429|5*) continue ;;
