@@ -186,6 +186,16 @@ test:
     # all read as zero, because over-counting would manufacture exactly the
     # confidence the verdict exists to refuse. Offline: strings in, a number out.
     run: bash bin/tally_test.sh
+  - name: kms
+    # bin/kms is the ONE way anything here reads a secret. It replaced three
+    # copies — this repo's site action, this repo's build.yml, and hanzoai/gui's
+    # npm-token — which were wrong in three different ways at the same time and
+    # all looked alike in a log. So the suite tests which SENTENCE comes out: a
+    # refusal names its code and is taken on the first try, an outage says it is
+    # one and says how many times it asked, and an absent credential names both
+    # variables. Offline apart from one 401 against the real door, which is the
+    # cheapest request there is.
+    run: bash bin/kms_test.sh
   - name: publishable
     # bin/publishable refuses a `build_secrets` name that has not declared itself
     # public. That matters because a build_secret is baked in as a --build-arg,
