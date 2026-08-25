@@ -61,21 +61,58 @@ runs:
   steps:
     - name: Fetch site
       shell: bash
+      env:
+        # The forge stopped serving git anonymously, so this clone needs a
+        # credential. The job's own token is the one it already has.
+        FORGE_TOKEN_FOR_CLONE: ${{ github.token }}
       # The action ref is the script ref: an action pinned to @v1 runs v1's
       # site. Both hosts, because this repo is served from each.
+      #
+      # BOTH HOSTS NEEDED FIXING, in different ways, and between them they froze
+      # every static site in the estate for eleven hours — hanzo.ai, hips,
+      # hanzo.app and agency all publish through this one step, and it failed in
+      # ONE SECOND with the build and every gate green above it.
+      #
+      #   git.hanzo.ai refuses ANONYMOUS git. `GET /<any repo>/info/refs` is 401
+      #   even for a repo the API reports `private: false`, so a bare clone dies
+      #   on "could not read Username" — which on a runner with no tty is an
+      #   instant failure, not a prompt. Hence the token below.
+      #
+      #   The github.com fallback was NOT a fallback. An `insteadOf` rewrite
+      #   mapping https://github.com/hanzoai/ -> https://git.hanzo.ai/hanzoai/
+      #   is standard on our machines, and git applies it to the URL this loop
+      #   passes — so the "second host" resolved to the FIRST one, the same one
+      #   that had just refused, and the loop tried a single host twice. The
+      #   giveaway is a clone of a github.com URL failing with git.hanzo.ai in
+      #   the error text. `-c url...insteadOf=` does not undo it (an empty value
+      #   does not remove the rule), so the fallback runs with the global and
+      #   system config OUT, which is the only reliable way to mean "this URL,
+      #   literally".
       run: |
         set -euo pipefail
         ref="${GITHUB_ACTION_REF:-v1}"
-        # The break tests for the TOOL, not for the clone: a host that answers
-        # with a tree carrying no bin/site must fall through to the next
-        # one rather than break and dead-end the job on it.
-        for url in https://git.hanzo.ai/hanzoai/ci https://github.com/hanzoai/ci; do
-          git clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/site-ci" 2>/dev/null \
-            && [ -x "$RUNNER_TEMP/site-ci/bin/site" ] && break
-          rm -rf "$RUNNER_TEMP/site-ci"
+        dst="$RUNNER_TEMP/site-ci"
+        export GIT_TERMINAL_PROMPT=0
+
+        # The token rides a header, never the URL: a credential in a remote is
+        # written into .git/config and printed by any later `git remote -v`.
+        auth=$(printf 'x-access-token:%s' "${FORGE_TOKEN_FOR_CLONE:-}" | base64 -w0)
+
+        forge() { git -c "http.extraheader=Authorization: Basic $auth" \
+                    clone -q --depth 1 --branch "$ref" \
+                    https://git.hanzo.ai/hanzoai/ci "$dst" 2>/dev/null; }
+        mirror() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+                    git clone -q --depth 1 --branch "$ref" \
+                    https://github.com/hanzoai/ci "$dst" 2>/dev/null; }
+
+        # The test is for the TOOL, not for the clone: a host that answers with a
+        # tree carrying no bin/site must fall through rather than dead-end on it.
+        for try in forge mirror; do
+          "$try" && [ -x "$dst/bin/site" ] && break
+          rm -rf "$dst"
         done
-        [ -x "$RUNNER_TEMP/site-ci/bin/site" ] \
-          || { echo "::error::could not fetch hanzoai/ci@$ref (bin/site)"; exit 1; }
+        [ -x "$dst/bin/site" ] \
+          || { echo "::error::could not fetch hanzoai/ci@$ref (bin/site) from git.hanzo.ai or github.com"; exit 1; }
 
     - name: Read the deploy key
       id: key
