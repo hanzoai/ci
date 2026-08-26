@@ -384,8 +384,31 @@ put() {
 export -f put ctype
 export UP_URL="$upload_url" PREFIX="$prefix" DIR="$dir" work
 
-echo "uploading $count files to s3://$(jq -r .bucket "$work"/sd-enq.json)/$prefix ($jobs parallel)"
-xargs -P "$jobs" -I{} bash -c 'put "$@"' _ {} < "$work/manifest"
+# ASSETS BEFORE DOCUMENTS, because the bytes are live where they land. This
+# publisher writes into the prefix the edge already serves: there is no release to
+# flip, so every object is public the instant S3 accepts it. A single flat pass
+# therefore has no ordering between a document and the hashed assets it names, and
+# a document is only servable once all of them are in the bucket.
+#
+# Splitting on `.html` gives that ordering with no coordination and no new
+# machinery. An asset name carries a content hash, so writing one never replaces
+# an object a live document is still naming — phase one is purely additive, and
+# whatever is published stays servable throughout it. The document is the switch,
+# thrown once everything it can name is already there.
+#
+# It is also what lets a caller cancel a superseded run safely: the run dies in
+# phase one having only added unreferenced objects, and what is live is unchanged.
+grep -v '\.html$' "$work/manifest" > "$work/manifest.assets" || true
+grep    '\.html$' "$work/manifest" > "$work/manifest.docs"   || true
+n_assets=$(grep -c . "$work/manifest.assets" || true)
+n_docs=$(grep -c . "$work/manifest.docs" || true)
+echo "uploading $count files to s3://$(jq -r .bucket "$work"/sd-enq.json)/$prefix ($jobs parallel: $n_assets assets, then $n_docs documents)"
+if [ "$n_assets" -gt 0 ]; then
+  xargs -P "$jobs" -I{} bash -c 'put "$@"' _ {} < "$work/manifest.assets"
+fi
+if [ "$n_docs" -gt 0 ]; then
+  xargs -P "$jobs" -I{} bash -c 'put "$@"' _ {} < "$work/manifest.docs"
+fi
 
 # ---- 3. flip it live --------------------------------------------------------
 # The body was built and measured at the top, before a single object moved, so
