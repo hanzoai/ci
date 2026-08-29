@@ -459,8 +459,13 @@ jobs:
             [ "$known" = 1 ] || {
               echo "::error::hanzo.yml declares kind: ${k:-<empty>}, which is not one of: $kinds. The set is closed (HIP-0138), so a kind this pipeline does not know is refused rather than read as an image repository."
               return 1; }
+            # No remedy of the form "drop kind: and it goes green" is offered, and
+            # that is deliberate: it would buy a green run by relabelling the
+            # repository as something it is not, which is the exact ambiguity the
+            # field was added to end. The remedy is a lane, here or where the
+            # lane already is.
             [ "$k" = image ] || {
-              echo "::error::hanzo.yml declares kind: $k. This pipeline builds and pushes images and has no $k lane, so it would run the test gate, deliver nothing, and report success. Deliver it where the $k lane lives — platform reads this same hanzo.yml — or drop kind: to declare an image repository."
+              echo "::error::hanzo.yml declares kind: $k. This pipeline builds and pushes images and has no $k lane, so it would deliver nothing and report success — the reading kind: exists to end. A $k repository delivers through platform, which reads this same hanzo.yml."
               return 1; }
             echo "$k"
           }
