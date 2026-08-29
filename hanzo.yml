@@ -177,6 +177,67 @@ test:
       [ "$v" -lt "$d" ] && [ "$v" -lt "$b" ] || {
         echo "::error::Test verdict (line $v) runs after a build step ($d, $b) — an image would exist before its commit was adjudicated"; exit 1; }
       echo "OK: verdict at line $v is unguarded, follows the gate ($t) and its opt-out ($o), and precedes both build lanes ($d, $b)"
+  - name: kind-is-read-once
+    # `kind:` says what a repository IS (HIP-0138), and this asserts the pipeline
+    # asks that question ONCE, unconditionally, and in the only window where the
+    # answer is worth anything.
+    #
+    # FOUR PROPERTIES, and each can fail while the other three hold:
+    #
+    #   ONE READ — `.kind` appears in exactly one yq expression. Every other
+    #     expression in build.yml reads what a manifest CONTAINS; a second read of
+    #     what it IS is a second answer to one question, and two answers drift.
+    #   UNGUARDED — the step names no input, so no input value can skip it. An
+    #     `inputs.mode != 'delegate'` guard would walk a delegated chart build
+    #     straight past it: the same green over nothing, through another door.
+    #   AFTER yq — the read falls back to `image` when yq cannot run, which is
+    #     right for a runner image that ships one and fatal above the step that
+    #     installs it. Ordered there, EVERY manifest resolves to `image` and the
+    #     refusals below can never fire — a check that cannot run, reading as a
+    #     check that passed.
+    #   BEFORE the lanes — ahead of every step that spends a credential, builds,
+    #     or publishes. The client lane publishes to npm and PyPI before the test
+    #     gate runs, so a refusal placed below it refuses a run that has already
+    #     published.
+    run: |
+      set -e
+      f=.hanzo/workflows/build.yml
+      line() { grep -n "^      - name: $1\$" "$f" | cut -d: -f1; }
+      at() { l=$(line "$1"); [ -n "$l" ] || { echo "::error::the step named '$1' is gone from $f — a rename broke this assertion, fix the assertion"; exit 1; }; echo "$l"; }
+      k=$(at 'Kind (per hanzo.yml)')
+      # Any spelling of the read, and prose about it is not one: comment lines are
+      # dropped first, so a sentence naming both `yq` and `.kind` is not counted
+      # as a second reader and the count means what it says.
+      n=$(grep -vE '^[[:space:]]*#' "$f" | grep -cE "yq .*\.kind")
+      [ "$n" = 1 ] || { echo "::error::$f reads .kind $n time(s) — it is read once, at 'Kind (per hanzo.yml)', and everything else takes that answer"; exit 1; }
+      cond() { awk -v s="$1" 'NR>=s && /^        run: /{exit} NR>=s && /^        if: /{sub(/^        if: /,""); print}' "$f"; }
+      [ -z "$(cond "$k")" ] || {
+        echo "::error::Kind (per hanzo.yml) carries \`if: $(cond "$k")\` — the step deciding what a repository IS must name no input, or an input can switch it off"; exit 1; }
+      p=$(at 'Provision parse toolchain (jq + PyYAML)')
+      [ "$p" -lt "$k" ] || {
+        echo "::error::Kind (per hanzo.yml) (line $k) runs before the yq it reads with (line $p) — with no yq the read falls back to \`image\` for every manifest, including the ones this step exists to refuse"; exit 1; }
+      for s in 'Fetch deploy credentials from KMS' \
+               'Client — regenerate from the release document (per hanzo.yml)' \
+               'Test (per hanzo.yml)' \
+               'Delegate build to the runner (mode=delegate)' \
+               'Build & push images (per hanzo.yml)' \
+               'Build & publish binaries (per hanzo.yml)' \
+               'Publish site (per hanzo.yml)'; do
+        l=$(at "$s")
+        [ "$k" -lt "$l" ] || { echo "::error::Kind (per hanzo.yml) (line $k) runs after '$s' (line $l) — a manifest this pipeline cannot serve would reach it"; exit 1; }
+      done
+      echo "OK: .kind read once at line $k, unguarded, after yq ($p) and before every lane"
+  - name: kind
+    # bin/kind_test.sh lifts the `kind` function out of build.yml and runs that
+    # text, so what is tested is what executes.
+    #
+    # Half of it is the fleet: the fourteen key-sets measured across all 117
+    # manifests in the estate, none of which declares `kind:`, every one of which
+    # must still resolve to `image`. The other half is the refusal, and it is
+    # weighted that way because the defect it closes is a GREEN run — a chart
+    # repository declares no `images:`, which is exactly the shape the image lane
+    # skips with `exit 0`, so a miss here looks identical to health.
+    run: bash bin/kind_test.sh
   - name: tally
     # The tally decides whether a gate reported a test at all, and every caller in
     # three ecosystems inherits it. Its suite lifts the function OUT of build.yml
