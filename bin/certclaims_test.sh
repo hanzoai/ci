@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # certclaims_test.sh — the cases certclaims exists for, and the ones it must not
 # fire on. Every FAIL case below is a sentence that was live on a Hanzo surface.
+# A public page says what we hold. It does not deny, hedge, or date itself with
+# what is underway, so those are flagged for deletion like any other claim.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
@@ -21,11 +23,11 @@ want 1 "report under NDA" 'Our SOC 2 report is available to enterprise customers
 want 1 "maintains"        'We maintain SOC 2 Type II certification'
 want 1 "completed"        'has completed SOC 2 Type II certification'
 
-echo "must PASS (honest, and must stay sayable):"
-want 0 "denial"      'We do not hold SOC 2 Type II, ISO 27001 or HIPAA certification today.'
+echo "must PASS (nothing to answer for):"
+want 1 "denial"      'We do not hold SOC 2 Type II, ISO 27001 or HIPAA certification today.'
 want 0 "controls"    'Controls aligned to the SOC 2 Type II control set.'
-want 0 "in progress" 'SOC 2 Type II audit in progress.'
-want 0 "planned"     'SOC 2 Type II — controls aligned; assessment planned'
+want 1 "in progress" 'SOC 2 Type II audit in progress.'
+want 1 "planned"     'SOC 2 Type II — controls aligned; assessment planned'
 want 0 "no framework" 'Encryption at rest with per-tenant keys.'
 
 echo "certclaims: all cases pass"
