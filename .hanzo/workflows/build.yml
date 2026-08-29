@@ -390,6 +390,83 @@ jobs:
           jq --version
           yq --version
 
+      - name: Kind (per hanzo.yml)
+        # WHAT THE REPOSITORY IS, as opposed to what its manifest contains.
+        #
+        # `kind:` names how a project arrives (HIP-0138) and has five values:
+        # image, fn, chart, compose, universe. It is optional, and ABSENT MEANS
+        # IMAGE — which is what every manifest in the fleet already means. Swept
+        # today, the estate holds 117 of them and not one declares `kind:`, so
+        # every one resolves to `image` here and runs exactly as it ran before.
+        #
+        # It exists because ONE ABSENCE WAS CARRYING TWO OPPOSITE MEANINGS. 75 of
+        # those manifests declare no image lane at all. Most are test gates with
+        # nothing to deliver, and for them the image lane's own sentence —
+        # `no images: in hanzo.yml — test-only caller, skipping build`, exit 0 —
+        # is true and correct. But that same silence is what a CHART repository
+        # produces, and a chart repository does have something to deliver. Read
+        # as a test gate it runs its gates, delivers nothing, and reports success:
+        # a green run over an undelivered artifact, which is indistinguishable
+        # from a healthy one and is the failure this whole file is built to
+        # refuse. Nothing downstream can recover which of the two was meant,
+        # because the manifest never said. `kind:` is it saying.
+        #
+        # ONE READ, AND IT IS THIS ONE. Every other yq expression in this file
+        # reads what a manifest CONTAINS; this reads what it IS. A second read
+        # elsewhere is a second answer to one question, so hanzo.yml's
+        # `kind-is-read-once` gate asserts this is the only `.kind` in the file.
+        #
+        # ABOVE THE CREDENTIALS AND THE TOOLCHAINS, deliberately. The client lane
+        # publishes to npm and PyPI before the test gate runs, so a refusal placed
+        # after it would refuse a run that had already published. Here, nothing
+        # has been fetched, built or published yet, and a manifest this pipeline
+        # cannot serve costs one yq call to find out.
+        run: |
+          set -euo pipefail
+          # kind BEGIN
+          # The resolved kind on stdout, or the refusal and a non-zero status.
+          #
+          # Two questions, asked separately because they have different answers.
+          # IS IT A KIND AT ALL — the set is closed, and a sixth arrival is a new
+          # HIP rather than a new string, so a value outside it is refused rather
+          # than defaulted. Defaulting an unknown to `image` is how a typo builds
+          # and ships something nobody declared.
+          # DOES THIS PIPELINE SERVE IT — separately, because `chart` is a real
+          # kind that this file simply has no lane for. It builds and pushes
+          # images; it does not deliver a chart, a compose file, a function or a
+          # release of charts, and saying so is the whole point of reading the
+          # field. The chart kinds deliver through platform, which reads this same
+          # manifest and owns that lane.
+          #
+          # A missing or unparseable hanzo.yml reads as `image`, matching every
+          # other manifest read in this file. Well-formedness is not this step's
+          # question, and it is already answered loudly by the test gate below,
+          # which parses the same file with no fallback at all.
+          #
+          # bin/kind_test.sh lifts this function out of this file and runs it.
+          kind() {
+            local k kinds x known=0
+            kinds='image fn chart compose universe'
+            k=$(yq -r '.kind // "image"' "$1" 2>/dev/null || echo image)
+            # COMPARED WHOLE, one value at a time. The short way to ask this is
+            # `case " $kinds " in *" $k "*)`, and it admits a value that is not in
+            # the set: the subject is the names joined by spaces, so any ADJACENT
+            # PAIR of them is a substring of it and `kind: "image fn"` matches.
+            # bin/kind_test.sh caught exactly that. An exact comparison has no
+            # such reading, and it is also why a value spelling a glob is not a
+            # match — nothing here is a pattern.
+            for x in $kinds; do if [ "$x" = "$k" ]; then known=1; fi; done
+            [ "$known" = 1 ] || {
+              echo "::error::hanzo.yml declares kind: ${k:-<empty>}, which is not one of: $kinds. The set is closed (HIP-0138), so a kind this pipeline does not know is refused rather than read as an image repository."
+              return 1; }
+            [ "$k" = image ] || {
+              echo "::error::hanzo.yml declares kind: $k. This pipeline builds and pushes images and has no $k lane, so it would run the test gate, deliver nothing, and report success. Deliver it where the $k lane lives — platform reads this same hanzo.yml — or drop kind: to declare an image repository."
+              return 1; }
+            echo "$k"
+          }
+          # kind END
+          kind hanzo.yml
+
       - name: Authenticated git for go modules (rate-limit + any private repo)
         # luxfi/hanzoai/zooai Go modules are PUBLIC, so `go` resolves them through
         # the default public proxy (proxy.golang.org) + checksum db (sum.golang.org)
