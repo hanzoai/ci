@@ -68,11 +68,14 @@ frameworks='SOC ?2|ISO ?27001|FedRAMP|PCI ?DSS|HITRUST|HIPAA'
 # The sentence shapes that make naming a framework legitimate: control alignment,
 # or an offer of the document we do write. Deliberately broad — the point is to
 # admit every honest phrasing, not to police wording.
-allowed='compatible with|compliant with|built to|aligned (to|with)|available (up)?on request|on request|internal audits?'
+allowed='compatible with|compliant with|built to|aligned (to|with)|(available )?(up)?on (request|demand)|internal audits?'
 # Words that claim a certificate we do not hold. "compliant" is absent on
 # purpose: "compliant with SOC 2" is a statement about controls and is allowed
 # above, while the certificate words below are not rescued by any phrasing.
-claim='certified|certification|accredited|attestation|letter of'
+# "report" is here because possessing one is the same claim as holding the
+# certificate — an audit produced it. Offering the document we do write stays
+# legitimate through "on request" in the allowed shapes above.
+claim='certified|certification|accredited|attestation|letter of|report'
 # Hedges. Each one reads as a claim to someone skimming and dates itself the day
 # it ships. There is no phrasing that makes one of these acceptable.
 hedge='in.?progress|in.?audit|assessment planned|\bplanned\b|readiness|\bready\b|\bscoped\b|towards?\b|working toward'
