@@ -9,7 +9,7 @@ import (
 )
 
 // scope_test.go is the regression suite for the leak this service shipped with:
-// /v1/runs answered 200 to anyone, with every org's repo names, branches, commit
+// /v1/ci/runs answered 200 to anyone, with every org's repo names, branches, commit
 // SHAs and actor logins, because `?org=` was a filter being used as a gate.
 //
 // The properties asserted here are the ones that made it a leak, not merely the
@@ -28,7 +28,7 @@ func testRuns() []Run {
 // code treated the equivalent condition (no `?org=`) as "show everything".
 func TestNoOrgHeaderIsRefused(t *testing.T) {
 	for _, hdr := range []string{"", "   "} {
-		r := httptest.NewRequest(http.MethodGet, "/v1/runs", nil)
+		r := httptest.NewRequest(http.MethodGet, "/v1/ci/runs", nil)
 		if hdr != "" {
 			r.Header.Set(orgHeader, hdr)
 		}
@@ -144,7 +144,7 @@ func TestRunsEndpointScopesEndToEnd(t *testing.T) {
 
 	t.Run("anonymous → 403", func(t *testing.T) {
 		w := httptest.NewRecorder()
-		h(w, httptest.NewRequest(http.MethodGet, "/v1/runs", nil))
+		h(w, httptest.NewRequest(http.MethodGet, "/v1/ci/runs", nil))
 		if w.Code != http.StatusForbidden {
 			t.Fatalf("status=%d want 403; body=%s", w.Code, w.Body.String())
 		}
@@ -154,7 +154,7 @@ func TestRunsEndpointScopesEndToEnd(t *testing.T) {
 	})
 
 	t.Run("lux viewer sees only lux, even asking for hanzo", func(t *testing.T) {
-		r := httptest.NewRequest(http.MethodGet, "/v1/runs?org=hanzo", nil)
+		r := httptest.NewRequest(http.MethodGet, "/v1/ci/runs?org=hanzo", nil)
 		r.Header.Set(orgHeader, "lux")
 		w := httptest.NewRecorder()
 		h(w, r)
@@ -201,7 +201,7 @@ func testBoard(t *testing.T) *fleetCache {
 func TestFleetRefusesWithoutTheHeader(t *testing.T) {
 	mux := routes(config{adminOrg: "admin"}, &runCache{}, testBoard(t))
 
-	for _, path := range []string{"/v1/fleet", "/", "/runs"} {
+	for _, path := range []string{"/v1/ci/fleet", "/", "/runs"} {
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
 		if w.Code != http.StatusForbidden {
@@ -223,7 +223,7 @@ func TestFleetTenantCannotWiden(t *testing.T) {
 
 	ask := func(t *testing.T, org, want string) []Service {
 		t.Helper()
-		r := httptest.NewRequest(http.MethodGet, "/v1/fleet?org="+want, nil)
+		r := httptest.NewRequest(http.MethodGet, "/v1/ci/fleet?org="+want, nil)
 		r.Header.Set(orgHeader, org)
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, r)
@@ -301,6 +301,36 @@ func TestFleetPageShowsOnlyTheViewersOrg(t *testing.T) {
 	for _, leaked := range []string{"hanzo-inc/cloud", "zooai/app", "orphan", "/?org=hanzo", "/?org=zoo", "all orgs"} {
 		if strings.Contains(body, leaked) {
 			t.Errorf("page rendered %q to a lux viewer", leaked)
+		}
+	}
+}
+
+// The API names the app that answers it.
+//
+// /v1/runs and /v1/fleet named neither, and two apps on one host cannot both
+// hold them. api.hanzo.ai already carries /v1/deploy for the CD half of this
+// plane, behind the gateway's IAM identity; the CI half can only join it on a
+// path that does not collide. This is that path, and the unnamespaced ones must
+// stay gone — a route that answers at both is two ways to ask one question.
+func TestTheAPIIsNamespacedUnderV1CI(t *testing.T) {
+	mux := routes(config{adminOrg: "admin"}, &runCache{}, testBoard(t))
+
+	// Present: refuses without the header (403), which is the gate working —
+	// not 404, which would mean the route is missing.
+	for _, path := range []string{"/v1/ci/runs", "/v1/ci/fleet"} {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if w.Code == http.StatusNotFound {
+			t.Errorf("%s is not routed; the API moved out from under the app that answers it", path)
+		}
+	}
+
+	// Gone: the unnamespaced originals.
+	for _, path := range []string{"/v1/runs", "/v1/fleet"} {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if w.Code != http.StatusNotFound {
+			t.Errorf("%s still answers %d; it would collide with another app on a shared host", path, w.Code)
 		}
 	}
 }
