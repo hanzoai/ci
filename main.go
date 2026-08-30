@@ -110,7 +110,13 @@ func routes(cfg config, cache *runCache, board *fleetCache) *http.ServeMux {
 		// dashboard saying so, not as ci.hanzo.ai disappearing from the LB too.
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 	})
-	mux.HandleFunc("/v1/runs", func(w http.ResponseWriter, r *http.Request) {
+	// Namespaced under /v1/ci. An API path names the app that answers it: /v1/runs
+	// and /v1/fleet name neither, and two apps on one host cannot both have them.
+	// api.hanzo.ai already carries /v1/deploy for the CD half of this same plane,
+	// behind the gateway's IAM identity; this is the shape that lets the CI half
+	// join it rather than needing a second front door and a second way to prove
+	// who you are.
+	mux.HandleFunc("/v1/ci/runs", func(w http.ResponseWriter, r *http.Request) {
 		v, ok := requireViewer(w, r, cfg.adminOrg)
 		if !ok {
 			return
@@ -125,7 +131,7 @@ func routes(cfg config, cache *runCache, board *fleetCache) *http.ServeMux {
 			"orgs":      v.orgs(snap.Runs),
 		})
 	})
-	mux.HandleFunc("/v1/fleet", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/ci/fleet", func(w http.ResponseWriter, r *http.Request) {
 		v, ok := requireViewer(w, r, cfg.adminOrg)
 		if !ok {
 			return
