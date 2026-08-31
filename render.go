@@ -26,37 +26,37 @@ import (
 // asked to be careful with it, because a template that can see everything is one
 // edit away from showing it.
 func renderRuns(w http.ResponseWriter, snap snapshot, v viewer, org string, cfg config) {
-	runs := v.visible(snap.Runs, org)
+	runs := v.visible(snap.Executions, org)
 	if len(runs) > 200 {
 		runs = runs[:200]
 	}
 
 	data := struct {
-		Runs      []Run
-		Orgs      []string
-		Org       string
-		Viewer    string
-		Sudo      bool
-		Repos     int
-		FetchedAt time.Time
-		Age       string
-		Stale     bool
-		SourceErr string
-		Source    string
-		Counts    map[string]int
+		Executions []Execution
+		Orgs       []string
+		Org        string
+		Viewer     string
+		Sudo       bool
+		Repos      int
+		FetchedAt  time.Time
+		Age        string
+		Stale      bool
+		SourceErr  string
+		Source     string
+		Counts     map[string]int
 	}{
-		Runs:      runs,
-		Orgs:      v.orgs(snap.Runs),
-		Org:       org,
-		Viewer:    v.org,
-		Sudo:      v.sudo,
-		Repos:     snap.Repos,
-		FetchedAt: snap.FetchedAt,
-		Age:       humanAge(snap.FetchedAt),
-		Stale:     snap.stale(cfg.staleAfter),
-		SourceErr: snap.errString(),
-		Source:    cfg.gitBase,
-		Counts:    countByOutcome(runs),
+		Executions: runs,
+		Orgs:       v.orgs(snap.Executions),
+		Org:        org,
+		Viewer:     v.org,
+		Sudo:       v.sudo,
+		Repos:      snap.Repos,
+		FetchedAt:  snap.FetchedAt,
+		Age:        humanAge(snap.FetchedAt),
+		Stale:      snap.stale(cfg.staleAfter),
+		SourceErr:  snap.errString(),
+		Source:     cfg.gitBase,
+		Counts:     countByOutcome(runs),
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -66,7 +66,7 @@ func renderRuns(w http.ResponseWriter, snap snapshot, v viewer, org string, cfg 
 }
 
 // countByOutcome buckets runs for the summary strip.
-func countByOutcome(runs []Run) map[string]int {
+func countByOutcome(runs []Execution) map[string]int {
 	c := map[string]int{"success": 0, "failure": 0, "running": 0, "cancelled": 0}
 	for _, r := range runs {
 		c[outcome(r)]++
@@ -85,7 +85,7 @@ func countByOutcome(runs []Run) map[string]int {
 // fleet cancellations are the single largest category (superseded pushes cancel
 // the in-flight run), and a board that shows them as broken is a board nobody
 // trusts, which is worse than no board.
-func outcome(r Run) string {
+func outcome(r Execution) string {
 	if !strings.EqualFold(r.Status, "completed") {
 		return "running" // queued | in_progress | waiting | blocked
 	}
@@ -135,7 +135,7 @@ func humanDur(d time.Duration) string {
 // no toggle, so it states its scheme once and means it.
 var tmpl = template.Must(template.New("ci").Funcs(template.FuncMap{
 	"outcome": outcome,
-	"dur":     func(r Run) string { return humanDur(r.Duration()) },
+	"dur":     func(r Execution) string { return humanDur(r.Duration()) },
 	"ago":     humanAge,
 	"css":     pageCSS,
 }).Parse(`<!doctype html>
@@ -173,14 +173,14 @@ var tmpl = template.Must(template.New("ci").Funcs(template.FuncMap{
   These rows are the last good read, not current state.
 </div>{{end}}
 
-{{if .Runs}}
+{{if .Executions}}
 <table>
 <thead><tr>
   <th>Repository</th><th>Workflow</th><th class="hide-sm">Commit</th>
   <th class="hide-sm">Actor</th><th>Started</th><th>Took</th>
 </tr></thead>
 <tbody>
-{{range .Runs}}
+{{range .Executions}}
 <tr>
   <td><span class="dot {{outcome .}}"></span><a href="{{.URL}}"><span class="org">{{.Org}}/</span><span class="repo">{{.Repo}}</span></a></td>
   <td>{{.Workflow}} <span class="mono">#{{.Number}}</span><div class="title">{{.Title}}</div></td>

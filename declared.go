@@ -22,9 +22,9 @@ import "strings"
 // saying what is declared must never infer it.
 
 // declared returns the image repository and the version pinned to it.
-func declared(body string) (string, Version) {
+func declared(body string) (string, Artifact) {
 	var (
-		v      Version
+		v      Artifact
 		image  string
 		inside bool
 	)
@@ -60,7 +60,7 @@ func declared(body string) (string, Version) {
 		}
 	}
 	if image == "" {
-		return "", Version{}
+		return "", Artifact{}
 	}
 	return image, v
 }

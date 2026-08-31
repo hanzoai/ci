@@ -20,12 +20,12 @@ import (
 // to be one of the values read — comparing the other three to each other cannot
 // see this at all.
 func TestAgreeingVersionsAreNotHealth(t *testing.T) {
-	v := Version{Tag: "v1.801.548", Digest: "sha256:8830c2b1"}
-	s := Service{
+	v := Artifact{Tag: "v1.801.548", Digest: "sha256:8830c2b1"}
+	s := Pipeline{
 		Name: "cloud", Image: "ghcr.io/hanzoai/cloud", Repo: "hanzo-inc/cloud",
 		Built: v, Declared: v, Running: v,
 		Behind: 5, Since: time.Now().Add(-7 * time.Hour),
-		Head: Head{SHA: "727d2934", Build: Build{State: "failure", Job: "gate"}},
+		Tip: Tip{SHA: "727d2934", Check: Check{State: "failure", Job: "gate"}},
 	}
 	s.assess()
 
@@ -49,7 +49,7 @@ func TestAgreeingVersionsAreNotHealth(t *testing.T) {
 // `failure` for both. Only the first means nothing shipped, so the artifact — not
 // the run's conclusion — is what decides whether a commit was built.
 func TestShippedRunStillCountsAsBuilt(t *testing.T) {
-	red := Run{ID: 1, Status: "completed", Conclusion: "failure"}
+	red := Execution{ID: 1, Status: "completed", Conclusion: "failure"}
 
 	shipped := verdict(red, []job{
 		{Name: "gate", Conclusion: "success"},
@@ -82,12 +82,12 @@ func TestShippedRunStillCountsAsBuilt(t *testing.T) {
 // look for a log that does not exist is its own delay.
 func TestAbsentIsNotFailure(t *testing.T) {
 	old := time.Now().Add(-time.Hour)
-	if got := verdict(Run{}, nil, old); got.State != "absent" {
+	if got := verdict(Execution{}, nil, old); got.State != "absent" {
 		t.Errorf("no run for an hour-old commit = %q; want absent", got.State)
 	}
 	// A commit that has only just landed has no run yet because Hanzo Git is
 	// still constructing one. Calling that absent would alarm on every push.
-	if got := verdict(Run{}, nil, time.Now()); got.State != "running" {
+	if got := verdict(Execution{}, nil, time.Now()); got.State != "running" {
 		t.Errorf("no run for a commit pushed seconds ago = %q; want running", got.State)
 	}
 }
@@ -113,7 +113,7 @@ func steps(pairs ...string) []struct {
 // TestPassingWithoutTestsIsNotGreen covers a run that reports success while the
 // step that would have proved anything did not execute.
 func TestPassingWithoutTestsIsNotGreen(t *testing.T) {
-	green := Run{ID: 1, Status: "completed", Conclusion: "success"}
+	green := Execution{ID: 1, Status: "completed", Conclusion: "success"}
 	skipped := verdict(green, []job{
 		{Name: "cicd", Conclusion: "success", Steps: steps(testStep, "skipped")},
 		{Name: "image", Conclusion: "success"},
@@ -129,7 +129,7 @@ func TestPassingWithoutTestsIsNotGreen(t *testing.T) {
 		t.Error("a passing run that never executed its tests reads as green")
 	}
 
-	s := Service{Repo: "hanzoai/ci", Head: Head{Build: skipped}}
+	s := Pipeline{Repo: "hanzoai/ci", Tip: Tip{Check: skipped}}
 	s.assess()
 	if !hasDrift(s, untested) {
 		t.Errorf("drift = %v; want %s", s.Drift, untested)
@@ -140,7 +140,7 @@ func TestPassingWithoutTestsIsNotGreen(t *testing.T) {
 // commit was proved elsewhere. It is a claim about another run, so this one still
 // did not test, and the page says so rather than drawing it green.
 func TestOptingOutOfTestsIsRecorded(t *testing.T) {
-	green := Run{ID: 1, Status: "completed", Conclusion: "success"}
+	green := Execution{ID: 1, Status: "completed", Conclusion: "success"}
 	out := verdict(green, []job{{Name: "cicd", Conclusion: "success",
 		Steps: steps(testOptOut+" (declared by caller)", "success")},
 		{Name: "image", Conclusion: "success"}}, time.Now())
@@ -158,7 +158,7 @@ func TestOptingOutOfTestsIsRecorded(t *testing.T) {
 // that knew only one shape would report every repo built the other way as never
 // having produced anything.
 func TestArtifactIsReadFromEitherShape(t *testing.T) {
-	green := Run{ID: 1, Status: "completed", Conclusion: "success"}
+	green := Execution{ID: 1, Status: "completed", Conclusion: "success"}
 
 	byJob := verdict(green, []job{{Name: "image", Conclusion: "success"}}, time.Now())
 	if !byJob.passed() {
@@ -185,11 +185,11 @@ func TestArtifactIsReadFromEitherShape(t *testing.T) {
 // this fleet is most of them.
 func TestSilenceAboutAnArtifactIsNotFailure(t *testing.T) {
 	quiet := []job{{Name: "cicd", Conclusion: "success", Steps: steps("Lint", "success")}}
-	if got := verdict(Run{ID: 1, Status: "completed", Conclusion: "success"}, quiet, time.Now()); !got.passed() {
+	if got := verdict(Execution{ID: 1, Status: "completed", Conclusion: "success"}, quiet, time.Now()); !got.passed() {
 		t.Errorf("green run with no build step = %q; want success", got.State)
 	}
 	red := []job{{Name: "cicd", Conclusion: "failure", Steps: steps("Lint", "failure")}}
-	if got := verdict(Run{ID: 1, Status: "completed", Conclusion: "failure"}, red, time.Now()); got.passed() {
+	if got := verdict(Execution{ID: 1, Status: "completed", Conclusion: "failure"}, red, time.Now()); got.passed() {
 		t.Error("a failed run with no build step reads as built")
 	}
 }
@@ -200,14 +200,14 @@ func TestSilenceAboutAnArtifactIsNotFailure(t *testing.T) {
 func TestUnreadableValueIsNotDrift(t *testing.T) {
 	cases := []struct {
 		name              string
-		declared, running Version
+		declared, running Artifact
 	}{
-		{"nothing read at all", Version{}, Version{}},
-		{"cluster unread", Version{Tag: "v1.2.3", Digest: "sha256:aa"}, Version{}},
-		{"universe unread", Version{}, Version{Tag: "v1.2.3", Digest: "sha256:aa"}},
+		{"nothing read at all", Artifact{}, Artifact{}},
+		{"cluster unread", Artifact{Tag: "v1.2.3", Digest: "sha256:aa"}, Artifact{}},
+		{"universe unread", Artifact{}, Artifact{Tag: "v1.2.3", Digest: "sha256:aa"}},
 	}
 	for _, tc := range cases {
-		s := Service{Declared: tc.declared, Running: tc.running}
+		s := Pipeline{Declared: tc.declared, Running: tc.running}
 		s.assess()
 		if hasDrift(s, unsynced) {
 			t.Errorf("%s: drift = %v; an unread value must not read as a difference", tc.name, s.Drift)
@@ -219,9 +219,9 @@ func TestUnreadableValueIsNotDrift(t *testing.T) {
 // other bytes; a digest cannot, so when both sides publish one it settles the
 // question and a matching tag does not paper over different bytes.
 func TestDigestDecidesOverTag(t *testing.T) {
-	s := Service{
-		Declared: Version{Tag: "v1.0.0", Digest: "sha256:aaaa"},
-		Running:  Version{Tag: "v1.0.0", Digest: "sha256:bbbb"},
+	s := Pipeline{
+		Declared: Artifact{Tag: "v1.0.0", Digest: "sha256:aaaa"},
+		Running:  Artifact{Tag: "v1.0.0", Digest: "sha256:bbbb"},
 	}
 	s.assess()
 	if !hasDrift(s, unsynced) {
@@ -241,7 +241,7 @@ func TestDigestDecidesOverTag(t *testing.T) {
 // The other direction says nothing: a pin naming a release no known build
 // produced is a build older than the window this reads, not a missing deploy.
 func TestUnshippedIsDirectional(t *testing.T) {
-	ahead := Service{Built: Version{Tag: "v1.801.549"}, Declared: Version{Tag: "v1.801.548"}}
+	ahead := Pipeline{Built: Artifact{Tag: "v1.801.549"}, Declared: Artifact{Tag: "v1.801.548"}}
 	ahead.assess()
 	if !hasDrift(ahead, unshipped) {
 		t.Errorf("drift = %v; a proved image the pin never named is exactly %s", ahead.Drift, unshipped)
@@ -250,7 +250,7 @@ func TestUnshippedIsDirectional(t *testing.T) {
 		t.Errorf("tone = %q; an unshipped build is a caution, not an outage", tone(ahead))
 	}
 
-	behind := Service{Built: Version{Tag: "v1.801.357"}, Declared: Version{Tag: "v1.801.548"}}
+	behind := Pipeline{Built: Artifact{Tag: "v1.801.357"}, Declared: Artifact{Tag: "v1.801.548"}}
 	behind.assess()
 	if hasDrift(behind, unshipped) {
 		t.Errorf("drift = %v; a pin ahead of the newest build we can see claims nothing", behind.Drift)
@@ -267,7 +267,7 @@ func TestUnorderableTagsMakeNoClaim(t *testing.T) {
 		{"latest", "v1.2.3"},
 		{"", "v1.2.3"},
 	} {
-		s := Service{Built: Version{Tag: tc.built}, Declared: Version{Tag: tc.declared}}
+		s := Pipeline{Built: Artifact{Tag: tc.built}, Declared: Artifact{Tag: tc.declared}}
 		s.assess()
 		if hasDrift(s, unshipped) {
 			t.Errorf("built=%q declared=%q: drift = %v; neither orders, so nothing may be claimed",
@@ -311,14 +311,14 @@ func TestOrderOfVersions(t *testing.T) {
 func TestOneImageIsSeveralServices(t *testing.T) {
 	static := "ghcr.io/hanzoai/static"
 	pins := []pin{
-		{Name: "cdn", Namespace: "hanzo", Image: static, Version: Version{Tag: "v0.3.0"}},
-		{Name: "tabs", Namespace: "hanzo", Image: static, Version: Version{Tag: "v0.5.9"}},
-		{Name: "zen-landing", Namespace: "zen", Image: static, Version: Version{Tag: "0.4.1"}},
+		{Name: "cdn", Namespace: "hanzo", Image: static, Artifact: Artifact{Tag: "v0.3.0"}},
+		{Name: "tabs", Namespace: "hanzo", Image: static, Artifact: Artifact{Tag: "v0.5.9"}},
+		{Name: "zen-landing", Namespace: "zen", Image: static, Artifact: Artifact{Tag: "0.4.1"}},
 	}
 	lives := []live{
-		{Name: "cdn", Namespace: "hanzo", Image: static, Version: Version{Tag: "v0.3.0"}, Ready: 1, Want: 1},
-		{Name: "tabs", Namespace: "hanzo", Image: static, Version: Version{Tag: "v0.5.9"}, Ready: 1, Want: 1},
-		{Name: "zen-landing", Namespace: "zen", Image: static, Version: Version{Tag: "0.4.1"}, Ready: 1, Want: 1},
+		{Name: "cdn", Namespace: "hanzo", Image: static, Artifact: Artifact{Tag: "v0.3.0"}, Ready: 1, Want: 1},
+		{Name: "tabs", Namespace: "hanzo", Image: static, Artifact: Artifact{Tag: "v0.5.9"}, Ready: 1, Want: 1},
+		{Name: "zen-landing", Namespace: "zen", Image: static, Artifact: Artifact{Tag: "0.4.1"}, Ready: 1, Want: 1},
 	}
 	// One repo builds the image all three run, so all three share its chain.
 	links := map[string]link{static: {Repo: "hanzoai/static", Org: "hanzoai"}}
@@ -346,11 +346,11 @@ func TestOneImageIsSeveralServices(t *testing.T) {
 func TestSidecarOnTheSameImageDoesNotHideThePin(t *testing.T) {
 	studio := "ghcr.io/hanzoai/studio"
 	pins := []pin{{Name: "studio", Namespace: "hanzo", Image: studio,
-		Version: Version{Tag: "v0.19.31"}}}
+		Artifact: Artifact{Tag: "v0.19.31"}}}
 	// Sidecar last, so a last-writer-wins read takes the pinned-back one.
 	lives := []live{
-		{Name: "studio", Namespace: "hanzo", Image: studio, Version: Version{Tag: "v0.19.31"}, Ready: 1, Want: 1},
-		{Name: "studio", Namespace: "hanzo", Image: studio, Version: Version{Tag: "v0.19.26"}, Ready: 1, Want: 1},
+		{Name: "studio", Namespace: "hanzo", Image: studio, Artifact: Artifact{Tag: "v0.19.31"}, Ready: 1, Want: 1},
+		{Name: "studio", Namespace: "hanzo", Image: studio, Artifact: Artifact{Tag: "v0.19.26"}, Ready: 1, Want: 1},
 	}
 
 	got := assemble(pins, lives, map[string]link{})
@@ -371,11 +371,11 @@ func TestSidecarOnTheSameImageDoesNotHideThePin(t *testing.T) {
 // service.
 func TestRunningMatchesOnNameAndImage(t *testing.T) {
 	pins := []pin{{Name: "cloud", Namespace: "hanzo", Image: "ghcr.io/hanzoai/cloud",
-		Version: Version{Tag: "v1.801.548", Digest: "sha256:8830"}}}
+		Artifact: Artifact{Tag: "v1.801.548", Digest: "sha256:8830"}}}
 	lives := []live{
-		{Name: "cloud", Namespace: "hanzo", Image: "docker.io/library/redis", Version: Version{Tag: "7"}},
+		{Name: "cloud", Namespace: "hanzo", Image: "docker.io/library/redis", Artifact: Artifact{Tag: "7"}},
 		{Name: "cloud", Namespace: "hanzo", Image: "ghcr.io/hanzoai/cloud",
-			Version: Version{Tag: "v1.801.548", Digest: "sha256:8830"}, Ready: 1, Want: 1},
+			Artifact: Artifact{Tag: "v1.801.548", Digest: "sha256:8830"}, Ready: 1, Want: 1},
 	}
 	got := assemble(pins, lives, map[string]link{})
 	if len(got) != 1 {
@@ -394,9 +394,9 @@ func TestRunningMatchesOnNameAndImage(t *testing.T) {
 func TestDriftingSortsFirstAndOldestOnTop(t *testing.T) {
 	old, recent := time.Now().Add(-9*time.Hour), time.Now().Add(-20*time.Minute)
 	pins := []pin{
-		{Name: "calm", Namespace: "hanzo", Image: "a", Version: Version{Tag: "v1"}},
-		{Name: "recent", Namespace: "hanzo", Image: "b", Version: Version{Tag: "v1"}},
-		{Name: "old", Namespace: "hanzo", Image: "c", Version: Version{Tag: "v1"}},
+		{Name: "calm", Namespace: "hanzo", Image: "a", Artifact: Artifact{Tag: "v1"}},
+		{Name: "recent", Namespace: "hanzo", Image: "b", Artifact: Artifact{Tag: "v1"}},
+		{Name: "old", Namespace: "hanzo", Image: "c", Artifact: Artifact{Tag: "v1"}},
 	}
 	links := map[string]link{
 		"a": {Repo: "o/calm"},
@@ -418,7 +418,7 @@ func TestDriftingSortsFirstAndOldestOnTop(t *testing.T) {
 // leaves the version unnamed; reading that as "nothing has built" would report
 // every such repo as behind by its whole history.
 func TestUntaggedBuildIsStillABuild(t *testing.T) {
-	s := Service{Repo: "hanzoai/ci", Behind: 0, Built: Version{}, Declared: Version{Tag: "v0.2.0"}}
+	s := Pipeline{Repo: "hanzoai/ci", Behind: 0, Built: Artifact{}, Declared: Artifact{Tag: "v0.2.0"}}
 	s.assess()
 	if hasDrift(s, unbuilt) {
 		t.Errorf("drift = %v; head built, it merely carries no tag", s.Drift)
@@ -437,22 +437,22 @@ func TestUntaggedBuildIsStillABuild(t *testing.T) {
 // artifact, so this is enforced where that count is made rather than by a clock
 // here.
 func TestBuildInFlightIsNotDrift(t *testing.T) {
-	inFlight := Service{Repo: "hanzoai/ui", Behind: 0,
-		Head: Head{Build: Build{State: "running"}}}
+	inFlight := Pipeline{Repo: "hanzoai/ui", Behind: 0,
+		Tip: Tip{Check: Check{State: "running"}}}
 	inFlight.assess()
 	if !inFlight.current() {
 		t.Errorf("drift = %v; a build still running is not a service that failed to ship", inFlight.Drift)
 	}
 
-	stopped := Service{Repo: "hanzoai/pay", Behind: 1, Since: time.Now().Add(-2 * time.Hour),
-		Head: Head{Build: Build{State: "failure", Job: "cicd"}}}
+	stopped := Pipeline{Repo: "hanzoai/pay", Behind: 1, Since: time.Now().Add(-2 * time.Hour),
+		Tip: Tip{Check: Check{State: "failure", Job: "cicd"}}}
 	stopped.assess()
 	if !hasDrift(stopped, unbuilt) {
 		t.Errorf("drift = %v; a build that stopped without an artifact is %s", stopped.Drift, unbuilt)
 	}
 }
 
-func hasDrift(s Service, d string) bool {
+func hasDrift(s Pipeline, d string) bool {
 	for _, x := range s.Drift {
 		if x == d {
 			return true

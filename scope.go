@@ -57,7 +57,7 @@ func resolveViewer(r *http.Request, adminOrg string) (viewer, bool) {
 // only ever narrow the result. A lux viewer asking for `?org=hanzo` gets an
 // empty list, not hanzo's builds — the parameter selects among what you may
 // already see, it never reaches for more.
-func (v viewer) visible(runs []Run, want string) []Run {
+func (v viewer) visible(runs []Execution, want string) []Execution {
 	want = strings.TrimSpace(want)
 	if v.sudo {
 		// The fleet view: every org, narrowed by the requested one if given.
@@ -72,7 +72,7 @@ func (v viewer) visible(runs []Run, want string) []Run {
 // orgs lists the org tabs this viewer may choose between. A tenant gets exactly
 // its own org — rendering the full org list to a tenant would leak the set of
 // orgs that build on the platform even though their runs are correctly hidden.
-func (v viewer) orgs(runs []Run) []string {
+func (v viewer) orgs(runs []Execution) []string {
 	if v.sudo {
 		return orgsOf(runs)
 	}
