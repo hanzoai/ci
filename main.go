@@ -129,22 +129,22 @@ func Main() {
 //
 // Both carry the SAME four facts about the fetch itself, because a board whose
 // staleness a reader cannot see is a board that lies quietly.
-type Runs struct {
-	Runs      []Run     `json:"runs"`
-	Repos     int       `json:"repos"`
-	Orgs      []string  `json:"orgs"`
-	FetchedAt time.Time `json:"fetchedAt"`
-	Stale     bool      `json:"stale"`
-	SourceErr string    `json:"sourceErr"`
+type Executions struct {
+	Executions []Execution `json:"runs"`
+	Repos      int         `json:"repos"`
+	Orgs       []string    `json:"orgs"`
+	FetchedAt  time.Time   `json:"fetchedAt"`
+	Stale      bool        `json:"stale"`
+	SourceErr  string      `json:"sourceErr"`
 }
 
 // Fleet is one row per service: what was written against what is running.
-type Fleet struct {
-	Services  []Service `json:"services"`
-	Orgs      []string  `json:"orgs"`
-	FetchedAt time.Time `json:"fetchedAt"`
-	Stale     bool      `json:"stale"`
-	SourceErr string    `json:"sourceErr"`
+type Pipelines struct {
+	Services  []Pipeline `json:"services"`
+	Orgs      []string   `json:"orgs"`
+	FetchedAt time.Time  `json:"fetchedAt"`
+	Stale     bool       `json:"stale"`
+	SourceErr string     `json:"sourceErr"`
 }
 
 func routes(cfg config, cache *runCache, board *fleetCache) *http.ServeMux {
@@ -167,13 +167,13 @@ func routes(cfg config, cache *runCache, board *fleetCache) *http.ServeMux {
 			return
 		}
 		snap := cache.get()
-		writeJSON(w, http.StatusOK, Runs{
-			Runs:      v.visible(snap.Runs, r.URL.Query().Get("org")),
-			Repos:     snap.Repos,
-			Orgs:      v.orgs(snap.Runs),
-			FetchedAt: snap.FetchedAt,
-			Stale:     snap.stale(cfg.staleAfter),
-			SourceErr: snap.errString(),
+		writeJSON(w, http.StatusOK, Executions{
+			Executions: v.visible(snap.Executions, r.URL.Query().Get("org")),
+			Repos:      snap.Repos,
+			Orgs:       v.orgs(snap.Executions),
+			FetchedAt:  snap.FetchedAt,
+			Stale:      snap.stale(cfg.staleAfter),
+			SourceErr:  snap.errString(),
 		})
 	})
 	mux.HandleFunc("/v1/ci/fleet", func(w http.ResponseWriter, r *http.Request) {
@@ -183,7 +183,7 @@ func routes(cfg config, cache *runCache, board *fleetCache) *http.ServeMux {
 		}
 		snap := board.get()
 		services := v.services(snap.Services, r.URL.Query().Get("org"))
-		writeJSON(w, http.StatusOK, Fleet{
+		writeJSON(w, http.StatusOK, Pipelines{
 			Services:  services,
 			Orgs:      orgsOfServices(services),
 			FetchedAt: snap.FetchedAt,
@@ -278,7 +278,7 @@ func envInt(k string, def int) int {
 // Run is the projection of a Hanzo Git workflow run this dashboard shows. It is
 // deliberately a SUBSET: the upstream object carries a dozen more fields, and
 // copying them all would make this a second schema to maintain against theirs.
-type Run struct {
+type Execution struct {
 	ID       int64  `json:"id"`
 	Org      string `json:"org"`
 	Repo     string `json:"repo"`
@@ -307,7 +307,7 @@ type Run struct {
 
 // Duration is zero-valued rather than negative when a run has not finished —
 // callers render "running", and a negative duration would print as one.
-func (r Run) Duration() time.Duration {
+func (r Execution) Duration() time.Duration {
 	if r.StartedAt.IsZero() || r.EndedAt.IsZero() || r.EndedAt.Before(r.StartedAt) {
 		return 0
 	}
@@ -315,10 +315,10 @@ func (r Run) Duration() time.Duration {
 }
 
 type snapshot struct {
-	Runs      []Run     `json:"runs"`
-	Repos     int       `json:"repos"`
-	FetchedAt time.Time `json:"fetchedAt"`
-	Err       error     `json:"-"`
+	Executions []Execution `json:"runs"`
+	Repos      int         `json:"repos"`
+	FetchedAt  time.Time   `json:"fetchedAt"`
+	Err        error       `json:"-"`
 }
 
 func (s snapshot) stale(after time.Duration) bool {
@@ -350,7 +350,7 @@ func (c *runCache) get() snapshot {
 func (c *runCache) put(s snapshot) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if s.Err != nil && len(s.Runs) == 0 && len(c.snap.Runs) > 0 {
+	if s.Err != nil && len(s.Executions) == 0 && len(c.snap.Executions) > 0 {
 		prev := c.snap
 		prev.Err = s.Err
 		c.snap = prev
@@ -459,7 +459,7 @@ type apiRun struct {
 	} `json:"actor"`
 }
 
-func (g *gitSource) runs(ctx context.Context, fullName string, limit int) ([]Run, error) {
+func (g *gitSource) runs(ctx context.Context, fullName string, limit int) ([]Execution, error) {
 	var body struct {
 		WorkflowRuns []apiRun `json:"workflow_runs"`
 	}
@@ -468,9 +468,9 @@ func (g *gitSource) runs(ctx context.Context, fullName string, limit int) ([]Run
 		return nil, err
 	}
 	org, repo := splitFullName(fullName)
-	out := make([]Run, 0, len(body.WorkflowRuns))
+	out := make([]Execution, 0, len(body.WorkflowRuns))
 	for _, r := range body.WorkflowRuns {
-		out = append(out, Run{
+		out = append(out, Execution{
 			ID:         r.ID,
 			Org:        org,
 			Repo:       repo,
@@ -510,7 +510,7 @@ func poll(ctx context.Context, logger *slog.Logger, src *gitSource, cache *runCa
 		const workers = 6
 		var (
 			mu   sync.Mutex
-			all  []Run
+			all  []Execution
 			errs []string
 			wg   sync.WaitGroup
 		)
@@ -544,7 +544,7 @@ func poll(ctx context.Context, logger *slog.Logger, src *gitSource, cache *runCa
 		wg.Wait()
 
 		sort.Slice(all, func(i, j int) bool { return all[i].StartedAt.After(all[j].StartedAt) })
-		cache.put(snapshot{Runs: all, Repos: len(names) - len(errs), FetchedAt: time.Now().UTC()})
+		cache.put(snapshot{Executions: all, Repos: len(names) - len(errs), FetchedAt: time.Now().UTC()})
 		logger.Info("refreshed", "repos", len(names), "withRuns", len(names)-len(errs), "runs", len(all))
 	}
 
@@ -601,11 +601,11 @@ func parseTime(s string) time.Time {
 	return t.UTC()
 }
 
-func filterByOrg(runs []Run, org string) []Run {
+func filterByOrg(runs []Execution, org string) []Execution {
 	if org == "" {
 		return runs
 	}
-	out := make([]Run, 0, len(runs))
+	out := make([]Execution, 0, len(runs))
 	for _, r := range runs {
 		if r.Org == org {
 			out = append(out, r)
@@ -614,7 +614,7 @@ func filterByOrg(runs []Run, org string) []Run {
 	return out
 }
 
-func orgsOf(runs []Run) []string {
+func orgsOf(runs []Execution) []string {
 	seen := map[string]bool{}
 	for _, r := range runs {
 		if r.Org != "" {

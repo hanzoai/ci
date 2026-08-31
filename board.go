@@ -21,7 +21,7 @@ func renderFleet(w http.ResponseWriter, snap fleet, v viewer, org string, cfg co
 	services := v.services(snap.Services, org)
 
 	data := struct {
-		Services  []Service
+		Services  []Pipeline
 		Orgs      []string
 		Org       string
 		Viewer    string
@@ -52,7 +52,7 @@ func renderFleet(w http.ResponseWriter, snap fleet, v viewer, org string, cfg co
 	}
 }
 
-func countByDrift(services []Service) map[string]int {
+func countByDrift(services []Pipeline) map[string]int {
 	c := map[string]int{unbuilt: 0, unshipped: 0, unsynced: 0, untested: 0, "current": 0}
 	for _, s := range services {
 		if s.current() {
@@ -68,7 +68,7 @@ func countByDrift(services []Service) map[string]int {
 // tone maps a service to the one colour its row carries. Anything that stops
 // what we wrote from running reads the same, because from outside they are the
 // same fact: this service is not serving the code we last merged.
-func tone(s Service) string {
+func tone(s Pipeline) string {
 	for _, d := range s.Drift {
 		if d == unbuilt || d == unsynced {
 			return "failure"
@@ -102,7 +102,7 @@ func since(t time.Time) string {
 // A version tag is a few characters; a commit tag is forty, and one of those in
 // a column is enough to push every other column off the page. Both are cut to
 // the width at which a release is still identifiable.
-func short(v Version) string {
+func short(v Artifact) string {
 	if v.Tag != "" {
 		return clip(v.Tag, 16)
 	}
@@ -142,7 +142,7 @@ var fleetTmpl = template.Must(template.New("fleet").Funcs(template.FuncMap{
 	"tone":    tone,
 	"explain": explain,
 	"sha":     shortSHA,
-	"has": func(s Service, d string) bool {
+	"has": func(s Pipeline, d string) bool {
 		for _, x := range s.Drift {
 			if x == d {
 				return true

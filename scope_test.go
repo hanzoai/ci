@@ -15,8 +15,8 @@ import (
 // The properties asserted here are the ones that made it a leak, not merely the
 // ones that make the new code work.
 
-func testRuns() []Run {
-	return []Run{
+func testRuns() []Execution {
+	return []Execution{
 		{Org: "hanzo", Repo: "cloud", Workflow: "build", Status: "completed", Conclusion: "success"},
 		{Org: "lux", Repo: "node", Workflow: "build", Status: "completed", Conclusion: "failure"},
 		{Org: "zoo", Repo: "app", Workflow: "test", Status: "in_progress"},
@@ -127,7 +127,7 @@ func TestTenantOrgListIsNotTheFleetList(t *testing.T) {
 // asserted.
 func TestRunsEndpointScopesEndToEnd(t *testing.T) {
 	cache := &runCache{}
-	cache.put(snapshot{Runs: testRuns(), Repos: 3})
+	cache.put(snapshot{Executions: testRuns(), Repos: 3})
 	cfg := config{adminOrg: "admin"}
 
 	h := func(w http.ResponseWriter, r *http.Request) {
@@ -137,8 +137,8 @@ func TestRunsEndpointScopesEndToEnd(t *testing.T) {
 		}
 		snap := cache.get()
 		writeJSON(w, http.StatusOK, map[string]any{
-			"runs": v.visible(snap.Runs, r.URL.Query().Get("org")),
-			"orgs": v.orgs(snap.Runs),
+			"runs": v.visible(snap.Executions, r.URL.Query().Get("org")),
+			"orgs": v.orgs(snap.Executions),
 		})
 	}
 
@@ -160,14 +160,14 @@ func TestRunsEndpointScopesEndToEnd(t *testing.T) {
 		h(w, r)
 
 		var got struct {
-			Runs []Run    `json:"runs"`
-			Orgs []string `json:"orgs"`
+			Executions []Execution `json:"runs"`
+			Orgs       []string    `json:"orgs"`
 		}
 		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if len(got.Runs) != 0 {
-			t.Errorf("lux asking ?org=hanzo got %+v; want none", got.Runs)
+		if len(got.Executions) != 0 {
+			t.Errorf("lux asking ?org=hanzo got %+v; want none", got.Executions)
 		}
 		if len(got.Orgs) != 1 || got.Orgs[0] != "lux" {
 			t.Errorf("orgs=%v; want [lux]", got.Orgs)
@@ -177,8 +177,8 @@ func TestRunsEndpointScopesEndToEnd(t *testing.T) {
 
 // ─────────────────── the fleet surface, under the same rule ───────────────────
 
-func testServices() []Service {
-	return []Service{
+func testServices() []Pipeline {
+	return []Pipeline{
 		{Name: "cloud", Namespace: "hanzo", Image: "ghcr.io/hanzoai/cloud", Org: "hanzo", Repo: "hanzo-inc/cloud"},
 		{Name: "node", Namespace: "hanzo", Image: "ghcr.io/luxfi/node", Org: "lux", Repo: "luxfi/node"},
 		{Name: "app", Namespace: "hanzo", Image: "ghcr.io/zooai/app", Org: "zoo", Repo: "zooai/app"},
@@ -221,7 +221,7 @@ func TestFleetRefusesWithoutTheHeader(t *testing.T) {
 func TestFleetTenantCannotWiden(t *testing.T) {
 	mux := routes(config{adminOrg: "admin"}, &runCache{}, testBoard(t))
 
-	ask := func(t *testing.T, org, want string) []Service {
+	ask := func(t *testing.T, org, want string) []Pipeline {
 		t.Helper()
 		r := httptest.NewRequest(http.MethodGet, "/v1/ci/fleet?org="+want, nil)
 		r.Header.Set(orgHeader, org)
@@ -231,8 +231,8 @@ func TestFleetTenantCannotWiden(t *testing.T) {
 			t.Fatalf("status=%d want 200", w.Code)
 		}
 		var got struct {
-			Services []Service `json:"services"`
-			Orgs     []string  `json:"orgs"`
+			Services []Pipeline `json:"services"`
+			Orgs     []string   `json:"orgs"`
 		}
 		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 			t.Fatalf("decode: %v", err)
