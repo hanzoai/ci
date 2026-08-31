@@ -25,7 +25,7 @@ RUN --mount=type=cache,id=ci-gomod,target=/go/pkg/mod go mod download
 COPY . .
 RUN --mount=type=cache,id=ci-gomod,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /build/ci .
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /build/ci ./cmd/ci
 
 FROM alpine:3.21
 RUN apk add --no-cache ca-certificates tzdata \
