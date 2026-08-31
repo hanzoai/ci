@@ -3,6 +3,8 @@ package ci
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"sort"
 	"net/http/httptest"
 	"regexp"
 	"strings"
@@ -75,4 +77,48 @@ func TestRenderedPageShowsOnlyTheViewersOrg(t *testing.T) {
 			t.Errorf("nav offered %q to a lux viewer", leaked)
 		}
 	}
+}
+
+// The two operations' wire shapes, pinned.
+//
+// They were anonymous maps and are now structs, which is only safe if the JSON
+// is byte-for-byte the same set of keys: this repo renders a dashboard against
+// them, and a mounted copy of the surface generates clients from them. A struct
+// tag is the one place that can drift silently, so it is asserted rather than
+// trusted.
+func TestTheOperationsKeepTheirWireShape(t *testing.T) {
+	for name, v := range map[string]any{
+		"runs":  Runs{},
+		"fleet": Fleet{},
+	} {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		var got map[string]json.RawMessage
+		if err := json.Unmarshal(b, &got); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		want := map[string][]string{
+			"runs":  {"runs", "repos", "orgs", "fetchedAt", "stale", "sourceErr"},
+			"fleet": {"services", "orgs", "fetchedAt", "stale", "sourceErr"},
+		}[name]
+		if len(got) != len(want) {
+			t.Errorf("%s has %d keys, want %d: %v", name, len(got), len(want), keysOf(got))
+		}
+		for _, k := range want {
+			if _, ok := got[k]; !ok {
+				t.Errorf("%s lost the %q key; a reader of this board would see it vanish", name, k)
+			}
+		}
+	}
+}
+
+func keysOf(m map[string]json.RawMessage) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
