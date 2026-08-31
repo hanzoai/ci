@@ -607,3 +607,17 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
+
+// ServeFromEnv is Serve with the configuration read the way the standalone
+// binary reads it, so a host that mounts this surface configures it exactly as
+// the deployment does — one set of names, one meaning, whichever way it runs.
+//
+// It exists because config is unexported and should stay so: a caller that had
+// to construct one would be a second place that decides what the defaults are.
+func ServeFromEnv(ctx context.Context, logger *slog.Logger) (http.Handler, error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil, err
+	}
+	return Serve(ctx, logger, cfg), nil
+}
