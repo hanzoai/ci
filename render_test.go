@@ -4,9 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"sort"
 	"net/http/httptest"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -58,7 +58,7 @@ func TestDashboardCSSNamesNoColours(t *testing.T) {
 // trusted to be careful with a snapshot it can see all of.
 func TestRenderedPageShowsOnlyTheViewersOrg(t *testing.T) {
 	w := httptest.NewRecorder()
-	renderRuns(w, snapshot{Runs: testRuns(), Repos: 3}, viewer{org: "lux"}, "", config{})
+	renderRuns(w, snapshot{Executions: testRuns(), Repos: 3}, viewer{org: "lux"}, "", config{})
 	body := w.Body.String()
 
 	if !strings.Contains(body, ">lux/<") {
@@ -88,8 +88,8 @@ func TestRenderedPageShowsOnlyTheViewersOrg(t *testing.T) {
 // trusted.
 func TestTheOperationsKeepTheirWireShape(t *testing.T) {
 	for name, v := range map[string]any{
-		"runs":  Runs{},
-		"fleet": Fleet{},
+		"runs":  Executions{},
+		"fleet": Pipelines{},
 	} {
 		b, err := json.Marshal(v)
 		if err != nil {

@@ -123,7 +123,7 @@ func (c *cluster) running(ctx context.Context) ([]live, error) {
 					Name:      w.Metadata.Name,
 					Namespace: w.Metadata.Namespace,
 					Image:     image,
-					Version:   v,
+					Artifact:  v,
 					Ready:     ready,
 					Want:      want,
 				})
@@ -164,8 +164,8 @@ func (c *cluster) getJSON(ctx context.Context, path string, out any) error {
 // because the tag is what a human reads and the digest is what is pulled. Both
 // are kept: comparing on the digest is what makes "declared equals running" a
 // statement about bytes rather than about a label that can be moved.
-func splitImage(ref string) (string, Version) {
-	var v Version
+func splitImage(ref string) (string, Artifact) {
+	var v Artifact
 	if i := strings.LastIndex(ref, "@"); i > 0 {
 		v.Digest, ref = ref[i+1:], ref[:i]
 	}

@@ -41,15 +41,15 @@ const (
 // Version is one image as the registry answers for it: the tag a human reads and
 // the digest the kubelet pulls. Both are carried because they answer different
 // questions — a tag can be moved onto other bytes, a digest cannot.
-type Version struct {
+type Artifact struct {
 	Tag    string `json:"tag"`
 	Digest string `json:"digest"`
 }
 
-func (v Version) known() bool { return v.Tag != "" || v.Digest != "" }
+func (v Artifact) known() bool { return v.Tag != "" || v.Digest != "" }
 
 // Build is what Hanzo Git did with one commit.
-type Build struct {
+type Check struct {
 	// State is success | failure | running | absent. `absent` is not a kind of
 	// failure and is kept apart from one: a failing run is a build that ran and
 	// said no, while an absent run is Hanzo Git never having constructed a run
@@ -77,32 +77,32 @@ type Build struct {
 	Verdict bool `json:"verdict"`
 }
 
-func (b Build) passed() bool { return b.State == "success" }
+func (b Check) passed() bool { return b.State == "success" }
 
 // green is passed AND proved. A run that reported success without executing its
 // tests is not a green build, and this is the one place that distinction is made.
-func (b Build) green() bool { return b.passed() && (!b.Verdict || b.Tested) }
+func (b Check) green() bool { return b.passed() && (!b.Verdict || b.Tested) }
 
 // Head is the tip of the default branch — what we wrote.
-type Head struct {
+type Tip struct {
 	SHA   string    `json:"sha"`
 	Title string    `json:"title"`
 	At    time.Time `json:"at"`
-	Build Build     `json:"build"`
+	Check Check     `json:"build"`
 }
 
 // Service is one declared workload and the chain behind it.
-type Service struct {
+type Pipeline struct {
 	Name      string `json:"name"`      // cloud
 	Namespace string `json:"namespace"` // hanzo
 	Image     string `json:"image"`     // ghcr.io/hanzoai/cloud
 	Org       string `json:"org"`       // Hanzo Git owner; empty when the repo is unresolved
 	Repo      string `json:"repo"`      // hanzo-inc/cloud
 
-	Head     Head    `json:"head"`
-	Built    Version `json:"built"`
-	Declared Version `json:"declared"`
-	Running  Version `json:"running"`
+	Tip      Tip      `json:"head"`
+	Built    Artifact `json:"built"`
+	Declared Artifact `json:"declared"`
+	Running  Artifact `json:"running"`
 
 	Ready int `json:"ready"`
 	Want  int `json:"want"`
@@ -121,13 +121,13 @@ type Service struct {
 }
 
 // current reports a service whose four values agree.
-func (s Service) current() bool { return len(s.Drift) == 0 }
+func (s Pipeline) current() bool { return len(s.Drift) == 0 }
 
 // alike reports whether two versions name the same image, and whether that could
 // be decided at all. The second result is what keeps an unread source from
 // rendering as a difference: a value we failed to fetch is not a value that
 // disagrees, and a board that conflates them cries wolf on its own outages.
-func alike(a, b Version) (same, decided bool) {
+func alike(a, b Artifact) (same, decided bool) {
 	switch {
 	case a.Digest != "" && b.Digest != "":
 		return a.Digest == b.Digest, true
@@ -187,7 +187,7 @@ func after(a, b string) (yes, decided bool) {
 
 // assess names every broken arrow in the line. Each test is written so that an
 // undecidable comparison adds nothing.
-func (s *Service) assess() {
+func (s *Pipeline) assess() {
 	s.Drift = nil
 
 	// The cluster is not running what universe declares: Hanzo CD is behind,
@@ -211,7 +211,7 @@ func (s *Service) assess() {
 	// A passing build that did not execute its tests. Kept separate from the
 	// three version comparisons because the versions all agree in this case —
 	// the line is intact and what flowed down it was never proved.
-	if s.Head.Build.passed() && s.Head.Build.Verdict && !s.Head.Build.Tested {
+	if s.Tip.Check.passed() && s.Tip.Check.Verdict && !s.Tip.Check.Tested {
 		s.Drift = append(s.Drift, untested)
 	}
 }
@@ -223,7 +223,7 @@ type pin struct {
 	Name      string
 	Namespace string
 	Image     string
-	Version   Version
+	Artifact  Artifact
 	At        time.Time
 }
 
@@ -232,7 +232,7 @@ type live struct {
 	Name      string
 	Namespace string
 	Image     string
-	Version   Version
+	Artifact  Artifact
 	Ready     int
 	Want      int
 }
@@ -241,8 +241,8 @@ type live struct {
 type link struct {
 	Repo   string
 	Org    string
-	Head   Head
-	Built  Version
+	Tip    Tip
+	Built  Artifact
 	Behind int
 	Since  time.Time
 }
@@ -258,13 +258,13 @@ type link struct {
 // So the namespace and name carry the row, the cluster is matched on the same
 // pair, and the IMAGE is what joins to Hanzo Git — several services legitimately
 // share one repo, and then they share its head and its last build too.
-func assemble(pins []pin, lives []live, links map[string]link) []Service {
+func assemble(pins []pin, lives []live, links map[string]link) []Pipeline {
 	at := func(namespace, name string) string { return namespace + "/" + name }
-	byName := make(map[string]*Service, len(pins))
+	byName := make(map[string]*Pipeline, len(pins))
 	for _, p := range pins {
-		byName[at(p.Namespace, p.Name)] = &Service{
+		byName[at(p.Namespace, p.Name)] = &Pipeline{
 			Name: p.Name, Namespace: p.Namespace, Image: p.Image,
-			Declared: p.Version, PinnedAt: p.At,
+			Declared: p.Artifact, PinnedAt: p.At,
 		}
 	}
 	for _, l := range lives {
@@ -287,15 +287,15 @@ func assemble(pins []pin, lives []live, links map[string]link) []Service {
 		if same, decided := alike(s.Running, s.Declared); decided && same {
 			continue
 		}
-		s.Running, s.Ready, s.Want = l.Version, l.Ready, l.Want
+		s.Running, s.Ready, s.Want = l.Artifact, l.Ready, l.Want
 	}
 	for _, s := range byName {
 		if c, ok := links[s.Image]; ok {
-			s.Repo, s.Org, s.Head, s.Built, s.Behind, s.Since = c.Repo, c.Org, c.Head, c.Built, c.Behind, c.Since
+			s.Repo, s.Org, s.Tip, s.Built, s.Behind, s.Since = c.Repo, c.Org, c.Tip, c.Built, c.Behind, c.Since
 		}
 	}
 
-	out := make([]Service, 0, len(byName))
+	out := make([]Pipeline, 0, len(byName))
 	for _, s := range byName {
 		s.assess()
 		out = append(out, *s)
@@ -330,9 +330,9 @@ func imageName(image string) string {
 // ───────────────────────────── snapshot ─────────────────────────────
 
 type fleet struct {
-	Services  []Service `json:"services"`
-	FetchedAt time.Time `json:"fetchedAt"`
-	Err       error     `json:"-"`
+	Services  []Pipeline `json:"services"`
+	FetchedAt time.Time  `json:"fetchedAt"`
+	Err       error      `json:"-"`
 }
 
 func (f fleet) stale(after time.Duration) bool {
@@ -380,7 +380,7 @@ func (c *fleetCache) put(f fleet) {
 // own: a tenant is always narrowed to its own org slug, which is never empty, so
 // an unattributed row matches no tenant. Tenancy we could not establish is
 // therefore never granted to a tenant by default.
-func (v viewer) services(all []Service, want string) []Service {
+func (v viewer) services(all []Pipeline, want string) []Pipeline {
 	want = strings.TrimSpace(want)
 	if !v.sudo {
 		if want != "" && !strings.EqualFold(want, v.org) {
@@ -388,7 +388,7 @@ func (v viewer) services(all []Service, want string) []Service {
 		}
 		want = v.org
 	}
-	out := make([]Service, 0, len(all))
+	out := make([]Pipeline, 0, len(all))
 	for _, s := range all {
 		if want != "" && !strings.EqualFold(s.Org, want) {
 			continue
@@ -401,7 +401,7 @@ func (v viewer) services(all []Service, want string) []Service {
 // orgsOfServices lists the orgs present in a service list. It is called with a
 // list that has ALREADY passed v.services, so a tenant's nav is built from a
 // tenant's rows and cannot name an org whose rows were filtered out.
-func orgsOfServices(services []Service) []string {
+func orgsOfServices(services []Pipeline) []string {
 	seen := map[string]bool{}
 	for _, s := range services {
 		if s.Org != "" {

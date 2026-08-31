@@ -100,7 +100,7 @@ func (g *gitSource) pins(ctx context.Context, repo string) (map[string]pin, erro
 				Name:      strings.TrimSuffix(f.Name, ".yaml"),
 				Namespace: space.Name,
 				Image:     image,
-				Version:   v,
+				Artifact:  v,
 				At:        at,
 			}
 			mu.Unlock()
@@ -225,7 +225,7 @@ func (g *gitSource) locate(ctx context.Context, p pin) (repo, branch string, err
 	q := url.Values{"q": {name}, "limit": {"30"}}
 	if err := g.getJSON(ctx, "/v1/repos/search?"+q.Encode(), &body); err == nil {
 		for _, r := range body.Data {
-			if _, n := splitFullName(r.FullName); n == name && g.holds(ctx, r.FullName, p.Version.Tag) {
+			if _, n := splitFullName(r.FullName); n == name && g.holds(ctx, r.FullName, p.Artifact.Tag) {
 				return g.remember(p.Image, r.FullName, r.Branch)
 			}
 		}
@@ -276,13 +276,13 @@ func (g *gitSource) link(ctx context.Context, repo, branch string) (link, error)
 	if err != nil || len(commits) == 0 {
 		return c, err
 	}
-	c.Head = Head{SHA: commits[0].SHA, Title: commits[0].Title, At: commits[0].At}
+	c.Tip = Tip{SHA: commits[0].SHA, Title: commits[0].Title, At: commits[0].At}
 
 	runs, err := g.runs(ctx, repo, 20)
 	if err != nil {
 		return c, err
 	}
-	byCommit := map[string]Run{}
+	byCommit := map[string]Execution{}
 	for _, r := range runs {
 		// The first run listed for a commit is its newest attempt.
 		if _, seen := byCommit[r.SHA]; !seen {
@@ -305,7 +305,7 @@ func (g *gitSource) link(ctx context.Context, repo, branch string) (link, error)
 	for i := 0; i < window; i++ {
 		b := g.built(ctx, repo, byCommit[shortSHA(commits[i].SHA)], commits[i].At)
 		if i == 0 {
-			c.Head.Build = b
+			c.Tip.Check = b
 		}
 		if b.passed() {
 			built = i
@@ -328,7 +328,7 @@ func (g *gitSource) link(ctx context.Context, repo, branch string) (link, error)
 	// which the page shows as unknown — while the commit still counts as built,
 	// so an untagged build must not read as nothing having been built at all.
 	if built >= 0 {
-		c.Built = Version{Tag: tags[commits[built].SHA]}
+		c.Built = Artifact{Tag: tags[commits[built].SHA]}
 	}
 	return c, nil
 }
@@ -396,15 +396,15 @@ func (g *gitSource) tags(ctx context.Context, repo string, limit int) (map[strin
 	return m, nil
 }
 
-func (g *gitSource) built(ctx context.Context, repo string, r Run, at time.Time) Build {
+func (g *gitSource) built(ctx context.Context, repo string, r Execution, at time.Time) Check {
 	if r.ID == 0 {
-		return verdict(Run{}, nil, at)
+		return verdict(Execution{}, nil, at)
 	}
 	jobs, err := g.jobs(ctx, repo, r.ID)
 	if err != nil {
 		// The run is known even when its jobs are not; report what the run says
 		// rather than nothing.
-		return Build{Number: r.Number, URL: r.URL, At: r.StartedAt, State: outcome(r)}
+		return Check{Number: r.Number, URL: r.URL, At: r.StartedAt, State: outcome(r)}
 	}
 	return verdict(r, jobs, at)
 }
@@ -419,18 +419,18 @@ func (g *gitSource) built(ctx context.Context, repo string, r Run, at time.Time)
 //
 // It is separated from the fetch because the decision is the part worth pinning:
 // which job failed, and whether an artifact exists, is what the page turns on.
-func verdict(r Run, jobs []job, at time.Time) Build {
+func verdict(r Execution, jobs []job, at time.Time) Check {
 	if r.ID == 0 {
 		// No run for this commit. A push that has only just landed is Hanzo Git
 		// still constructing one; older than that, the run is genuinely absent —
 		// a workflow that could not be parsed or a reference that would not
 		// resolve, which leaves no failed run to open.
 		if time.Since(at) < settling {
-			return Build{State: "running"}
+			return Check{State: "running"}
 		}
-		return Build{State: "absent"}
+		return Check{State: "absent"}
 	}
-	b := Build{Number: r.Number, URL: r.URL, At: r.StartedAt, State: outcome(r)}
+	b := Check{Number: r.Number, URL: r.URL, At: r.StartedAt, State: outcome(r)}
 
 	// A repo publishes its image one of two ways, and both are read: a pipeline
 	// with a job of its own for the artifact, or the reusable's lane, which
