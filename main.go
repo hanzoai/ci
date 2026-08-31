@@ -120,6 +120,33 @@ func Main() {
 // Every handler here begins by resolving the viewer, and every list it answers
 // with passes through that viewer first. /healthz is the single exception, and
 // only because it answers a constant.
+// Runs and Fleet are what the two API operations answer.
+//
+// They were anonymous maps, which is fine for a page this repo also renders and
+// wrong for an operation a client dispatches: a caller needs a shape it can
+// generate against, and a mounted copy of this surface would otherwise have to
+// declare a second one — the two-schema drift HIP-0106 §4.2 names.
+//
+// Both carry the SAME four facts about the fetch itself, because a board whose
+// staleness a reader cannot see is a board that lies quietly.
+type Runs struct {
+	Runs      []Run     `json:"runs"`
+	Repos     int       `json:"repos"`
+	Orgs      []string  `json:"orgs"`
+	FetchedAt time.Time `json:"fetchedAt"`
+	Stale     bool      `json:"stale"`
+	SourceErr string    `json:"sourceErr"`
+}
+
+// Fleet is one row per service: what was written against what is running.
+type Fleet struct {
+	Services  []Service `json:"services"`
+	Orgs      []string  `json:"orgs"`
+	FetchedAt time.Time `json:"fetchedAt"`
+	Stale     bool      `json:"stale"`
+	SourceErr string    `json:"sourceErr"`
+}
+
 func routes(cfg config, cache *runCache, board *fleetCache) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -140,13 +167,13 @@ func routes(cfg config, cache *runCache, board *fleetCache) *http.ServeMux {
 			return
 		}
 		snap := cache.get()
-		writeJSON(w, http.StatusOK, map[string]any{
-			"runs":      v.visible(snap.Runs, r.URL.Query().Get("org")),
-			"fetchedAt": snap.FetchedAt,
-			"stale":     snap.stale(cfg.staleAfter),
-			"sourceErr": snap.errString(),
-			"repos":     snap.Repos,
-			"orgs":      v.orgs(snap.Runs),
+		writeJSON(w, http.StatusOK, Runs{
+			Runs:      v.visible(snap.Runs, r.URL.Query().Get("org")),
+			Repos:     snap.Repos,
+			Orgs:      v.orgs(snap.Runs),
+			FetchedAt: snap.FetchedAt,
+			Stale:     snap.stale(cfg.staleAfter),
+			SourceErr: snap.errString(),
 		})
 	})
 	mux.HandleFunc("/v1/ci/fleet", func(w http.ResponseWriter, r *http.Request) {
@@ -156,12 +183,12 @@ func routes(cfg config, cache *runCache, board *fleetCache) *http.ServeMux {
 		}
 		snap := board.get()
 		services := v.services(snap.Services, r.URL.Query().Get("org"))
-		writeJSON(w, http.StatusOK, map[string]any{
-			"services":  services,
-			"fetchedAt": snap.FetchedAt,
-			"stale":     snap.stale(4 * cfg.fleetRefresh),
-			"sourceErr": snap.errString(),
-			"orgs":      orgsOfServices(services),
+		writeJSON(w, http.StatusOK, Fleet{
+			Services:  services,
+			Orgs:      orgsOfServices(services),
+			FetchedAt: snap.FetchedAt,
+			Stale:     snap.stale(4 * cfg.fleetRefresh),
+			SourceErr: snap.errString(),
 		})
 	})
 	mux.HandleFunc("/runs", func(w http.ResponseWriter, r *http.Request) {
