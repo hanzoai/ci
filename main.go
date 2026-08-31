@@ -22,7 +22,7 @@
 // by org, IAM issues that slug in the `owner` claim, and Hanzo CD fences
 // projects by it. Filtering here by `org` is therefore the same boundary those
 // enforce, not a parallel notion of who-sees-what.
-package main
+package ci
 
 import (
 	"context"
@@ -43,15 +43,17 @@ import (
 	"time"
 )
 
-func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-
-	cfg, err := loadConfig()
-	if err != nil {
-		logger.Error("config", "err", err)
-		os.Exit(1)
-	}
-
+// Serve builds the dashboard's handler and starts the pollers that feed it.
+//
+// Exported so this surface can be MOUNTED as well as run: hanzoai/cloud carries
+// /v1/deploy behind the gateway's IAM identity, and this is the CI half of that
+// same delivery plane. A package main cannot be mounted by anything, which is
+// why it was the one surface a valid hanzo.id token could not read.
+//
+// The caller owns the lifetime: cancelling ctx stops the pollers. The returned
+// handler is safe to serve immediately — both caches answer "no snapshot yet"
+// rather than blocking, so a mount never waits on an upstream fetch.
+func Serve(ctx context.Context, logger *slog.Logger, cfg config) http.Handler {
 	src := &gitSource{base: cfg.gitBase, token: cfg.gitToken, http: &http.Client{Timeout: 20 * time.Second}}
 	cache := &runCache{}
 	board := &fleetCache{}
@@ -65,9 +67,6 @@ func main() {
 		logger.Warn("cluster identity", "err", err)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
 	// One poller, one cache. Every viewer reads the same snapshot, so N open
 	// dashboards cost Hanzo Git exactly as much as one — a dashboard that
 	// fanned each page load into upstream calls is how a status page takes the
@@ -75,9 +74,28 @@ func main() {
 	go poll(ctx, logger, src, cache, cfg)
 	go watch(ctx, logger, src, cl, board, cfg)
 
+	return routes(cfg, cache, board)
+}
+
+// Main is the standalone server: the same handler, with a listener and shutdown
+// around it. cmd/ci is a thin wrapper over this. Named Main rather than Run
+// because a Run in this package is a CI run — the domain object — and the
+// binary's body is not one.
+func Main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+
+	cfg, err := loadConfig()
+	if err != nil {
+		logger.Error("config", "err", err)
+		os.Exit(1)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	srv := &http.Server{
 		Addr:              cfg.listen,
-		Handler:           routes(cfg, cache, board),
+		Handler:           Serve(ctx, logger, cfg),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
