@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/hanzoai/authz"
 )
 
 // scope_test.go is the regression suite for the leak this service shipped with:
@@ -34,7 +36,7 @@ func TestNoOrgHeaderIsRefused(t *testing.T) {
 		}
 		w := httptest.NewRecorder()
 
-		v, ok := requireViewer(w, r, "admin")
+		v, ok := requireViewer(w, r)
 		if ok {
 			t.Fatalf("X-Org-Id=%q admitted as viewer %+v — absence must fail closed", hdr, v)
 		}
@@ -81,29 +83,28 @@ func TestSudoSeesFleetAndCanNarrow(t *testing.T) {
 	}
 }
 
-// TestResolveViewerSudoDetection pins the sudo bit to the configured admin org,
+// TestResolveViewerSudoDetection pins the sudo bit to the reserved org,
 // case-insensitively, and proves an ordinary org never gets it.
 func TestResolveViewerSudoDetection(t *testing.T) {
 	cases := []struct {
-		hdr, adminOrg string
-		wantSudo      bool
+		hdr      string
+		wantSudo bool
 	}{
-		{"admin", "admin", true},
-		{"ADMIN", "admin", true},
-		{" admin ", "admin", true},
-		{"lux", "admin", false},
-		{"administrator", "admin", false}, // prefix must not match
-		{"admin", "root", false},          // honours a non-default admin org
+		{authz.AdminOrg, true},
+		{"ADMIN", true},
+		{" admin ", true},
+		{"lux", false},
+		{"administrator", false}, // prefix must not match
 	}
 	for _, tc := range cases {
 		r := httptest.NewRequest(http.MethodGet, "/", nil)
 		r.Header.Set(orgHeader, tc.hdr)
-		v, ok := resolveViewer(r, tc.adminOrg)
+		v, ok := resolveViewer(r)
 		if !ok {
 			t.Fatalf("X-Org-Id=%q: not resolved", tc.hdr)
 		}
 		if v.sudo != tc.wantSudo {
-			t.Errorf("X-Org-Id=%q adminOrg=%q: sudo=%v want %v", tc.hdr, tc.adminOrg, v.sudo, tc.wantSudo)
+			t.Errorf("X-Org-Id=%q: sudo=%v want %v", tc.hdr, v.sudo, tc.wantSudo)
 		}
 	}
 }
@@ -128,10 +129,9 @@ func TestTenantOrgListIsNotTheFleetList(t *testing.T) {
 func TestRunsEndpointScopesEndToEnd(t *testing.T) {
 	cache := &runCache{}
 	cache.put(snapshot{Executions: testRuns(), Repos: 3})
-	cfg := config{adminOrg: "admin"}
 
 	h := func(w http.ResponseWriter, r *http.Request) {
-		v, ok := requireViewer(w, r, cfg.adminOrg)
+		v, ok := requireViewer(w, r)
 		if !ok {
 			return
 		}
@@ -199,7 +199,7 @@ func testBoard(t *testing.T) *fleetCache {
 // surface is held to: the header is the authority, and its absence means the
 // request did not come through the gate.
 func TestFleetRefusesWithoutTheHeader(t *testing.T) {
-	mux := routes(config{adminOrg: "admin"}, &runCache{}, testBoard(t))
+	mux := routes(config{}, &runCache{}, testBoard(t))
 
 	for _, path := range []string{"/v1/ci/fleet", "/", "/runs"} {
 		w := httptest.NewRecorder()
@@ -219,7 +219,7 @@ func TestFleetRefusesWithoutTheHeader(t *testing.T) {
 // TestFleetTenantCannotWiden — `?org=` selects among what a viewer may already
 // see and never reaches past it, on this surface as on the other.
 func TestFleetTenantCannotWiden(t *testing.T) {
-	mux := routes(config{adminOrg: "admin"}, &runCache{}, testBoard(t))
+	mux := routes(config{}, &runCache{}, testBoard(t))
 
 	ask := func(t *testing.T, org, want string) []Pipeline {
 		t.Helper()
@@ -288,7 +288,7 @@ func TestUnattributedServiceIsSudoOnly(t *testing.T) {
 // started all of this was a handler handing a template more than the viewer was
 // owed.
 func TestFleetPageShowsOnlyTheViewersOrg(t *testing.T) {
-	mux := routes(config{adminOrg: "admin"}, &runCache{}, testBoard(t))
+	mux := routes(config{}, &runCache{}, testBoard(t))
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.Header.Set(orgHeader, "lux")
 	w := httptest.NewRecorder()
@@ -313,7 +313,7 @@ func TestFleetPageShowsOnlyTheViewersOrg(t *testing.T) {
 // path that does not collide. This is that path, and the unnamespaced ones must
 // stay gone — a route that answers at both is two ways to ask one question.
 func TestTheAPIIsNamespacedUnderV1CI(t *testing.T) {
-	mux := routes(config{adminOrg: "admin"}, &runCache{}, testBoard(t))
+	mux := routes(config{}, &runCache{}, testBoard(t))
 
 	// Present: refuses without the header (403), which is the gate working —
 	// not 404, which would mean the route is missing.
@@ -332,5 +332,46 @@ func TestTheAPIIsNamespacedUnderV1CI(t *testing.T) {
 		if w.Code != http.StatusNotFound {
 			t.Errorf("%s still answers %d; it would collide with another app on a shared host", path, w.Code)
 		}
+	}
+}
+
+// The reserved admin org is the ISSUER's constant, not this service's setting.
+//
+// It was read from CI_ADMIN_ORG, and a consumer-side value for a fact IAM owns
+// can only make this surface disagree with the token it is shown. Both
+// directions of that disagreement are silent: pointed at an ordinary org it
+// hands every member of that org the cross-tenant view, and pointed anywhere
+// else it demotes the real SuperAdmin to a single-org viewer. authz.AdminOrg is
+// the one place the value lives — the same constant the gate that mints
+// X-Org-Id reads, and the one every host that mounts this surface writes.
+func TestTheReservedOrgIsNotConfigurable(t *testing.T) {
+	t.Setenv("CI_GIT_TOKEN", "token")
+	t.Setenv("CI_ADMIN_ORG", "hanzo")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	mux := routes(cfg, &runCache{}, testBoard(t))
+
+	seen := func(org string) int {
+		r := httptest.NewRequest(http.MethodGet, "/v1/ci/fleet", nil)
+		r.Header.Set(orgHeader, org)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		var got struct {
+			Services []Pipeline `json:"services"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return len(got.Services)
+	}
+
+	if n := seen("hanzo"); n != 1 {
+		t.Errorf("the hanzo org saw %d services; a named org sees its own 1, whatever the environment says", n)
+	}
+	if n := seen(authz.AdminOrg); n != 4 {
+		t.Errorf("the reserved org saw %d services; want the whole fleet of 4", n)
 	}
 }

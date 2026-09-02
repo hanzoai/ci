@@ -3,6 +3,8 @@ package ci
 import (
 	"net/http"
 	"strings"
+
+	"github.com/hanzoai/authz"
 )
 
 // scope.go answers exactly one question: whose builds may THIS request see?
@@ -30,7 +32,7 @@ const orgHeader = "X-Org-Id"
 type viewer struct {
 	// org is the caller's home org slug, from the verified `owner` claim.
 	org string
-	// sudo reports whether org is the platform admin org, which is the ONE
+	// sudo reports whether org is the reserved admin org, which is the ONE
 	// identity that may see across tenants (the fleet view).
 	sudo bool
 }
@@ -42,12 +44,19 @@ type viewer struct {
 // Defaulting an absent header to "no filter" is the specific bug this function
 // exists to prevent — that default is what turns "reached ci without the guard"
 // into "rendered every org's builds".
-func resolveViewer(r *http.Request, adminOrg string) (viewer, bool) {
+//
+// The reserved org is authz.AdminOrg: IAM seeds platform admins into it and
+// signs the claim this header is minted from, so the issuer owns the value and
+// every reader spells it the same way. A setting here could only ever make this
+// surface disagree with the token it is shown, and both directions of that
+// disagreement are silent — an ordinary org handed the fleet view, or a real
+// SuperAdmin narrowed to one org.
+func resolveViewer(r *http.Request) (viewer, bool) {
 	org := strings.TrimSpace(r.Header.Get(orgHeader))
 	if org == "" {
 		return viewer{}, false
 	}
-	return viewer{org: org, sudo: strings.EqualFold(org, strings.TrimSpace(adminOrg))}, true
+	return viewer{org: org, sudo: strings.EqualFold(org, authz.AdminOrg)}, true
 }
 
 // visible narrows runs to what v is permitted to see, then applies want (the
@@ -81,8 +90,8 @@ func (v viewer) orgs(runs []Execution) []string {
 
 // requireViewer resolves the viewer or writes the refusal. It returns ok=false
 // when the request must not proceed.
-func requireViewer(w http.ResponseWriter, r *http.Request, adminOrg string) (viewer, bool) {
-	v, ok := resolveViewer(r, adminOrg)
+func requireViewer(w http.ResponseWriter, r *http.Request) (viewer, bool) {
+	v, ok := resolveViewer(r)
 	if ok {
 		return v, true
 	}
