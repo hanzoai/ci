@@ -162,7 +162,7 @@ func routes(cfg config, cache *runCache, board *fleetCache) *http.ServeMux {
 	// join it rather than needing a second front door and a second way to prove
 	// who you are.
 	mux.HandleFunc("/v1/ci/runs", func(w http.ResponseWriter, r *http.Request) {
-		v, ok := requireViewer(w, r, cfg.adminOrg)
+		v, ok := requireViewer(w, r)
 		if !ok {
 			return
 		}
@@ -177,7 +177,7 @@ func routes(cfg config, cache *runCache, board *fleetCache) *http.ServeMux {
 		})
 	})
 	mux.HandleFunc("/v1/ci/fleet", func(w http.ResponseWriter, r *http.Request) {
-		v, ok := requireViewer(w, r, cfg.adminOrg)
+		v, ok := requireViewer(w, r)
 		if !ok {
 			return
 		}
@@ -192,7 +192,7 @@ func routes(cfg config, cache *runCache, board *fleetCache) *http.ServeMux {
 		})
 	})
 	mux.HandleFunc("/runs", func(w http.ResponseWriter, r *http.Request) {
-		v, ok := requireViewer(w, r, cfg.adminOrg)
+		v, ok := requireViewer(w, r)
 		if !ok {
 			return
 		}
@@ -203,7 +203,7 @@ func routes(cfg config, cache *runCache, board *fleetCache) *http.ServeMux {
 			http.NotFound(w, r)
 			return
 		}
-		v, ok := requireViewer(w, r, cfg.adminOrg)
+		v, ok := requireViewer(w, r)
 		if !ok {
 			return
 		}
@@ -215,13 +215,8 @@ func routes(cfg config, cache *runCache, board *fleetCache) *http.ServeMux {
 // ───────────────────────────── config ─────────────────────────────
 
 type config struct {
-	listen  string
-	gitBase string
-	// adminOrg is the ONE org whose members see across tenants. It must match
-	// admin-guard's IAM_ADMIN_ORG — the guard decides who gets in, this decides
-	// who sees everything, and a mismatch would silently demote the fleet view to
-	// a single-org view (or, if set too wide, promote a tenant to it).
-	adminOrg   string
+	listen     string
+	gitBase    string
 	gitToken   string
 	refresh    time.Duration
 	staleAfter time.Duration
@@ -241,7 +236,6 @@ func loadConfig() (config, error) {
 	c := config{
 		listen:    env("CI_LISTEN", ":8080"),
 		gitBase:   strings.TrimRight(env("CI_GIT_BASE", "https://git.hanzo.ai"), "/"),
-		adminOrg:  env("CI_ADMIN_ORG", "admin"),
 		gitToken:  os.Getenv("CI_GIT_TOKEN"),
 		scanRepos: envInt("CI_SCAN_REPOS", 60),
 		runsPer:   envInt("CI_RUNS_PER_REPO", 8),
