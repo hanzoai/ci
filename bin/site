@@ -374,12 +374,28 @@ put() {
   # malformed X-Amz-Credential — an error that points at the credential rather
   # than at the array that never got built.
   while IFS= read -r line; do args+=("$line"); done < "$work"/sd-fields
-  curl -sS --fail-with-body -o /dev/null \
-    -X POST "$UP_URL" \
-    -F "key=$PREFIX/$rel" "${args[@]}" \
-    -F "Content-Type=$(ctype "$rel")" \
-    -F "file=@$DIR/$rel" \
-    || { echo "::error::upload failed: $rel"; return 1; }
+  # RETRIED, like the API calls above and for the same reason: a single object
+  # is idempotent — the same key with the same bytes — so a second attempt can
+  # only replace it with itself. Without this one flaky connection out of eight
+  # thousand fails the whole release, and the publish is marked `error` having
+  # uploaded 99% of the site.
+  #
+  # The flake is real and it is the TLS stack, not the network. macOS curl links
+  # LibreSSL, which under enough concurrent connections drops one with
+  # `sslv3 alert bad record mac` (curl 56). Seventy-two of 7980 died that way on
+  # a laptop publish; every one of them succeeded on a second attempt.
+  local attempt
+  for attempt in 1 2 3; do
+    curl -sS --fail-with-body -o /dev/null \
+      -X POST "$UP_URL" \
+      -F "key=$PREFIX/$rel" "${args[@]}" \
+      -F "Content-Type=$(ctype "$rel")" \
+      -F "file=@$DIR/$rel" \
+      && return 0
+    sleep "$attempt"
+  done
+  echo "::error::upload failed after 3 attempts: $rel"
+  return 1
 }
 export -f put ctype
 export UP_URL="$upload_url" PREFIX="$prefix" DIR="$dir" work
