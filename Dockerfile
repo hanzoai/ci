@@ -28,15 +28,15 @@ RUN --mount=type=cache,id=ci-gomod,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /build/ci ./cmd/ci
 
-FROM alpine:3.21
-RUN apk add --no-cache ca-certificates tzdata \
-    && addgroup -S hanzo && adduser -S hanzo -G hanzo
+# One directory in an empty image: the static binary and the files it reads;
+# nothing else is present to run, so nothing else can be run.
+FROM alpine:3.22 AS root
+RUN apk add --no-cache ca-certificates tzdata
+
+FROM scratch
+COPY --from=root /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=root /usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=builder /build/ci /app/ci
-USER hanzo
+USER 65532:65532
 EXPOSE 8080
-# Liveness only. Readiness deliberately does not gate on having a snapshot — see
-# the /healthz comment in main.go: a Hanzo Git outage must render as a dashboard
-# saying so, not as this pod leaving the load balancer as well.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD wget -qO- http://127.0.0.1:8080/healthz || exit 1
 ENTRYPOINT ["/app/ci"]
