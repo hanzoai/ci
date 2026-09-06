@@ -1835,6 +1835,11 @@ jobs:
             # More than one platform, or one that is not amd64: the door builds
             # on the pool it has, so a second tag would name a second image that
             # was never built for that architecture.
+            # The default stays amd64 HERE, unlike the buildx lane above, because the door
+            # builds on the one pool it has. A repo that never asked for a second
+            # architecture must not be refused by a default it did not set; delegating is
+            # what gives the second one up, and saying `platforms:` explicitly is how a
+            # repo asks for it and gets told to build on the runner instead.
             plat=$(echo "$img"|jq -r '(.platforms // ["linux/amd64"]) | join(" ")')
             [ "$plat" = "linux/amd64" ] || refuse "images[$name] declares platforms: $plat, and the build door builds linux/amd64 — the other tags would name images built for the wrong architecture. Build on the runner (drop mode: delegate)."
             # Same Go-builder check the buildx lane runs. It belongs here too:
@@ -1917,16 +1922,25 @@ jobs:
             # (e.g. "ce"/"ee") it qualifies every tag; when absent the tags are
             # clean (no trailing dash). Build + deploy must agree on this shape.
             sfx=$(echo "$img"|jq -r '."tag-suffix" // ""')
-            # platforms is OPT-IN per image in hanzo.yml (default: amd64 only, so
-            # every existing repo's tag shape "-amd64" is UNCHANGED). Set e.g.
-            #   platforms: [linux/amd64, linux/arm64]
-            # to emit a multi-arch MANIFEST LIST — one digest serving both arches.
-            # DOKS has no arm64 nodes, so arm64 builds via buildx QEMU emulation
-            # (binfmt set up below); pure-Go (CGO_ENABLED=0) Dockerfiles that honor
-            # $TARGETARCH cross-compile natively (fast, no emulation). For true
-            # native-speed arm64, register a bare-metal arm64 host (spark/GB10) as
-            # the hanzo-build-linux-arm64 self-hosted runner (values-build-arm64.yaml).
-            plats=$(echo "$img"|jq -r '(.platforms // ["linux/amd64"]) | join(",")')
+            # BOTH architectures by default. The lab runs amd64 and arm64, so an image
+            # built for one of them deploys on half the fleet, and which half is decided
+            # by whichever pool happened to build it. A repo that genuinely cannot serve
+            # one architecture says so, and is then the exception that is written down:
+            #   platforms: [linux/amd64]
+            #
+            # Nothing pinned the old shape, which is what makes flipping this safe.
+            # Single-arch tags as `sha-<short>-amd64`, multi-arch as the arch-neutral
+            # `sha-<short>`; a sweep of every values file and manifest across the hanzo,
+            # lux and zoo universes found ten sha pins, all arch-neutral, none carrying
+            # -amd64. The semver tag every build also publishes never carried an arch at
+            # all, and the semver is what the fleet pins.
+            #
+            # arm64 rides buildx QEMU (binfmt below) while the amd64 pool takes the job;
+            # pure-Go (CGO_ENABLED=0) Dockerfiles honouring $TARGETARCH cross-compile and
+            # pay nothing either way. The bare-metal arm64 host is declared as
+            # hanzo-build-linux-arm64 in universe/infra/runners/spark/config.yaml; once it
+            # takes jobs, arm64 is built natively and the emulation goes away on its own.
+            plats=$(echo "$img"|jq -r '(.platforms // ["linux/amd64","linux/arm64"]) | join(",")')
             # ---- Refuse a Go builder older than the module it compiles -------
             # The official golang images set GOTOOLCHAIN=local, so a go.mod
             # requiring a newer Go than the base image does not degrade — it
@@ -2449,7 +2463,7 @@ jobs:
               continue
             fi
             main="${main:-.}"
-            echo "$b" | jq -r '(.platforms // ["linux/amd64"])[]' | while read -r plat; do
+            echo "$b" | jq -r '(.platforms // ["linux/amd64","linux/arm64"])[]' | while read -r plat; do
               os="${plat%%/*}"; arch="${plat##*/}"
               file="${name}-${os}-${arch}"; [ "$os" = windows ] && file="${file}.exe"
               echo "::group::build $name $os/$arch"
