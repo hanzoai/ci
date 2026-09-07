@@ -64,13 +64,13 @@ test:
     # under `.github/workflows` to become a second address.
     run: |
       set -e
-      def=.hanzo/workflows/build.yml
+      def=.github/workflows/build.yml
       grep -q '^      - name: ' "$def" || {
         echo "::error::$def holds no steps — it is the definition, not a forwarder"; exit 1; }
       grep -q '^    uses: ' "$def" && {
         echo "::error::$def forwards somewhere — Hanzo Git cannot take a second hop, that is what this layout removed"; exit 1; } || true
-      [ -d .github/workflows ] && {
-        echo "::error::.github/workflows is back — nothing runs on github.com, and a second address is a second definition to keep in sync"; exit 1; } || true
+      [ -d .hanzo/workflows ] && {
+        echo "::error::.hanzo/workflows is back — it is read by one plane only, and a second address is a second definition to keep in sync"; exit 1; } || true
       echo "OK: one definition ($(wc -l < "$def") lines), no forwarder, no second address"
   - name: gate-runs-before-delegate
     # `mode: delegate` chooses WHERE the image is built. It must never choose

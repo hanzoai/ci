@@ -1,20 +1,26 @@
 # Hanzo CI/CD — reusable build + test + publish, driven by the caller repo's root
-# hanzo.yml. Runs on the git.hanzo.ai `git-runner` fleet; pulls registry + kubeconfig
+# hanzo.yml. Runs on our own self-hosted runners — evo (x86_64), spark (arm64)
+# and dbc (macOS arm64); pulls registry + kubeconfig
 # creds from KMS via Universal Auth at run time. Public so any org can import it
-# with `uses: hanzoai/ci/.hanzo/workflows/build.yml@v1` + `secrets: inherit`.
+# with `uses: hanzoai/ci/.github/workflows/build.yml@v2` + `secrets: inherit`.
 #
 # THE DEFINITION LIVES HERE, AND ONLY HERE. There is no second address and no
-# forwarder. Nothing runs on github.com, so the rule that would force a split —
-# github.com resolves a local reusable (`uses: ./…`) only out of
-# `.github/workflows` — buys nothing here, and the hop it forces is one Hanzo Git
-# cannot take: a caller naming a forwarder expands into jobs with no labels, no
-# steps and no runner, reporting `failure` with nothing to read. Only the cicd
-# lanes can show that; deploy lanes name their runner directly and are unaffected.
+# forwarder. This path is the one BOTH planes read: github.com resolves a
+# reusable workflow only out of `.github/workflows`, and the forge reads it as
+# well, so a single file serves the canonical host and the mirror alike. It used
+# to sit in .hanzo/workflows on the reasoning that nothing ran on github.com;
+# that stopped being true when github.com became canonical and our own runners
+# were registered there, and the old path was then an address no caller on the
+# canonical host could name.
+#
+# A forwarder is still refused. Hanzo Git resolves ONE `uses:` hop, not two: a
+# caller naming a workflow that itself forwards expands into jobs with no labels,
+# no steps and no runner, reporting `failure` with nothing to read.
 #
 # One file also means nothing to keep in sync — two copies of a pipeline drift
 # within a day. hanzo.yml's `one-definition` gate asserts both properties: the
 # pipeline is here, it holds steps, and no workflow has reappeared under
-# `.github/workflows` to become a second address.
+# `.hanzo/workflows` to become a second address.
 #
 # The caller is ~7 lines (triggers + this `uses:`); all real config is hanzo.yml.
 name: Hanzo CI/CD
