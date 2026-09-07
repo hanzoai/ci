@@ -508,56 +508,6 @@ jobs:
             && echo "git auth OK" \
             || echo "::warning::GH_PAT set but repo probe failed"
 
-      - name: Log in to GHCR (GH_PAT when present, else automatic token)
-        if: inputs.mode != 'delegate'
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
-        # GH_PAT is zeekay's PAT (org owner: write on every package, no
-        # per-package grants to lose). It can push or CREATE any <org> package
-        # regardless of which repo the package is linked to. The per-job GITHUB_TOKEN only writes a package linked to THIS
-        # repo, so it 403s on a package created/linked elsewhere (e.g.
-        # ghcr.io/hanzoai/cms). Fall back to the automatic token when GH_PAT is
-        # absent (public forks like zooai/node that create their own repo-linked
-        # package on first push).
-        run: |
-          if [ -n "${GH_PAT:-}" ]; then
-            echo "$GH_PAT" | docker login ghcr.io -u zeekay --password-stdin
-          else
-            # SAY IT. This branch is the one that cost a day.
-            #
-            # The automatic token writes ONLY a package linked to this repo. That
-            # covers most of them, so the fallback works almost always and the
-            # almost is invisible: nothing here mentions which credential won,
-            # and the consequence surfaces twenty stages later as
-            #
-            #   denied: permission_denied: The token provided does not match expected scopes
-            #
-            # which reads as a broken token, a broken registry, or a broken repo
-            # — anything but "we quietly signed in as somebody else at step 3".
-            # An UNLINKED package hits it every time, and a package comes unlinked
-            # for a reason nobody remembers: its repo changed orgs. hanzoai/id
-            # moved to hanzo-inc, and from then on every one of its builds ran
-            # green through sixteen Docker stages and died at the push.
-            #
-            # A warning, not a refusal: public forks legitimately land here and
-            # create their own repo-linked package on first push. The fix is that
-            # the log now names the door it went through.
-            echo "::warning::GH_PAT is empty — pushing with the automatic token, which can write ONLY a package linked to this repo. An unlinked package will fail at push with 'does not match expected scopes'."
-            # AND THE WARNING HAS TO BE ONE. The line above says this branch is not
-            # a refusal, but the login below exits non-zero when the registry says
-            # `denied: denied`, so the job died here — three steps in, before a
-            # single test, in a repo that publishes no image at all. Measured on
-            # zap-proto/zip, whose hanzo.yml declares `binaries:` and no `images:`:
-            # its gate could not run for want of a credential it never spends.
-            #
-            # A login is not the gate; the PUSH is, and it still refuses loudly with
-            # the scopes message this comment already predicts. Keep the GH_PAT
-            # branch strict — if the org owner's own credential is rejected, that is
-            # a real fault and not a fork landing on the fallback.
-            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin \
-              || echo "::warning::the automatic token could not sign in to ghcr.io. A build that pushes an image will fail at the push; one that publishes no image is unaffected."
-          fi
-
       - name: Fetch deploy credentials from KMS
         id: kms
         env:
@@ -884,6 +834,70 @@ jobs:
             echo "::add-mask::$v"
             { echo "$bs<<__KMS_BUILDARG_EOF__"; echo "$v"; echo "__KMS_BUILDARG_EOF__"; } >> "$GITHUB_ENV"
           done
+
+      - name: Log in to GHCR (GH_PAT, else the KMS GitHub token, else the automatic token)
+        if: inputs.mode != 'delegate'
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        # GH_PAT is zeekay's PAT (org owner: write on every package, no
+        # per-package grants to lose). It can push or CREATE any <org> package
+        # regardless of which repo the package is linked to. The per-job GITHUB_TOKEN only writes a package linked to THIS
+        # repo, so it 403s on a package created/linked elsewhere (e.g.
+        # ghcr.io/hanzoai/cms). Fall back to the automatic token when GH_PAT is
+        # absent (public forks like zooai/node that create their own repo-linked
+        # package on first push).
+        # This step runs AFTER the KMS step so GIT_TOKEN (deploy/GITHUB_TOKEN in
+        # KMS) can stand in for GH_PAT on a forge that holds no GH_PAT; GHCR takes
+        # a PAT under any username. A repo without images: pushes nothing and
+        # needs no login, so it skips the step instead of failing on a missing
+        # password.
+        run: |
+          if [ "$(yq -r '.images // [] | length' hanzo.yml 2>/dev/null || echo 0)" = "0" ]; then
+            echo "::notice::no images: in hanzo.yml — nothing pushes to GHCR, no login"; exit 0
+          fi
+          if [ -n "${GH_PAT:-}" ]; then
+            echo "$GH_PAT" | docker login ghcr.io -u zeekay --password-stdin; exit $?
+          fi
+          if [ -n "${GIT_TOKEN:-}" ]; then
+            echo "$GIT_TOKEN" | docker login ghcr.io -u token --password-stdin; exit $?
+          fi
+          if [ "${{ github.server_url }}" != "https://github.com" ]; then
+            echo "::error::no GitHub credential here: set GH_PAT on this org or seal GITHUB_TOKEN under the kms.path in hanzo.yml"; exit 1
+          fi
+            # SAY IT. This branch is the one that cost a day.
+            #
+            # The automatic token writes ONLY a package linked to this repo. That
+            # covers most of them, so the fallback works almost always and the
+            # almost is invisible: nothing here mentions which credential won,
+            # and the consequence surfaces twenty stages later as
+            #
+            #   denied: permission_denied: The token provided does not match expected scopes
+            #
+            # which reads as a broken token, a broken registry, or a broken repo
+            # — anything but "we quietly signed in as somebody else at step 3".
+            # An UNLINKED package hits it every time, and a package comes unlinked
+            # for a reason nobody remembers: its repo changed orgs. hanzoai/id
+            # moved to hanzo-inc, and from then on every one of its builds ran
+            # green through sixteen Docker stages and died at the push.
+            #
+            # A warning, not a refusal: public forks legitimately land here and
+            # create their own repo-linked package on first push. The fix is that
+            # the log now names the door it went through.
+            echo "::warning::GH_PAT is empty — pushing with the automatic token, which can write ONLY a package linked to this repo. An unlinked package will fail at push with 'does not match expected scopes'."
+            # AND THE WARNING HAS TO BE ONE. The line above says this branch is not
+            # a refusal, but the login below exits non-zero when the registry says
+            # `denied: denied`, so the job died here — three steps in, before a
+            # single test, in a repo that publishes no image at all. Measured on
+            # zap-proto/zip, whose hanzo.yml declares `binaries:` and no `images:`:
+            # its gate could not run for want of a credential it never spends.
+            #
+            # A login is not the gate; the PUSH is, and it still refuses loudly with
+            # the scopes message this comment already predicts. Keep the GH_PAT
+            # branch strict — if the org owner's own credential is rejected, that is
+            # a real fault and not a fork landing on the fallback.
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin \
+              || echo "::warning::the automatic token could not sign in to ghcr.io. A build that pushes an image will fail at the push; one that publishes no image is unaffected."
+
 
       - name: GHCR push credential (KMS write:packages token)
         if: inputs.mode != 'delegate'
