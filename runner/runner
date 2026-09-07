@@ -1,0 +1,14 @@
+#!/bin/sh
+# The runner for one job. A forge job arrives as a registration token; a GitHub
+# job arrives as a just-in-time configuration. Either way the process ends with
+# the job, and the pod with it.
+set -eu
+if [ -n "${RUNNER_JITCONFIG:-}" ]; then
+  cd /opt/actions-runner
+  exec ./run.sh --jitconfig "$RUNNER_JITCONFIG"
+fi
+: "${GITEA_INSTANCE_URL:?the forge URL}" "${GITEA_RUNNER_REGISTRATION_TOKEN:?a registration token}" "${RUNNER_LABELS:?the labels the job asked for}"
+act_runner register --no-interactive --ephemeral \
+  --instance "$GITEA_INSTANCE_URL" --token "$GITEA_RUNNER_REGISTRATION_TOKEN" \
+  --name "${RUNNER_NAME:-$(hostname)}" --labels "$RUNNER_LABELS"
+exec act_runner daemon --once
