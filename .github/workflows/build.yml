@@ -270,7 +270,7 @@ jobs:
           # Naming the list here also makes the release order self-announcing: a
           # pipeline that has grown a tool refuses at step one, and says which ref
           # it read and what was missing from it.
-          need="certclaims conflictmarkers gover ignoretracked imgver modsize publishable site vendormark"
+          need="certclaims conflictmarkers gover ignoretracked imgtags imgver modsize publishable site vendormark"
           miss='<no host answered>'
           for url in https://git.hanzo.ai/hanzoai/ci https://github.com/hanzoai/ci; do
             echo "::group::clone ${url}@${ref}"
@@ -1858,6 +1858,13 @@ jobs:
           # reach a service beside it. RUNNER_URL still overrides for anything
           # running outside.
           RUNNER_URL: ${{ vars.RUNNER_URL || 'http://cloud.hanzo.svc.cluster.local:8000/v1/platform/runner' }}
+          # The version tag is WRITTEN by this job, onto the manifest the door
+          # pushed, so this lane needs the registry credential the buildx lane's
+          # login steps hold — and the registry read bin/imgver takes its
+          # published floor from. Same ladder, same precedence: the org PAT, the
+          # KMS GitHub token (arrives via GITHUB_ENV), the automatic token.
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           TMP="${RUNNER_TEMP:-/tmp}"
@@ -1880,7 +1887,13 @@ jobs:
           REPO="${GITHUB_SERVER_URL:-https://github.com}/${{ github.repository }}.git"
           SHA="${{ github.sha }}"
           SHORT=$(echo "$SHA" | cut -c1-7)
+          IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo 1 || echo 0)
+          REL="${{ github.ref_name }}"   # the git tag, verbatim: v1.26.19
           yq -o=json -I=0 '.images' hanzo.yml | jq -c '.[]' > "$TMP/delegate.json"
+          # Every version ref this run owes the registry, `<pushed> <alias>` a
+          # line. The door is POSTed for every image first and the aliases are
+          # written afterwards, so images that would build in parallel still do.
+          : > "$TMP/alias.txt"
           # Read from a file, not a pipe: a `while` on the end of a pipeline is a
           # subshell, and a refusal inside one is a message printed by a process
           # whose exit nobody reads.
@@ -1911,8 +1924,30 @@ jobs:
             # runner that already has the checkout; expensive to discover from
             # the in-cluster builder.
             "$CI_HOME/bin/gover" "$df" "$ctx"
-            # The tag shape the deploy path expects, sha-<short>-<arch>[-<suffix>].
-            image="${repo}:sha-${SHORT}-${plat##*/}${sfx:+-$sfx}"
+            # ---- The tags this build publishes ------------------------------
+            # The SAME two scripts the buildx lane reads: bin/imgver derives the
+            # number, bin/imgtags shapes every tag off it. Delegating moves WHERE
+            # an image is built, not what it is called, and a lane that publishes
+            # sha-<short7> alone leaves the fleet nothing to pin: pin.sh takes a
+            # semver, anchored, and refuses everything else, so a repo on this
+            # lane builds green and cannot be deployed at all.
+            if [ "$IS_TAG" = 1 ]; then
+              ver="$REL"   # release build: the git tag IS the version
+            else
+              # An explicit `version:` on the image entry wins over the repo-wide
+              # one; both are optional, and imgver falls back to the manifest.
+              iv=$(echo "$img"|jq -r '.version // ""')
+              [ -z "$iv" ] && iv=$(yq -r '.version // ""' hanzo.yml)
+              ver=$(IMGVER_VERSION="$iv" "$CI_HOME/bin/imgver" "$repo" "$ctx")
+            fi
+            refs=$("$CI_HOME/bin/imgtags" "$repo" "$ver" "$SHORT" "$plat" "$sfx")
+            # The door takes ONE image ref and pushes ONE manifest, so it is
+            # handed the immutable one and the version refs are aliased onto that
+            # same digest below. Posting a second build for the second tag would
+            # produce a second digest for one commit, which is a version tag
+            # naming different bytes from the sha- tag beside it.
+            image=$(echo "$refs" | head -1)
+            echo "$refs" | tail -n +2 | sed "s|^|$image |" >> "$TMP/alias.txt"
             body=$(jq -nc --arg repo "$REPO" --arg sha "$SHA" --arg image "$image" --arg dockerfile "$df" \
               '{repo:$repo,sha:$sha,image:$image,dockerfile:$dockerfile}')
             echo "::group::delegate $name -> $image"
@@ -1938,6 +1973,75 @@ jobs:
               refuse "the build door refused $image (HTTP $code) for subject ${sub}: $(head -c 400 "$TMP/delegate.out")"
             fi
           done < "$TMP/delegate.json"
+
+          # ---- The version tag, on the digest the door pushed ----------------
+          # THE COMPLETION SIGNAL IS THE sha- TAG RESOLVING AT THE REGISTRY. That
+          # is the fact rather than an account of one: the door answers 202 and
+          # says nothing further, its only progress surface is an org-wide list
+          # projection with no read for a single build, and the manifest existing
+          # is the precondition the alias needs anyway. So this waits for the
+          # image, not for a status.
+          #
+          # `crane tag` writes a name onto bytes that are already there — no
+          # pull, no push, no rebuild — so the version and the sha- tag name ONE
+          # digest by construction.
+          #
+          # A version that does not land FAILS THE RUN. sha- alone is the state
+          # this lane exists to leave behind, and a warning about it reads as
+          # success to everything downstream.
+          if [ -s "$TMP/alias.txt" ]; then
+            command -v crane >/dev/null 2>&1 || {
+              mkdir -p "$HOME/.local/bin"
+              curl -fsSL https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_Linux_x86_64.tar.gz \
+                | tar -xz -C "$HOME/.local/bin" crane
+              export PATH="$HOME/.local/bin:$PATH"
+            }
+            # Writing a tag is a push, so the credential is required rather than
+            # attempted anonymously: GHCR takes the org PAT, else the KMS GitHub
+            # token, else the automatic one; every other owned host takes the
+            # registry credential KMS exported. One login per host, because two
+            # images in one hanzo.yml may publish to two of them.
+            for host in $(cut -d/ -f1 "$TMP/alias.txt" | sort -u); do
+              case "$host" in
+                ghcr.io) ru=token; rp="${GH_PAT:-${GIT_TOKEN:-${GITHUB_TOKEN:-}}}" ;;
+                *)       ru="${REGISTRY_USER:-}"; rp="${REGISTRY_PASSWORD:-}" ;;
+              esac
+              [ -n "$rp" ] || refuse "no credential for $host, so the version tag cannot be written and this build would publish nothing the fleet can pin. GHCR reads GH_PAT, the KMS GitHub token or the automatic token; any other host reads the KMS registry credential."
+              echo "$rp" | crane auth login "$host" -u "$ru" --password-stdin
+            done
+            while read -r src dst; do
+              # 40 minutes at 10s. The door builds in-cluster from a cache this
+              # run has no view of, so the budget is a cold build's, and running
+              # out is a refusal: the image is not there to be pinned.
+              dig=""
+              for i in $(seq 1 240); do
+                dig=$(crane digest "$src" 2>/dev/null || true)
+                [ -n "$dig" ] && break
+                sleep 10
+              done
+              [ -n "$dig" ] || refuse "$src never reached the registry — the delegated build did not push it within 40 minutes. Its logs are the build door's, not this run's."
+              crane tag "$src" "${dst##*:}"
+              # Read the DESTINATION back. `crane tag` exiting 0 is the writer's
+              # account of a write; the digest the registry answers with is the
+              # fact, and the two disagree whenever the tag already names other
+              # bytes. Same shape as the buildx lane's re-read of its own push.
+              got=""
+              for i in 1 2 3 4 5 6; do
+                got=$(crane digest "$dst" 2>/dev/null || true)
+                [ "$got" = "$dig" ] && break
+                sleep 5
+              done
+              [ "$got" = "$dig" ] \
+                || refuse "$dst serves ${got:-nothing}, not $dig — the version tag did not land on the image the door built"
+              echo "tagged $src -> $dst @ $dig"
+              echo "| \`$dst\` | \`$dig\` |" >> "$TMP/pins.md"
+            done < "$TMP/alias.txt"
+            # The pins this run earned, tag and digest TOGETHER because they are
+            # one fact — a universe CR pins repo:tag@digest and the kubelet
+            # honours the digest.
+            { echo "### Pins"; echo; echo "| image | digest |"; echo "|---|---|";
+              cat "$TMP/pins.md"; } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          fi
 
       - name: Build & push images (per hanzo.yml)
         # AFTER the gate, deliberately. Ordered before `test:`, this step
@@ -2060,30 +2164,15 @@ jobs:
             #
             # What every build still gets: an immutable `sha-<short7>` for
             # forensics and a semver for pinning. Those two are the whole
-            # contract, and both are already below.
-            if [ "$plats" = "linux/amd64" ]; then
-              # single-arch: keep the exact legacy tag shape (-amd64) deploys expect.
-              TAGS="-t $repo:sha-${SHORT}-amd64${sfx:+-$sfx}"
-            else
-              # multi-arch: one arch-neutral manifest-list tag (no -amd64 suffix).
-              docker run --privileged --rm tonistiigi/binfmt --install arm64 >/dev/null 2>&1 || true
-              TAGS="-t $repo:sha-${SHORT}${sfx:+-$sfx}"
-            fi
-            # Release (tag) build. The git tag IS the release name, so publish it
-            # VERBATIM (v1.26.19) — that is the shape a universe CR pins, and
-            # stripping the v is why releases were finished by hand-`crane copy`ing
-            # sha-<sha7> onto the semver a human typed. Identity in, identity out.
-            # The v-stripped alias stays for CRs already pinned that way (world
-            # 2.4.51), and is skipped when a repo tags without a v. The old
-            # `<ver>-amd64` alias is deleted: no CR in the fleet pinned it.
-            if [ "$IS_TAG" = 1 ]; then
-              TAGS="$TAGS -t $repo:${REL}${sfx:+-$sfx}"
-              [ "$REL" != "$VER" ] && TAGS="$TAGS -t $repo:${VER}${sfx:+-$sfx}"
-            else
-              # The tag universe is meant to PIN. It goes on every build, not
-              # only the ones somebody remembered to tag by hand.
-              TAGS="$TAGS -t $repo:${ver}${sfx:+-$sfx}"
-            fi
+            # contract, and their SHAPE is bin/imgtags — the same script the
+            # delegate lane reads, so one repo cannot be published under two
+            # naming schemes depending on where its image was built. Read that
+            # script for the rule.
+            #
+            # arm64 rides buildx QEMU while the amd64 pool takes the job; the
+            # bare-metal arm64 host builds it natively once it takes jobs.
+            [ "$plats" = "linux/amd64" ] || docker run --privileged --rm tonistiigi/binfmt --install arm64 >/dev/null 2>&1 || true
+            TAGS=$("$CI_HOME/bin/imgtags" "$repo" "${ver:-$REL}" "$SHORT" "$plats" "$sfx" | sed 's/^/-t /' | tr '\n' ' ')
             echo "::group::build $name → $repo (${sfx}) [$plats]"
             # --build-arg assembly: hanzo.yml `args` + `build_secrets` (KMS values
             # the KMS step exported into the env above). Empty when a repo declares

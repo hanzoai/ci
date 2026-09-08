@@ -1,7 +1,7 @@
 # Hanzo CI — this repo's own build, driven by this repo's own reusable workflow.
 #
 # hanzoai/ci is two things that belong together: the reusable pipeline every
-# other repo imports (.hanzo/workflows/build.yml), and ci.hanzo.ai, the
+# other repo imports (.github/workflows/build.yml), and ci.hanzo.ai, the
 # dashboard that shows what that pipeline did. So the dashboard image is built
 # by the pipeline it reports on — if the pipeline breaks, the thing that would
 # tell you cannot ship, which is the correct and honest coupling.
@@ -49,9 +49,10 @@ test:
       export GOWORK=off
       go test -count=1 ./...
   - name: one-definition
-    # The pipeline has ONE address: .hanzo/workflows/build.yml. Nothing runs on
-    # github.com, so the rule that would split it in two — github.com resolves a
-    # local reusable only out of `.github/workflows` — buys nothing here.
+    # The pipeline has ONE address: .github/workflows/build.yml. That is the path
+    # BOTH planes read — github.com resolves a reusable workflow out of
+    # `.github/workflows` and nowhere else, and the forge reads it as well — so
+    # one file serves the canonical host and the mirror alike.
     #
     # A forwarder is what this refuses. Hanzo Git resolves ONE `uses:` hop, not
     # two: a caller naming a workflow that itself forwards expands into jobs with
@@ -60,8 +61,10 @@ test:
     # directly and are unaffected — so the refusal has to be mechanical.
     #
     # So: one file, no hop, and nothing to keep in sync. This asserts the
-    # definition is here and holds steps, and that no workflow has reappeared
-    # under `.github/workflows` to become a second address.
+    # definition is here and holds steps, and that no second copy of it has
+    # appeared under `.hanzo/workflows` to become a second address. The ~7-line
+    # CALLER lives there — it is what the forge schedules — and a caller is not
+    # a definition.
     run: |
       set -e
       def=.github/workflows/build.yml
@@ -69,8 +72,8 @@ test:
         echo "::error::$def holds no steps — it is the definition, not a forwarder"; exit 1; }
       grep -q '^    uses: ' "$def" && {
         echo "::error::$def forwards somewhere — Hanzo Git cannot take a second hop, that is what this layout removed"; exit 1; } || true
-      [ -d .hanzo/workflows ] && {
-        echo "::error::.hanzo/workflows is back — it is read by one plane only, and a second address is a second definition to keep in sync"; exit 1; } || true
+      [ -f .hanzo/workflows/build.yml ] && {
+        echo "::error::.hanzo/workflows/build.yml is back — it is read by one plane only, and a second address is a second definition to keep in sync"; exit 1; } || true
       echo "OK: one definition ($(wc -l < "$def") lines), no forwarder, no second address"
   - name: gate-runs-before-delegate
     # `mode: delegate` chooses WHERE the image is built. It must never choose
@@ -86,7 +89,7 @@ test:
     # the test gate must not be delegate-guarded.
     run: |
       set -e
-      f=.hanzo/workflows/build.yml
+      f=.github/workflows/build.yml
       t=$(grep -n '^      - name: Test (per hanzo.yml)$'                       "$f" | cut -d: -f1)
       d=$(grep -n '^      - name: Delegate build to the runner (mode=delegate)$' "$f" | cut -d: -f1)
       [ -n "$t" ] && [ -n "$d" ] || { echo "::error::cannot find the test gate ($t) or the delegate step ($d) — a rename broke this assertion, fix the assertion"; exit 1; }
@@ -133,7 +136,7 @@ test:
           printf "OK: %d input(s) checked\n", n
           exit bad
         }
-      ' .hanzo/workflows/build.yml
+      ' .github/workflows/build.yml
   - name: verdict-is-unconditional
     # The test phase may be skipped. The VERDICT on it may not.
     #
@@ -154,7 +157,7 @@ test:
     # produces; `== 'true'` would skip it for all of them.
     run: |
       set -e
-      f=.hanzo/workflows/build.yml
+      f=.github/workflows/build.yml
       line() { grep -n "^      - name: $1\$" "$f" | cut -d: -f1; }
       t=$(line 'Test (per hanzo.yml)'); o=$(line 'Tests not run (declared by caller)')
       v=$(line 'Test verdict');         d=$(line 'Delegate build to the runner (mode=delegate)')
@@ -201,7 +204,7 @@ test:
     #     published.
     run: |
       set -e
-      f=.hanzo/workflows/build.yml
+      f=.github/workflows/build.yml
       line() { grep -n "^      - name: $1\$" "$f" | cut -d: -f1; }
       at() { l=$(line "$1"); [ -n "$l" ] || { echo "::error::the step named '$1' is gone from $f — a rename broke this assertion, fix the assertion"; exit 1; }; echo "$l"; }
       k=$(at 'Kind (per hanzo.yml)')
@@ -280,7 +283,7 @@ test:
     # and let the gate, not a reader, be the thing that notices.
     run: |
       set -e
-      a=$(grep -oE '^[[:space:]]*PUBLISHABLE_\*\|[^)]*\)' .hanzo/workflows/build.yml | tr -d '[:space:]')
+      a=$(grep -oE '^[[:space:]]*PUBLISHABLE_\*\|[^)]*\)' .github/workflows/build.yml | tr -d '[:space:]')
       b=$(grep -oE '^[[:space:]]*PUBLISHABLE_\*\|[^)]*\)' bin/publishable          | tr -d '[:space:]')
       [ -n "$a" ] && [ -n "$b" ] || { echo "::error::publishable rule not found in build.yml ($a) or bin/publishable ($b) — an edit renamed it, fix this assertion"; exit 1; }
       [ "$a" = "$b" ] || { echo "::error::the publishable rule differs between build.yml and bin/publishable — build.yml is what runs, bin/publishable is what is tested, so a difference means the tested rule is not the enforced one:
@@ -295,6 +298,15 @@ test:
     # IfNotPresent never picks up and no reader can see. Offline and
     # deterministic: the registry floor is injected, so it needs no network.
     run: bash bin/imgver_test.sh
+  - name: imgtags
+    # bin/imgtags decides what every image in the fleet is CALLED, and this asserts
+    # both build lanes take their tags from it. That second half is the gate: the
+    # rule is small enough to look right when it is written a second time inside a
+    # lane, and a lane that spells its own tags is how `delegate` came to publish
+    # sha-<short7> and nothing else — pin.sh takes a semver and refuses everything
+    # else, so those repos built green and could not be deployed. Offline: the
+    # rule is a pure function and the lane check reads the workflow file.
+    run: bash bin/imgtags_test.sh
   - name: vendormark
     # bin/vendormark is the gate the build lane runs against every checkout: it
     # refuses a site-generator vendor's branding in a tracked path, in tracked
