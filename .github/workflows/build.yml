@@ -40,7 +40,7 @@ on:
       mode:
         description: >-
           Where the IMAGE is built. `buildx` (default) builds it on this runner.
-          `delegate` POSTs it to the build door on api.hanzo.ai (`/v1/runner`),
+          `delegate` POSTs it to the build door on api.hanzo.ai (`/v1/build`),
           which launches a BuildKit Job in-cluster and pushes the image. A repo
           opts in with `with: { mode: delegate }` and needs no secret of its own:
           the door reads this org's IAM identity, which the KMS login in this job
@@ -1801,7 +1801,7 @@ jobs:
         # the address that can answer.
         if: inputs.mode == 'delegate'
         env:
-          RUNNER_URL: https://api.hanzo.ai/v1/runner
+          RUNNER_URL: https://api.hanzo.ai/v1/build
         run: |
           set -euo pipefail
           TMP="${RUNNER_TEMP:-/tmp}"
