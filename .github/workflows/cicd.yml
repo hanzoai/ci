@@ -35,7 +35,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   gate:
-    uses: hanzoai/ci/.hanzo/workflows/build.yml@v1.0.84
+    uses: hanzoai/ci/.github/workflows/build.yml@v2
     # buildx, because that is what this repo's image can be built by today.
     # `mode: delegate` was measured here on this pin (run 338): the build door
     # answers 403 to the identity a build holds, since its identity path admits
