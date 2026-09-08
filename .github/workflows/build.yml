@@ -1806,7 +1806,14 @@ jobs:
           # and it is already committed on cloud's side. Until that ships, a
           # door that does not answer is worse than a nested name: every
           # delegated build 404s and no repo can produce an image.
-          RUNNER_URL: https://api.hanzo.ai/v1/platform/runner
+          # The build door, reached as the SERVICE it is. The runner and cloud sit
+          # in the same cluster, and addressing the public host sent this request
+          # out to the edge, through a tunnel, and back to a pod one hop away —
+          # which is where it died: the ingress saw a 502 in 180ms and cloud
+          # logged the request not at all. A build should not leave the cluster to
+          # reach a service beside it. RUNNER_URL still overrides for anything
+          # running outside.
+          RUNNER_URL: ${{ vars.RUNNER_URL || 'http://cloud.hanzo.svc.cluster.local:8000/v1/platform/runner' }}
         run: |
           set -euo pipefail
           TMP="${RUNNER_TEMP:-/tmp}"
