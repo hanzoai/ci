@@ -390,6 +390,14 @@ jobs:
           jq --version
           yq --version
 
+      - name: Read hanzo.yml (what this caller ships)
+        id: plan
+        # Every docker-facing step below keys off this: a caller with no images:
+        # ships no image, so on a daemonless runner it never touches docker.
+        run: |
+          n=$(yq -r '.images // [] | length' hanzo.yml 2>/dev/null || echo 0)
+          echo "images=$n" >> "$GITHUB_OUTPUT"
+
       - name: Kind (per hanzo.yml)
         # WHAT THE REPOSITORY IS, as opposed to what its manifest contains.
         #
@@ -836,7 +844,7 @@ jobs:
           done
 
       - name: Log in to GHCR (GH_PAT, else the KMS GitHub token, else the automatic token)
-        if: inputs.mode != 'delegate'
+        if: inputs.mode != 'delegate' && steps.plan.outputs.images != '0'
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
         # GH_PAT is zeekay's PAT (org owner: write on every package, no
@@ -900,7 +908,7 @@ jobs:
 
 
       - name: GHCR push credential (KMS write:packages token)
-        if: inputs.mode != 'delegate'
+        if: inputs.mode != 'delegate' && steps.plan.outputs.images != '0'
         env:
           KUBECONFIG: ${{ steps.kms.outputs.kubeconfig }}
         # The per-job GITHUB_TOKEN — and a package-less GH_PAT — can only push a
@@ -934,7 +942,7 @@ jobs:
       # direct REGISTRY_USER/PASSWORD when one is set, otherwise the in-cluster
       # registry-credentials dockerconfig read through the KMS kubeconfig.
       - name: Native registry credential (oci.hanzo.ai)
-        if: inputs.mode != 'delegate'
+        if: inputs.mode != 'delegate' && steps.plan.outputs.images != '0'
         env:
           KUBECONFIG: ${{ steps.kms.outputs.kubeconfig }}
           # KMS first (exported to GITHUB_ENV by the step above), GitHub secret
