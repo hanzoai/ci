@@ -1161,6 +1161,28 @@ jobs:
           }
           sudo apt-get install -y -qq libclang-dev
 
+      - name: Provision OpenSSL headers (crates that link libssl)
+        # openssl-sys links the system library on gnu targets and vendors it only
+        # for musl, so a gnu gate without the headers stops at "Could not find
+        # openssl via pkg-config" and reports a compile failure for code that
+        # compiles. hanzoai/dev is the case in the fleet today: native-tls reaches
+        # it through reqwest, sentry and ureq.
+        #
+        # Gated on the lock for the same reason libclang is: a lock naming
+        # openssl-sys is exactly the set of trees that need it, and every other
+        # repo pays nothing.
+        if: hashFiles('Cargo.lock') != ''
+        run: |
+          set -euo pipefail
+          grep -q '^name = "openssl-sys"' Cargo.lock || { echo "no openssl-sys in the lock — skipping openssl"; exit 0; }
+          pkg-config --exists openssl 2>/dev/null && { echo "openssl already present"; exit 0; }
+          sudo apt-get update -qq || {
+            sudo find /etc/apt -name '*.list' -o -name '*.sources' | \
+              xargs -r sudo sed -i 's|https\?://archive.ubuntu.com/ubuntu|http://mirrors.digitalocean.com/ubuntu|g'
+            sudo apt-get update -qq
+          }
+          sudo apt-get install -y -qq pkg-config libssl-dev
+
       - name: Provision Java toolchain (client codegen)
         # openapi-generator is a Java jar, so the `client:` lane below cannot run
         # without a JDK. Guarded on the lane, not on a file: a repo with a
