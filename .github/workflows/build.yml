@@ -1801,7 +1801,12 @@ jobs:
         # the address that can answer.
         if: inputs.mode == 'delegate'
         env:
-          RUNNER_URL: https://api.hanzo.ai/v1/build
+          # The address the DEPLOYED cloud serves. /v1/build is where this is
+          # going — building is its own concept, not something platform owns —
+          # and it is already committed on cloud's side. Until that ships, a
+          # door that does not answer is worse than a nested name: every
+          # delegated build 404s and no repo can produce an image.
+          RUNNER_URL: https://api.hanzo.ai/v1/platform/runner
         run: |
           set -euo pipefail
           TMP="${RUNNER_TEMP:-/tmp}"
