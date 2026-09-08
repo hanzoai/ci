@@ -36,7 +36,7 @@ on:
           of your own self-hosted runners instead. There is no arc pool — arc
           (arcd) is retired, and no label here is served by anything but the fleet.
         type: string
-        default: '["hanzo-build-linux-amd64"]'
+        default: '["linux-amd64"]'
       mode:
         description: >-
           Where the IMAGE is built. `buildx` (default) builds it on this runner.
@@ -2000,7 +2000,7 @@ jobs:
             # arm64 rides buildx QEMU (binfmt below) while the amd64 pool takes the job;
             # pure-Go (CGO_ENABLED=0) Dockerfiles honouring $TARGETARCH cross-compile and
             # pay nothing either way. The bare-metal arm64 host is declared as
-            # hanzo-build-linux-arm64 in universe/infra/runners/spark/config.yaml; once it
+            # linux-arm64 in universe/infra/runners/spark/config.yaml; once it
             # takes jobs, arm64 is built natively and the emulation goes away on its own.
             plats=$(echo "$img"|jq -r '(.platforms // ["linux/amd64","linux/arm64"]) | join(",")')
             # ---- Refuse a Go builder older than the module it compiles -------
