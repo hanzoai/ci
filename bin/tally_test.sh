@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tests for the `tally` function that decides whether a test gate reported any
 # result. There is no bin/tally: the function lives inside the one definition of
-# the pipeline, .hanzo/workflows/build.yml, and this suite LIFTS IT OUT and runs
+# the pipeline, .github/workflows/build.yml, and this suite LIFTS IT OUT and runs
 # it. So there is nothing to keep in step — what is tested here is the same text
 # the runner executes, and a rule edited in one place cannot drift from a rule
 # tested in another.
@@ -17,7 +17,7 @@
 # Run: bash bin/tally_test.sh
 set -uo pipefail
 cd "$(dirname "$0")/.."
-DEF=.hanzo/workflows/build.yml
+DEF=.github/workflows/build.yml
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail=0
 

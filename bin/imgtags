@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# imgtags — the tags an image build publishes. One rule, every build lane.
+#
+#   imgtags <image-repo> <version> <short-sha> <platforms> [tag-suffix]
+#
+#     imgtags ghcr.io/hanzoai/console 8.5.200 a1b2c3d linux/amd64
+#       ghcr.io/hanzoai/console:sha-a1b2c3d-amd64
+#       ghcr.io/hanzoai/console:8.5.200
+#
+# One ref per line, the immutable sha- ref FIRST and the version refs after it.
+# That order is the contract: a lane that can publish only one ref at a time
+# publishes the first and aliases the rest onto the digest it pushed.
+#
+# WHY THIS IS A SCRIPT AND NOT INLINE SHELL: build.yml has two lanes. `buildx`
+# hands the whole list to `docker buildx --push`; `delegate` POSTs one ref to a
+# build door that takes exactly one. Written twice the shape is right twice and
+# then wrong once, and the wrong once is silent — the delegate lane published
+# sha-<short7> alone, so `pin.sh` (semver, anchored, nothing else) refused every
+# image those repos built and no version of them could be deployed. bin/imgver
+# is the same argument about the NUMBER; this is the argument about the TAGS.
+#
+# THE RULE:
+#   sha-<short7>   every build, immutable, for forensics. It carries the
+#                  architecture when the build is single-arch, because that is
+#                  the shape single-arch deploys already pin; a multi-arch build
+#                  publishes the arch-neutral manifest-list tag.
+#   <version>      what the fleet PINS, VERBATIM. On a release build that is the
+#                  git tag (v1.26.19) — the shape a universe CR names, and
+#                  stripping the v is why releases used to be finished by
+#                  hand-`crane copy`ing sha-<short7> onto a semver a human typed.
+#                  On a branch build it is the number bin/imgver derived, so a
+#                  version goes on every build rather than only the ones somebody
+#                  remembered to tag.
+#   <version#v>    the v-stripped alias, kept for CRs already pinned that way
+#                  (world 2.4.51), and skipped when a repo tags without a v.
+# A tag-suffix (hanzo.yml `tag-suffix`, e.g. ce/ee) qualifies every one of them.
+# There is no `<version>-amd64` alias: no CR in the fleet pinned one.
+#
+# NO `latest`: it names whatever finished most recently, so two digests wear it
+# within a day and a pull is a race rather than a choice.
+set -euo pipefail
+
+repo="${1:?usage: imgtags <image-repo> <version> <short-sha> <platforms> [tag-suffix]}"
+ver="${2:-}"
+short="${3:-}"
+plats="${4:-}"
+sfx="${5:-}"
+
+# A build that cannot name a version is a broken build. Refusing here is what
+# stops a lane from falling back to sha-<short> and publishing an image the
+# fleet has no way to pin.
+[ -n "$ver" ] || { echo "imgtags: no version for $repo. The release lane passes the git tag, the branch lane passes bin/imgver's number. We don't ship shas." >&2; exit 1; }
+[ -n "$short" ] || { echo "imgtags: no commit for $repo — the sha- tag is what makes a build identifiable." >&2; exit 1; }
+[ -n "$plats" ] || { echo "imgtags: no platforms for $repo — the sha- tag's shape is decided by how many there are." >&2; exit 1; }
+
+# `linux/amd64,linux/arm64` from the buildx lane, `linux/amd64` space-joined from
+# the delegate lane: one list, either separator.
+set -- $(echo "$plats" | tr ',' ' ')
+
+# Single-arch keeps the architecture in the tag; multi-arch is the arch-neutral
+# manifest list, and naming an architecture on it would name one of its members.
+if [ $# -eq 1 ]; then
+  echo "${repo}:sha-${short}-${1##*/}${sfx:+-$sfx}"
+else
+  echo "${repo}:sha-${short}${sfx:+-$sfx}"
+fi
+
+echo "${repo}:${ver}${sfx:+-$sfx}"
+if [ "${ver#v}" != "$ver" ]; then
+  echo "${repo}:${ver#v}${sfx:+-$sfx}"
+fi
