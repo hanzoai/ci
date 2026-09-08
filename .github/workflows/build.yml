@@ -2600,7 +2600,12 @@ jobs:
         # reports success when it verified nothing is worse than one that never
         # verified, because it is indistinguishable from a working one until a
         # site quietly stops updating.
-        if: inputs.mode != 'delegate' && github.event_name != 'pull_request'
+        # NOT gated on mode. How the IMAGE is built — buildx here, or delegated
+        # to the in-cluster builder — says nothing about whether a static export
+        # should reach the edge. Tying them meant a delegated build shipped the
+        # image and left the site on its previous release, which is the half-roll
+        # this lane exists to avoid.
+        if: github.event_name != 'pull_request'
         env:
           API: ${{ vars.API_ENDPOINT || 'https://api.hanzo.ai' }}
         run: |
