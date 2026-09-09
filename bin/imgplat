@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# imgplat — the architectures a published image actually serves. One rule,
+# every build lane.
+#
+#   imgplat <image-ref>                     # print them, one per line
+#   imgplat <image-ref> <expected>          # print them, and refuse a mismatch
+#
+#     imgplat ghcr.io/hanzoai/cloud:1.2.3 linux/amd64,linux/arm64
+#
+# WHY A BUILD READS BACK WHAT IT JUST PUSHED
+#
+# A push exiting 0 is the writer's account of a write. The manifest the registry
+# answers with is the fact, and the two disagree in a way nothing downstream can
+# see: an index carrying ONE manifest and an index carrying two are both indexes,
+# both resolve, both pull, and only one of them runs on an arm64 node.
+#
+# Measured on ghcr.io/hanzoai/cloud:sha-ac39bda — an index with a single
+# linux/amd64 manifest, published under the arch-neutral tag shape that
+# bin/imgtags reserves for multi-arch. The tag says "any architecture", the bytes
+# say amd64, and a fleet pinning it onto an arm64 node gets `exec format error`
+# at container start — long after the run went green.
+#
+# So the platform set is asserted where the digest is already asserted, by the
+# path a kubelet takes: read the manifest from the registry.
+#
+# WHY THIS IS A SCRIPT. Two lanes publish images. `buildx` pushes from the runner
+# and holds a docker login; `delegate` posts to the build door and holds a crane
+# login. Written twice, the rule is right twice and then wrong once, and the
+# wrong once is silent -- the same argument bin/imgtags makes about tag SHAPE and
+# bin/imgver about the NUMBER. This is the argument about ARCHITECTURE.
+set -euo pipefail
+
+ref="${1:?usage: imgplat <image-ref> [expected-platforms]}"
+want="${2:-}"
+
+# `unknown/unknown` is an attestation manifest, not a runnable image: buildx
+# attaches provenance and SBOM as index members carrying that platform. Counting
+# them would report a single-arch image as serving two.
+plats() {
+  jq -r '
+    if .manifests then
+      [.manifests[] | select(.platform.architecture != "unknown")
+                    | .platform.os + "/" + .platform.architecture
+                    + (if .platform.variant then "/" + .platform.variant else "" end)]
+    else
+      []
+    end | .[]'
+}
+
+# crane where the delegate lane has it, buildx imagetools where the buildx lane
+# does. Both print the raw manifest, so the parse above is the same either way.
+# A single-arch push is a manifest rather than an index and has no .manifests at
+# all, which is why the config is read for its own architecture in that case.
+raw() {
+  if command -v crane >/dev/null 2>&1; then
+    crane manifest "$ref"
+  elif docker buildx version >/dev/null 2>&1; then
+    docker buildx imagetools inspect "$ref" --raw
+  else
+    echo "imgplat: neither crane nor docker buildx is on PATH, so $ref cannot be read back. The lane that publishes an image is the lane that must prove what it published." >&2
+    exit 1
+  fi
+}
+
+m=$(raw)
+got=$(printf '%s' "$m" | plats | sort -u | paste -sd, -)
+
+# No .manifests: a bare manifest. Its architecture lives in the config blob, and
+# crane says it in one call.
+if [ -z "$got" ]; then
+  if command -v crane >/dev/null 2>&1; then
+    got=$(crane config "$ref" | jq -r '.os + "/" + .architecture')
+  else
+    got=$(printf '%s' "$m" | jq -r '(.platform.os // "linux") + "/" + (.platform.architecture // "unknown")')
+  fi
+fi
+
+printf '%s\n' "$got" | tr ',' '\n'
+
+[ -n "$want" ] || exit 0
+
+# Compare as SETS. buildx is handed the list in hanzo.yml's order and a registry
+# answers in the order it stored, so an ordered comparison fails on two images
+# that are the same image.
+norm() { printf '%s' "$1" | tr ', ' '\n\n' | sed '/^$/d' | sort -u | paste -sd, -; }
+w=$(norm "$want"); g=$(norm "$got")
+[ "$w" = "$g" ] && exit 0
+
+cat >&2 <<MSG
+imgplat: $ref serves $g, and hanzo.yml declares $w.
+
+A tag that names architectures it does not carry is the failure this check
+exists to stop: it resolves, it pulls, and it dies at container start on the
+node that needed the missing one. Either the build did not produce every
+platform, or the tag was written onto the wrong bytes.
+MSG
+exit 1

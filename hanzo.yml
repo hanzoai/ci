@@ -307,6 +307,15 @@ test:
     # else, so those repos built green and could not be deployed. Offline: the
     # rule is a pure function and the lane check reads the workflow file.
     run: bash bin/imgtags_test.sh
+  - name: imgplat
+    # bin/imgplat decides whether an image SERVES what hanzo.yml declared, and this
+    # asserts both build lanes read the manifest back before the run goes green. A
+    # push exiting 0 is the writer's account of a write; an index carrying one
+    # manifest and an index carrying two both resolve and both pull, and only one
+    # of them runs on an arm64 node. Measured on ghcr.io/hanzoai/cloud:sha-ac39bda,
+    # an arch-neutral tag over a single linux/amd64 manifest. Offline: a stub crane
+    # answers with manifests taken from real registry replies.
+    run: bash bin/imgplat_test.sh
   - name: vendormark
     # bin/vendormark is the gate the build lane runs against every checkout: it
     # refuses a site-generator vendor's branding in a tracked path, in tracked
