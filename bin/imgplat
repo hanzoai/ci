@@ -48,18 +48,23 @@ plats() {
 }
 
 # crane where the delegate lane has it, buildx imagetools where the buildx lane
-# does. Both print the raw manifest, so the parse above is the same either way.
-# A single-arch push is a manifest rather than an index and has no .manifests at
-# all, which is why the config is read for its own architecture in that case.
+# does. Both print the raw manifest, so the parse below is the same either way.
+#
+# EVERY READER IS TRIED, not the first one present. A private repository answers
+# a reader that holds no credential with the same "not found" it gives a name
+# that does not exist, and the two lanes log in with different tools -- so
+# choosing by `command -v` picks the installed one rather than the authorized
+# one, and a build fails claiming its own image is missing.
 raw() {
+  local out
   if command -v crane >/dev/null 2>&1; then
-    crane manifest "$ref"
-  elif docker buildx version >/dev/null 2>&1; then
-    docker buildx imagetools inspect "$ref" --raw
-  else
-    echo "imgplat: neither crane nor docker buildx is on PATH, so $ref cannot be read back. The lane that publishes an image is the lane that must prove what it published." >&2
-    exit 1
+    out=$(crane manifest "$ref" 2>/dev/null) && [ -n "$out" ] && { printf '%s' "$out"; return 0; }
   fi
+  if docker buildx version >/dev/null 2>&1; then
+    out=$(docker buildx imagetools inspect "$ref" --raw 2>/dev/null) && [ -n "$out" ] && { printf '%s' "$out"; return 0; }
+  fi
+  echo "imgplat: nothing here could read $ref back. crane and docker buildx are the two readers, and one of them has to hold the credential the registry wants -- the lane that publishes an image is the lane that must prove what it published." >&2
+  return 1
 }
 
 m=$(raw)
@@ -68,11 +73,9 @@ got=$(printf '%s' "$m" | plats | sort -u | paste -sd, -)
 # No .manifests: a bare manifest. Its architecture lives in the config blob, and
 # crane says it in one call.
 if [ -z "$got" ]; then
-  if command -v crane >/dev/null 2>&1; then
-    got=$(crane config "$ref" | jq -r '.os + "/" + .architecture')
-  else
-    got=$(printf '%s' "$m" | jq -r '(.platform.os // "linux") + "/" + (.platform.architecture // "unknown")')
-  fi
+  got=$(crane config "$ref" 2>/dev/null | jq -r '.os + "/" + .architecture' 2>/dev/null || true)
+  [ -n "$got" ] && [ "$got" != "null/null" ] \
+    || got=$(printf '%s' "$m" | jq -r '(.platform.os // "linux") + "/" + (.platform.architecture // "unknown")')
 fi
 
 printf '%s\n' "$got" | tr ',' '\n'
