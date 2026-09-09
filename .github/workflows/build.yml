@@ -1905,7 +1905,7 @@ jobs:
           # logged the request not at all. A build should not leave the cluster to
           # reach a service beside it. RUNNER_URL still overrides for anything
           # running outside.
-          RUNNER_URL: ${{ vars.RUNNER_URL || 'http://cloud.hanzo.svc.cluster.local:8000/v1/build' }}
+          RUNNER_URL: ${{ vars.RUNNER_URL || 'http://cloud.hanzo.svc.cluster.local:8000/v1/platform/runner' }}
           # The version tag is WRITTEN by this job, onto the manifest the door
           # pushed, so this lane needs the registry credential the buildx lane's
           # login steps hold — and the registry read bin/imgver takes its
