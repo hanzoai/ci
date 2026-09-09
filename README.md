@@ -484,7 +484,19 @@ context is the whole repository at one commit).
 
 `platforms:` is the reason to delegate rather than a reason not to. The door
 schedules a build per architecture and the cluster holds a node of each, so this
-is the lane that produces a two-manifest index without emulating anything.
+is the lane that produces a two-manifest index without emulating anything. The
+POST carries the list, and `image` is the ref every platform shares:
+
+```json
+{ "repo": "...", "sha": "...", "dockerfile": "Dockerfile",
+  "image": "ghcr.io/<org>/<repo>:sha-<short7>",
+  "platforms": ["linux/amd64", "linux/arm64"] }
+```
+
+One ref, one index, every declared platform under it — which is why the sha- tag
+loses its architecture suffix as soon as there is more than one (`bin/imgtags`).
+A door that builds fewer than the list publishes an index the lane then refuses,
+because `bin/imgplat` reads the manifest back before the run goes green.
 
 `mode: buildx` (the default) is unchanged — existing repos keep running buildx on
 the fleet runner, so delegation is strictly opt-in.
