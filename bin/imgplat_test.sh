@@ -58,6 +58,11 @@ m "$IDX2"; r "both declared, both served"                0 x:1 linux/amd64,linux
 m "$IDX2"; r "order is not part of the comparison"      0 x:1 linux/arm64,linux/amd64
 m "$IDX1"; r "an arch-neutral tag over one platform"    1 x:1 linux/amd64,linux/arm64
 m "$IDX2"; r "a second platform nobody declared"        1 x:1 linux/amd64
+V8='{"manifests":[{"platform":{"os":"linux","architecture":"amd64"}},{"platform":{"os":"linux","architecture":"arm64","variant":"v8"}}]}'
+V7='{"manifests":[{"platform":{"os":"linux","architecture":"arm","variant":"v7"}}]}'
+m "$V8";  r "arm64/v8 is arm64"                         0 x:1 linux/amd64,linux/arm64
+m "$V7";  r "arm/v7 is not arm/v6"                      1 x:1 linux/arm/v6
+m "$V7";  r "arm/v7 is arm/v7"                          0 x:1 linux/arm/v7
 m "$IDX1"; r "no expectation asserts nothing"           0 x:1
 
 # --- one rule, both lanes ----------------------------------------------------
