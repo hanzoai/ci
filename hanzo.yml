@@ -10,6 +10,13 @@ images:
     context: .
     dockerfile: Dockerfile
     repo: ghcr.io/hanzoai/ci
+    # Both architectures, one manifest list. The deployment carries no
+    # nodeSelector, so the kubelet resolves whichever child matches the node it
+    # lands on; a single-arch image answers `no match for platform in manifest`
+    # on half the cluster, or runs under qemu where binfmt is registered. The
+    # default when this line is absent is linux/amd64 alone, which is how the
+    # v1.0.x series shipped amd64 only.
+    platforms: [linux/amd64, linux/arm64]
 
 test:
   - name: go-vet
