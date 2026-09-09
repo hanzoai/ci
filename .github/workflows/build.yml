@@ -217,6 +217,15 @@ jobs:
       # closes that hole; without it "installs go through our registry" is true
       # of the dependencies and false of the package manager fetching them.
       COREPACK_NPM_REGISTRY: https://pkg.hanzo.ai
+      # ONE DOCKER CONFIG PER RUNNER, not one per machine. Several runner
+      # services share a user on the build hosts, so they share
+      # ~/.docker/config.json, and docker/login-action logs out in its post
+      # step: a job that finishes takes the registry credential out from under
+      # a job that is still pushing. It surfaces as "unauthenticated" or a
+      # request for an anonymous token, in the job that did nothing wrong, and
+      # only when two builds overlap. RUNNER_TEMP is per runner, so this is the
+      # whole fix.
+      DOCKER_CONFIG: ${{ runner.temp }}/docker
     steps:
       - uses: actions/checkout@v4
         with:
