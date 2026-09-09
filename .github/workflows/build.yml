@@ -1907,16 +1907,18 @@ jobs:
             # directory would copy the root instead and build a different image
             # under the same tag.
             [ "$ctx" = "." ] || refuse "images[$name] declares context: $ctx, and the build door's context is the whole repository at one commit — a relative COPY would read the root instead. Build on the runner (drop mode: delegate)."
-            # More than one platform, or one that is not amd64: the door builds
-            # on the pool it has, so a second tag would name a second image that
-            # was never built for that architecture.
-            # The default stays amd64 HERE, unlike the buildx lane above, because the door
-            # builds on the one pool it has. A repo that never asked for a second
-            # architecture must not be refused by a default it did not set; delegating is
-            # what gives the second one up, and saying `platforms:` explicitly is how a
-            # repo asks for it and gets told to build on the runner instead.
-            plat=$(echo "$img"|jq -r '(.platforms // ["linux/amd64"]) | join(" ")')
-            [ "$plat" = "linux/amd64" ] || refuse "images[$name] declares platforms: $plat, and the build door builds linux/amd64 — the other tags would name images built for the wrong architecture. Build on the runner (drop mode: delegate)."
+            # THIS IS THE LANE THAT CAN BUILD BOTH ARCHITECTURES NATIVELY. The door
+            # schedules a Job per platform and the cluster holds a node of each, so
+            # `platforms:` is carried to it rather than refused: nothing is emulated, and
+            # the arm64 half lands on the arm64 machine that is otherwise idle while the
+            # amd64 one carries the queue.
+            #
+            # Same default as the buildx lane and the same key, because a repo that moves
+            # between lanes must not change what it publishes. The read-back below is what
+            # keeps the field honest when the door has not yet learnt it: an image that
+            # comes back serving fewer platforms than hanzo.yml declares fails the run
+            # instead of publishing an arch-neutral tag over one architecture.
+            plat=$(echo "$img"|jq -r '(.platforms // ["linux/amd64"]) | join(",")')
             # Same Go-builder check the buildx lane runs. It belongs here too:
             # delegating the build moves WHERE it runs, not whether the image
             # can compile the module, and a mismatch sent to the door fails on a
@@ -1947,9 +1949,10 @@ jobs:
             # produce a second digest for one commit, which is a version tag
             # naming different bytes from the sha- tag beside it.
             image=$(echo "$refs" | head -1)
-            echo "$refs" | tail -n +2 | sed "s|^|$image |" >> "$TMP/alias.txt"
+            echo "$refs" | tail -n +2 | sed "s|^|$image |;s|\$| $plat|" >> "$TMP/alias.txt"
             body=$(jq -nc --arg repo "$REPO" --arg sha "$SHA" --arg image "$image" --arg dockerfile "$df" \
-              '{repo:$repo,sha:$sha,image:$image,dockerfile:$dockerfile}')
+              --arg plat "$plat" \
+              '{repo:$repo,sha:$sha,image:$image,dockerfile:$dockerfile,platforms:($plat|split(","))}')
             echo "::group::delegate $name -> $image"
             code=$(curl -sS -o "$TMP/delegate.out" -w '%{http_code}' -X POST "$RUNNER_URL" \
               -H "Authorization: Bearer $HANZO_API_TOKEN" -H 'Content-Type: application/json' -d "$body")
@@ -2009,7 +2012,7 @@ jobs:
               [ -n "$rp" ] || refuse "no credential for $host, so the version tag cannot be written and this build would publish nothing the fleet can pin. GHCR reads GH_PAT, the KMS GitHub token or the automatic token; any other host reads the KMS registry credential."
               echo "$rp" | crane auth login "$host" -u "$ru" --password-stdin
             done
-            while read -r src dst; do
+            while read -r src dst plat; do
               # 40 minutes at 10s. The door builds in-cluster from a cache this
               # run has no view of, so the budget is a cold build's, and running
               # out is a refusal: the image is not there to be pinned.
@@ -2020,6 +2023,11 @@ jobs:
                 sleep 10
               done
               [ -n "$dig" ] || refuse "$src never reached the registry — the delegated build did not push it within 40 minutes. Its logs are the build door's, not this run's."
+              # The door said 202 and nothing since, so what it built is read from the
+              # registry rather than taken from the answer. A tag is written onto these
+              # bytes next, and writing an arch-neutral name onto one architecture is the
+              # exact shape this catches — see bin/imgplat.
+              "$CI_HOME/bin/imgplat" "$src" "$plat" >/dev/null
               crane tag "$src" "${dst##*:}"
               # Read the DESTINATION back. `crane tag` exiting 0 is the writer's
               # account of a write; the digest the registry answers with is the
@@ -2088,25 +2096,34 @@ jobs:
             # (e.g. "ce"/"ee") it qualifies every tag; when absent the tags are
             # clean (no trailing dash). Build + deploy must agree on this shape.
             sfx=$(echo "$img"|jq -r '."tag-suffix" // ""')
-            # BOTH architectures by default. The lab runs amd64 and arm64, so an image
-            # built for one of them deploys on half the fleet, and which half is decided
-            # by whichever pool happened to build it. A repo that genuinely cannot serve
-            # one architecture says so, and is then the exception that is written down:
-            #   platforms: [linux/amd64]
+            # `platforms:` names the architectures the image must RUN on. Default
+            # linux/amd64, which is what every image in the estate serves today, so a
+            # repo that says nothing keeps the image it already had. A repo that needs
+            # both says so once:
             #
-            # Nothing pinned the old shape, which is what makes flipping this safe.
-            # Single-arch tags as `sha-<short>-amd64`, multi-arch as the arch-neutral
-            # `sha-<short>`; a sweep of every values file and manifest across the hanzo,
-            # lux and zoo universes found ten sha pins, all arch-neutral, none carrying
-            # -amd64. The semver tag every build also publishes never carried an arch at
-            # all, and the semver is what the fleet pins.
+            #   platforms: [linux/amd64, linux/arm64]
             #
-            # arm64 rides buildx QEMU (binfmt below) while the amd64 pool takes the job;
-            # pure-Go (CGO_ENABLED=0) Dockerfiles honouring $TARGETARCH cross-compile and
-            # pay nothing either way. The bare-metal arm64 host is declared as
-            # linux-arm64 in universe/infra/runners/spark/config.yaml; once it
-            # takes jobs, arm64 is built natively and the emulation goes away on its own.
-            plats=$(echo "$img"|jq -r '(.platforms // ["linux/amd64","linux/arm64"]) | join(",")')
+            # THIS LANE BUILDS NATIVELY OR NOT AT ALL. A job holds one runner and a
+            # runner is one machine, so a second architecture here can only be emulated
+            # -- and an emulated build is slow enough to be the reason a queue forms on
+            # the one node that can serve it. `mode: delegate` is where a repo gets both
+            # without emulating either: the door schedules a build per architecture, on a
+            # node of that architecture. The refusal below says so rather than reaching
+            # for binfmt.
+            plats=$(echo "$img"|jq -r '(.platforms // ["linux/amd64"]) | join(",")')
+            # The architecture this runner IS, in buildx's spelling, read from the kernel
+            # rather than from the label the caller passed: a label is what somebody
+            # asked for and uname is what arrived.
+            case "$(uname -m)" in
+              x86_64|amd64)  self=linux/amd64 ;;
+              aarch64|arm64) self=linux/arm64 ;;
+              *)             self="linux/$(uname -m)" ;;
+            esac
+            for p in ${plats//,/ }; do
+              [ "$p" = "$self" ] && continue
+              echo "::error::images[$name] declares platforms: $plats, and this runner is $self. Building $p here means emulating it, which is slower than the fleet can absorb and is why one node carries every build. Two ways to get $p natively: \`with: { mode: delegate }\` builds each architecture in-cluster on a node of that architecture, or a caller that passes \`runner:\` for $p builds it on a machine of that kind."
+              exit 1
+            done
             # ---- Refuse a Go builder older than the module it compiles -------
             # The official golang images set GOTOOLCHAIN=local, so a go.mod
             # requiring a newer Go than the base image does not degrade — it
@@ -2169,9 +2186,6 @@ jobs:
             # naming schemes depending on where its image was built. Read that
             # script for the rule.
             #
-            # arm64 rides buildx QEMU while the amd64 pool takes the job; the
-            # bare-metal arm64 host builds it natively once it takes jobs.
-            [ "$plats" = "linux/amd64" ] || docker run --privileged --rm tonistiigi/binfmt --install arm64 >/dev/null 2>&1 || true
             TAGS=$("$CI_HOME/bin/imgtags" "$repo" "${ver:-$REL}" "$SHORT" "$plats" "$sfx" | sed 's/^/-t /' | tr '\n' ' ')
             echo "::group::build $name → $repo (${sfx}) [$plats]"
             # --build-arg assembly: hanzo.yml `args` + `build_secrets` (KMS values
@@ -2252,6 +2266,12 @@ jobs:
               sleep 5
             done
             [ -n "$dig" ] || { echo "::error::$pin not resolvable after push"; exit 1; }
+            # And what it SERVES, which resolving does not say. An index carrying one
+            # manifest and an index carrying two both resolve and both pull; only one of
+            # them runs on an arm64 node, and the difference is invisible until a pod
+            # exits with `exec format error` on a tag whose name promised any
+            # architecture. bin/imgplat is the same read a kubelet does.
+            "$CI_HOME/bin/imgplat" "$pin" "$plats" >/dev/null
             echo "| \`$pin\` | \`$dig\` |" >> "$RUNNER_TEMP/pins.md"
             # Dual-host: mirror the exact tag set to oci.hanzo.ai (server-
             # side manifest copy — no rebuild). ghcr.io/<org>/<name> →
