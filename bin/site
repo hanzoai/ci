@@ -310,6 +310,19 @@ pcode=$(post "$work"/sd-proj.json "$api/v1/projects" \
         '{slug:$s, name:$s} + (if $u=="" then {} else {repo:{url:$u, branch:$b}} end)')")
 case "$pcode" in
   200|201|409) : ;;  # created now, or already there — either is the state we need
+  # Creating a project and publishing to one are separate rights, and a
+  # credential can hold the second without the first. Refused means only that
+  # this key may not open a project; whether the project is there is a
+  # different question, and asking it is one GET. A key that may publish to an
+  # existing project should publish to it.
+  401|403)
+    if [ "$(curl -sS -o /dev/null -w '%{http_code}' \
+             -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN" \
+             "$api/v1/projects/$slug" || true)" = 200 ]; then
+      echo "::notice::$slug exists; this key may publish to it but not create projects"
+    else
+      echo "::error::ensure project $slug returned HTTP $pcode"; head -c 400 "$work"/sd-proj.json; echo; exit 1
+    fi ;;
   *) echo "::error::ensure project $slug returned HTTP $pcode"; head -c 400 "$work"/sd-proj.json; echo; exit 1 ;;
 esac
 
