@@ -270,7 +270,7 @@ jobs:
           # Naming the list here also makes the release order self-announcing: a
           # pipeline that has grown a tool refuses at step one, and says which ref
           # it read and what was missing from it.
-          need="certclaims conflictmarkers gover ignoretracked imgtags imgver modsize publishable site vendormark"
+          need="certclaims conflictmarkers gover ignoretracked imgplat imgtags imgver modsize publishable site vendormark"
           miss='<no host answered>'
           for url in https://git.hanzo.ai/hanzoai/ci https://github.com/hanzoai/ci; do
             echo "::group::clone ${url}@${ref}"
