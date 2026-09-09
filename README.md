@@ -163,12 +163,43 @@ to get it.
 by name, writes a temporary file or resolves a uid needs `static` instead. Go
 compiled with `-tags timetzdata` carries its own zoneinfo and stays on `scratch`.
 
-### Both arches, or it does not ship
+### `platforms:` — the architectures an image must run on
 
-The lab is one amd64 node and one arm64 node. The image lane builds
-`[linux/amd64, linux/arm64]` unless a repo declares otherwise, so a base
-published for one of them wedges every dependent onto half the fleet. Check
-before adopting one:
+The lab is one amd64 node and one arm64 node. An image built for one of them
+deploys on half the fleet, and a base published for one wedges every dependent
+onto that half. Declared once, on the image entry:
+
+```yaml
+images:
+  - { name: api, context: ., repo: ghcr.io/<org>/<repo>, platforms: [linux/amd64, linux/arm64] }
+```
+
+**Default `[linux/amd64]`**, which is what every image in the estate serves
+today, so a repo that says nothing keeps the image it already had.
+
+**A platform is built on a machine of that architecture.** Emulation is not a
+fallback here: it is several times slower than the native build, and the node it
+runs on is the node already carrying every other build. So the two lanes divide
+the work by what each can actually do.
+
+| lane | what it builds | a platform it is not |
+|---|---|---|
+| `buildx` (default) | the runner's own architecture, natively | refuses, and names the two ways below |
+| `mode: delegate` | every declared platform, each on a node of that architecture | — |
+
+So a repo wanting both arches either delegates, or is called twice with a
+`runner:` of each architecture. `binaries:` is unaffected and still defaults to
+both: a Go cross-compile is native work, and there is no manifest to join.
+
+**Both lanes read the manifest back before the run goes green.** A push exiting 0
+is the writer's account of a write; the tag shape is decided by how many
+platforms were asked for (`bin/imgtags`: single-arch keeps the architecture in
+the `sha-` tag, multi-arch is the arch-neutral one), and writing an arch-neutral
+name onto one architecture is a tag that resolves, pulls, and dies at container
+start with `exec format error`. `bin/imgplat` reads what the registry serves and
+fails the run on a mismatch. Measured live before it existed:
+`ghcr.io/hanzoai/cloud:sha-ac39bda` is an index with a single `linux/amd64`
+manifest under the arch-neutral name. The same read, by hand:
 
 ```bash
 crane manifest <ref> | jq -r '.manifests[].platform | .os+"/"+.architecture'
@@ -179,14 +210,6 @@ found across the estate is one of **ours** — `hanzoai/static` v0.5.1 through
 v0.5.9, `hanzoai/spa` 1.4.8 and 1.4.11, `hanzoai/nodejs` v24.18.0, and
 `hanzoai/datastore` 26.6.1.1, which is arm64 alone and so fails the other way.
 The upstreams are not the problem; publishing is.
-
-A repo that genuinely serves one architecture says so, and is then an exception
-someone can read:
-
-```yaml
-images:
-  - { name: api, context: ., repo: ghcr.io/<org>/<repo>, platforms: [linux/amd64] }
-```
 
 ### Not everything can be small
 
@@ -454,11 +477,14 @@ repository, the commit this run gated, the output image and the Dockerfile; the
 organization is the door's to read off that identity, so there is no field for
 one and nothing for a caller to get wrong.
 
-Three declarations the door cannot express, and the lane refuses each before it
+Two declarations the door cannot express, and the lane refuses each before it
 POSTs rather than publishing an image that is not the one the repo asked for:
-`build_secrets` (it mounts no KMS), a `context` below the repository root (its
-context is the whole repository at one commit), and a `platforms` list that is
-anything but `linux/amd64`.
+`build_secrets` (it mounts no KMS) and a `context` below the repository root (its
+context is the whole repository at one commit).
+
+`platforms:` is the reason to delegate rather than a reason not to. The door
+schedules a build per architecture and the cluster holds a node of each, so this
+is the lane that produces a two-manifest index without emulating anything.
 
 `mode: buildx` (the default) is unchanged — existing repos keep running buildx on
 the fleet runner, so delegation is strictly opt-in.
