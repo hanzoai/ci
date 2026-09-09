@@ -1961,12 +1961,22 @@ jobs:
             # the arm64 half lands on the arm64 machine that is otherwise idle while the
             # amd64 one carries the queue.
             #
-            # Same default as the buildx lane and the same key, because a repo that moves
-            # between lanes must not change what it publishes. The read-back below is what
-            # keeps the field honest when the door has not yet learnt it: an image that
-            # comes back serving fewer platforms than hanzo.yml declares fails the run
-            # instead of publishing an arch-neutral tag over one architecture.
-            plat=$(echo "$img"|jq -r '(.platforms // ["linux/amd64"]) | join(",")')
+            # BOTH BY DEFAULT HERE, unlike the buildx lane, because this lane is the one
+            # that can. Measured 2026-09-09: of 211 running pods, 148 were pinned to
+            # amd64 across 118 distinct images, and not one hanzoai image published an
+            # arm64 variant — so 163 pods sat on one node while a 20-core machine idled
+            # at 19%, and a taint on that node left amd64 CI with nowhere to run at all.
+            # A single-arch estate on a two-arch cluster is half a cluster.
+            #
+            # A repo that genuinely cannot serve arm64 -- a CUDA image, a vendored amd64
+            # binary -- says so once and keeps what it had:
+            #
+            #   platforms: [linux/amd64]
+            #
+            # The read-back below is what keeps the field honest: an image that comes
+            # back serving fewer platforms than hanzo.yml declares fails the run instead
+            # of publishing an arch-neutral tag over one architecture.
+            plat=$(echo "$img"|jq -r '(.platforms // ["linux/amd64","linux/arm64"]) | join(",")')
             # Same Go-builder check the buildx lane runs. It belongs here too:
             # delegating the build moves WHERE it runs, not whether the image
             # can compile the module, and a mismatch sent to the door fails on a
