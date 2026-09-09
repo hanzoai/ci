@@ -30,11 +30,14 @@ on:
     inputs:
       runner:
         description: >-
-          Runner labels as a JSON array. Default = the Hanzo `git-runner` fleet
-          on git.hanzo.ai, which is the ONLY pool serving these labels (we run
-          the build, metered as build minutes). Bring-your-own: pass the labels
-          of your own self-hosted runners instead. There is no arc pool — arc
-          (arcd) is retired, and no label here is served by anything but the fleet.
+          Runner labels as a JSON array. `linux-amd64` is served on both planes:
+          the ephemeral `git-runner` Jobs the forge starts on git.hanzo.ai, and
+          the org-level self-hosted runners registered on github.com. Which of
+          the two answers depends on where the repository builds, not on this
+          input. Either way we run the build, metered as build minutes.
+          Bring-your-own: pass the labels of your own self-hosted runners.
+          A GitHub org with no runner registered advertises nothing, and a job
+          asking a label nobody advertises queues with no error to read.
         type: string
         default: '["linux-amd64"]'
       mode:
