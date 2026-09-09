@@ -132,6 +132,89 @@ packages we do not publish. Moving those runs someone else's automation on our
 fleet. Sort every file into revive / rewrite / drop, then **delete the
 directory** — a dead file cannot accumulate in a directory that does not exist.
 
+## Bases — one axis, six answers
+
+The final stage is chosen by one question: **what does the artifact link?** Not
+the language, not the repo, not who wrote it.
+
+| The artifact needs | Final stage | Compressed, per arch |
+|---|---|---|
+| nothing but itself | `scratch` | 0 |
+| CA certs, zoneinfo, `/tmp`, `/etc/passwd`, `/etc/nsswitch.conf` | `gcr.io/distroless/static-debian12:nonroot` | 0.7 MB |
+| glibc — `CGO_ENABLED=1`, or a Rust gnu target | `gcr.io/distroless/base-debian12` | 7.8 MB |
+| libstdc++ or libgomp | `gcr.io/distroless/cc-debian12` | 8.8 MB |
+| a shell, at run time, on purpose | `alpine:3.24` | 3.7 MB |
+| an interpreter | that runtime's own `-slim` | — |
+
+Take the row you need, never the row above it. `base` is `static` plus glibc,
+gconv and the OpenSSL engines, and nothing else — the two image trees differ by
+those and by nothing more. A `CGO_ENABLED=0` Go binary opens none of them, so a
+static binary on `base` carries 7.1 MB it cannot call. `cc` is `base` plus
+libstdc++, libgcc_s and libgomp; ask for it only when `ldd` names them.
+
+`static` already holds `/etc/ssl/certs/ca-certificates.crt`, the whole of
+`/usr/share/zoneinfo`, `/tmp`, `/etc/passwd` and `/etc/nsswitch.conf`. A final
+stage that installs `ca-certificates` at run time is asking a package manager
+for a file the smaller base ships — and paying a network fetch inside the build
+to get it.
+
+`scratch` beats every distroless variant and 32 repos already use it. It has no
+`/tmp`, no zoneinfo and no account database, so a binary that reads a timezone
+by name, writes a temporary file or resolves a uid needs `static` instead. Go
+compiled with `-tags timetzdata` carries its own zoneinfo and stays on `scratch`.
+
+### Both arches, or it does not ship
+
+The lab is one amd64 node and one arm64 node. The image lane builds
+`[linux/amd64, linux/arm64]` unless a repo declares otherwise, so a base
+published for one of them wedges every dependent onto half the fleet. Check
+before adopting one:
+
+```bash
+crane manifest <ref> | jq -r '.manifests[].platform | .os+"/"+.architecture'
+```
+
+Every base in the table above carries both, measured. Every single-arch image
+found across the estate is one of **ours** — `hanzoai/static` v0.5.1 through
+v0.5.9, `hanzoai/spa` 1.4.8 and 1.4.11, `hanzoai/nodejs` v24.18.0, and
+`hanzoai/datastore` 26.6.1.1, which is arm64 alone and so fails the other way.
+The upstreams are not the problem; publishing is.
+
+A repo that genuinely serves one architecture says so, and is then an exception
+someone can read:
+
+```yaml
+images:
+  - { name: api, context: ., repo: ghcr.io/<org>/<repo>, platforms: [linux/amd64] }
+```
+
+### Not everything can be small
+
+These are exempt, by what they run rather than by who owns them:
+
+- `git` — a forge runs git, ssh and shell hooks. `alpine:3.24`.
+- `sql`, `sql-vector` — postgres's entrypoint runs initdb and locale setup.
+- `datastore` — ClickHouse's entrypoint and its bundled tool symlinks.
+- `kv`, `redis` — built from source, and they open libssl at run time.
+- the 13 node and 10 python repos — there, the runtime *is* the base.
+- `live`, `painter`, `stream-legacy`, `open-instruct` — the CUDA driver stack.
+- `cd`, `deploy`, `pkg`, `o11y-operator`, `zrok`, `insights`, `bot-hub` — a
+  vendored upstream runtime, which we take as it is published.
+
+### Why these are pulled and not mirrored
+
+The licence permits a mirror. `static-debian12` is five Debian packages —
+base-files, ca-certificates, media-types, netbase, tzdata — each carrying its
+copyright file in the image, all redistributable.
+
+The cost is not the 1.4 MB. A mirror is a subscription: distroless rebuilds
+whenever Debian patches one of those five, and a copy nobody re-syncs pins us to
+the CVE while reporting healthy. That experiment has already run twice.
+`ghcr.io/hanzoai/alpine:3.22` and `ghcr.io/hanzoai/nodejs:v24.18.0` sit in the
+registry with no repo, no `hanzo.yml` and no build that produces them; the first
+answers 403 to a pull, the second is amd64 alone. Both are worse than the
+upstream they stand in for. Mirror when a job owns the refresh — not before.
+
 ## Deploying
 
 This workflow does not deploy. It builds an image and publishes it.
@@ -225,7 +308,7 @@ same bits, and nobody rebuilds the world to ship a plugin.
 binaries:
   - name: billing
     main: ./cmd/billing              # the Go package; default "."
-    platforms: [linux/amd64, linux/arm64]   # default [linux/amd64]
+    platforms: [linux/amd64, linux/arm64]   # this is the default
     ldflags: "-s -w"                 # default
 ```
 
