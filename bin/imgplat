@@ -82,10 +82,21 @@ printf '%s\n' "$got" | tr ',' '\n'
 
 [ -n "$want" ] || exit 0
 
-# Compare as SETS. buildx is handed the list in hanzo.yml's order and a registry
-# answers in the order it stored, so an ordered comparison fails on two images
-# that are the same image.
-norm() { printf '%s' "$1" | tr ', ' '\n\n' | sed '/^$/d' | sort -u | paste -sd, -; }
+# Compare as SETS, and in containerd's spelling. Two normalizations, both
+# measured against real registry replies:
+#
+#   ORDER is not information -- buildx is handed the list in hanzo.yml's order
+#   and a registry answers in the order it stored.
+#
+#   `linux/arm64` and `linux/arm64/v8` ARE THE SAME PLATFORM. v8 is arm64's
+#   default variant, which containerd elides and several registries store;
+#   docker.io/library/alpine:3.20 answers linux/arm64/v8 for the image every
+#   arm64 node runs. Comparing the strings fails an image that is correct.
+#   No other variant is elided: linux/arm/v6 and linux/arm/v7 are different
+#   machines and stay different here.
+norm() {
+  printf '%s' "$1" | tr ', ' '\n\n' | sed '/^$/d; s|^linux/arm64/v8$|linux/arm64|' | sort -u | paste -sd, -
+}
 w=$(norm "$want"); g=$(norm "$got")
 [ "$w" = "$g" ] && exit 0
 
