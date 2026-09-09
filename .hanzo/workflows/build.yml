@@ -30,14 +30,11 @@ on:
     inputs:
       runner:
         description: >-
-          Runner labels as a JSON array. `linux-amd64` is served on both planes:
-          the ephemeral `git-runner` Jobs the forge starts on git.hanzo.ai, and
-          the org-level self-hosted runners registered on github.com. Which of
-          the two answers depends on where the repository builds, not on this
-          input. Either way we run the build, metered as build minutes.
-          Bring-your-own: pass the labels of your own self-hosted runners.
-          A GitHub org with no runner registered advertises nothing, and a job
-          asking a label nobody advertises queues with no error to read.
+          Runner labels as a JSON array. Default = the Hanzo `git-runner` fleet
+          on git.hanzo.ai, which is the ONLY pool serving these labels (we run
+          the build, metered as build minutes). Bring-your-own: pass the labels
+          of your own self-hosted runners instead. There is no arc pool — arc
+          (arcd) is retired, and no label here is served by anything but the fleet.
         type: string
         default: '["linux-amd64"]'
       mode:
@@ -180,34 +177,6 @@ permissions:
 
 jobs:
   cicd:
-    # One live run per ref. Every push queues a run and every queued run holds an
-    # ephemeral runner pod, so without this a burst of commits on one branch is a
-    # queue that grows rather than one that drains: on a single amd64 node those
-    # runs can never all execute, and each new push adds another pod behind them.
-    # The group is what makes a push supersede the one it replaces.
-    #
-    # The key is (repository, workflow, ref) — the three things that decide
-    # whether two runs are the same work:
-    #   two pushes to one branch  same ref, so the older run is cancelled the
-    #                             moment the newer one is admitted
-    #   a push during a tag build refs/heads/main and refs/tags/v1.2.3 are
-    #                             different refs, so the release is untouched;
-    #                             and cancel-in-progress is false on a tag either
-    #                             way, so nothing cancels a run that is producing
-    #                             an immutable artifact
-    #   two repositories          the repository is in the key, and both planes
-    #                             scope a group to its repository regardless
-    # A pull request is refs/pull/N/merge, so a re-push supersedes that PR's own
-    # run and never touches the branch it targets.
-    #
-    # Named for this reusable, because the forge compares a job group against
-    # run-level groups in the same repository: a caller that keeps its own group
-    # (hanzoai/ci pins one to the commit so a tag and a branch push of the same
-    # commit cannot both publish it) must not collide with this one. The two are
-    # separate mechanisms and both apply.
-    concurrency:
-      group: hanzoai-ci-${{ github.repository }}-${{ github.workflow }}-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref_type != 'tag' }}
     runs-on: ${{ fromJson(inputs.runner) }}
     env:
       # corepack fetches the pnpm/yarn TARBALL ITSELF from registry.npmjs.org,
@@ -218,23 +187,6 @@ jobs:
       # of the dependencies and false of the package manager fetching them.
       COREPACK_NPM_REGISTRY: https://pkg.hanzo.ai
     steps:
-      # ONE DOCKER CONFIG PER RUNNER, not one per machine. Several runner
-      # services share a user on the build hosts, so they share
-      # ~/.docker/config.json, and docker/login-action logs out in its post
-      # step: a job that finishes takes the registry credential out from under
-      # a job that is still pushing. It surfaces as "unauthenticated" or a
-      # request for an anonymous token, in the job that did nothing wrong, and
-      # only when two builds overlap.
-      #
-      # Set HERE and not in the job's env: the runner context does not exist at
-      # job level, and a reference to it there is a syntax error that fails
-      # every caller of this workflow before a single step runs.
-      - name: One docker config per runner
-        run: |
-          d="$RUNNER_TEMP/docker"
-          mkdir -p "$d"
-          echo "DOCKER_CONFIG=$d" >> "$GITHUB_ENV"
-
       - uses: actions/checkout@v4
         with:
           submodules: ${{ inputs.submodules }}
