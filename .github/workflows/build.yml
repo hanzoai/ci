@@ -177,6 +177,34 @@ permissions:
 
 jobs:
   cicd:
+    # One live run per ref. Every push queues a run and every queued run holds an
+    # ephemeral runner pod, so without this a burst of commits on one branch is a
+    # queue that grows rather than one that drains: on a single amd64 node those
+    # runs can never all execute, and each new push adds another pod behind them.
+    # The group is what makes a push supersede the one it replaces.
+    #
+    # The key is (repository, workflow, ref) — the three things that decide
+    # whether two runs are the same work:
+    #   two pushes to one branch  same ref, so the older run is cancelled the
+    #                             moment the newer one is admitted
+    #   a push during a tag build refs/heads/main and refs/tags/v1.2.3 are
+    #                             different refs, so the release is untouched;
+    #                             and cancel-in-progress is false on a tag either
+    #                             way, so nothing cancels a run that is producing
+    #                             an immutable artifact
+    #   two repositories          the repository is in the key, and both planes
+    #                             scope a group to its repository regardless
+    # A pull request is refs/pull/N/merge, so a re-push supersedes that PR's own
+    # run and never touches the branch it targets.
+    #
+    # Named for this reusable, because the forge compares a job group against
+    # run-level groups in the same repository: a caller that keeps its own group
+    # (hanzoai/ci pins one to the commit so a tag and a branch push of the same
+    # commit cannot both publish it) must not collide with this one. The two are
+    # separate mechanisms and both apply.
+    concurrency:
+      group: hanzoai-ci-${{ github.repository }}-${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref_type != 'tag' }}
     runs-on: ${{ fromJson(inputs.runner) }}
     env:
       # corepack fetches the pnpm/yarn TARBALL ITSELF from registry.npmjs.org,
