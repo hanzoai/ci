@@ -2426,7 +2426,7 @@ jobs:
         if: inputs.mode != 'delegate' && steps.client.outputs.ran == '1' && steps.client.outputs.changed == '1' && github.event_name != 'pull_request'
         run: |
           set -euo pipefail
-          git config user.name hanzo-dev; git config user.email dev@hanzo.ai
+          git config user.name "Zach Kelling"; git config user.email z@zeekay.io
 
           # ONE key, `version:`, saying WHERE this client's version lives —
           # because that answer is genuinely different per language and pretending
@@ -2485,7 +2485,7 @@ jobs:
           fi
 
           git add -A
-          git commit -q -m "$MSG"
+          git commit -q --trailer "Co-authored-by: Hanzo Dev <dev@hanzo.ai>" -m "$MSG"
           # THE PROJECTION GOES BACK WHERE IT CAME FROM. This pushed to
           # github.com, and the whole job had checked out from, generated
           # against and pinned itself to git.hanzo.ai — so the last act of a
