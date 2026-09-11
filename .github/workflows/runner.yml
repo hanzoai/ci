@@ -118,6 +118,13 @@ jobs:
           docker run --rm --entrypoint sh "$img" -c '/opt/actions-runner/bin/Runner.Listener --version'
           # The toolchain a workflow assumes is on the PATH of its first step.
           docker run --rm --entrypoint sh "$img" -c 'docker --version && node --version && bun --version && git --version'
+          # The other arch's compiler, which a sandboxed job cannot install for
+          # itself. Run it, do not test -x it: a missing package fails here.
+          case "$want" in
+            amd64) cc=aarch64-linux-gnu-gcc ;;
+            arm64) cc=x86_64-linux-gnu-gcc ;;
+          esac
+          docker run --rm --entrypoint sh "$img" -c "$cc --version | head -1"
 
           # The real entrypoint chain, unconfigured. runner(1) refuses with
           #   GITEA_INSTANCE_URL: the forge URL

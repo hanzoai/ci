@@ -4,12 +4,15 @@
 # is no third option: the label is resolved by whoever owns the pool, so the way
 # to stop renting builders is to serve the label ourselves.
 #
-# It runs under the `host` executor inside a Firecracker guest, which is why the
-# toolchain lives HERE rather than in a per-job container: the VM is the sandbox,
-# and a nested runtime would only be a second, weaker one. So this image is what
-# a job sees, and it carries what a job actually reaches for -- git, build
-# essentials, node, python, docker CLI, and the `hanzo` CLI so a workflow can
-# talk to the cloud it is being built for.
+# It runs under the `host` executor inside the visor sandbox, which is why the
+# toolchain lives HERE rather than in a per-job container: the sandbox is the
+# boundary, and a nested runtime would only be a second, weaker one. So this
+# image is what a job sees, and it carries what a job actually reaches for --
+# git, build essentials, node, python, docker CLI, and the `hanzo` CLI so a
+# workflow can talk to the cloud it is being built for.
+#
+# Nothing can be installed at job time: the sandbox does not honour setuid, so
+# `sudo` fails with "nosuid". Whatever a job needs has to be in this file.
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -21,6 +24,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential pkg-config \
       python3 python3-pip python3-venv \
       openssh-client rsync sudo tini procps \
+ && rm -rf /var/lib/apt/lists/*
+
+# The OTHER architecture's C toolchain. gVisor builds the VDSO for both
+# architectures in one bazel invocation, so building it on amd64 needs
+# aarch64-linux-gnu-gcc and on arm64 needs x86_64-linux-gnu-gcc — and the
+# visor publish lane failed on exactly that, with no way to add it at job time.
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) pkgs="gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross" ;; \
+      arm64) pkgs="gcc-x86-64-linux-gnu g++-x86-64-linux-gnu libc6-dev-amd64-cross" ;; \
+      *) echo "unsupported $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    apt-get update && apt-get install -y --no-install-recommends $pkgs \
  && rm -rf /var/lib/apt/lists/*
 
 # Node via nodesource: workflows assume a current node, and the distro's is old.
