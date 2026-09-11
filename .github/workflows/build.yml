@@ -308,12 +308,31 @@ jobs:
           raw="${GITHUB_WORKFLOW_REF:-}"
           ref="${raw##*@}"; ref="${ref#refs/heads/}"; ref="${ref#refs/tags/}"; ref="${ref:-v1}"
           echo "derived ref=${ref} (caller); job_workflow_sha=${JOB_SHA:-<unset>}"
-          # Two candidates, tried in order, because the exact one is not always
-          # available: this file's own commit where the host says it, then the
-          # caller's ref as the fallback that used to be the only answer. Trying
-          # both means the change cannot be a regression on any run where the
-          # old derivation already worked.
-          cands=(); [ -n "${JOB_SHA:-}" ] && cands+=("$JOB_SHA"); cands+=("$ref")
+          # THE CALLER'S OWN `uses:` LINE IS THE ANSWER, and it is on disk: the
+          # caller is checked out, and GITHUB_WORKFLOW_REF names WHICH of its
+          # workflow files started this run. Read the pin out of that file and
+          # the tools come from the ref the author actually wrote.
+          #
+          # Everything else available here describes the caller rather than this
+          # file. github.job_workflow_sha is the documented exception and it
+          # arrives EMPTY on this plane -- measured on hanzoai/base run
+          # 34563223211, which printed `job_workflow_sha=<unset>` -- so a lane
+          # that trusts it silently falls back and the bug it was fixing returns.
+          wf="${raw%@*}"                   # hanzoai/base/.github/workflows/cicd.yml
+          wf="${wf#*/}"; wf="${wf#*/}"     # .github/workflows/cicd.yml
+          pin=
+          if [ -n "$wf" ] && [ -f "${GITHUB_WORKSPACE:-.}/$wf" ]; then
+            pin=$(sed -n 's#.*hanzoai/ci/\.[a-z]*/workflows/build\.yml@\([A-Za-z0-9._/-]\{1,\}\).*#\1#p' \
+                  "${GITHUB_WORKSPACE:-.}/$wf" | head -1)
+          fi
+          echo "caller ${wf:-<unknown>} pins ${pin:-<nothing this could read>}"
+          # In order: the pin the caller wrote, this file's commit where a host
+          # says it, and last the caller's own ref -- which is what used to be
+          # tried first, and is right only when the two happen to coincide.
+          cands=()
+          [ -n "$pin" ] && cands+=("$pin")
+          [ -n "${JOB_SHA:-}" ] && cands+=("$JOB_SHA")
+          cands+=("$ref")
           # The Hanzo Git first, because Hanzo Git is where this repo is written and
           # GitHub is its mirror. `hanzo/ci` IS NOT THIS REPO and is gone from the
           # list: it is the tenant-org fork, whose v1 carries no bin/ at all, and
