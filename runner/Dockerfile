@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl wget git jq unzip zip xz-utils gnupg \
       build-essential pkg-config \
       python3 python3-pip python3-venv \
-      openssh-client rsync sudo tini \
+      openssh-client rsync sudo tini procps \
  && rm -rf /var/lib/apt/lists/*
 
 # Node via nodesource: workflows assume a current node, and the distro's is old.
@@ -88,7 +88,7 @@ RUN npx -y playwright@${PLAYWRIGHT_VERSION} install --with-deps chromium \
 
 # One entrypoint, two registrations: the environment says which system queued
 # the job, and the runner that claims it lives exactly one job.
-COPY --chmod=0755 runner /usr/local/bin/runner
+COPY --chmod=0755 runner/runner /usr/local/bin/runner
 
 RUN useradd -m -u 1001 -s /bin/bash runner \
  && echo 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner \

@@ -5,7 +5,23 @@
 set -eu
 if [ -n "${RUNNER_JITCONFIG:-}" ]; then
   cd /opt/actions-runner
-  exec ./run.sh --jitconfig "$RUNNER_JITCONFIG"
+  # The configuration was minted FOR one already-queued job, so a runner that
+  # has claimed nothing after ten minutes is waiting for a job that is gone --
+  # cancelled, or finished by a runner that answered first. ./run.sh has no
+  # timeout for that: it prints "Listening for Jobs" and stays until the Job's
+  # four-hour deadline, holding one of the six runner slots the whole cluster
+  # has. Two were doing exactly that, for 151 and 73 minutes, while the queue
+  # behind them was refused with "too many concurrent runners".
+  #
+  # Claiming a job is visible without parsing logs: the listener forks
+  # Runner.Worker to run it, and that process lives as long as the job does.
+  ./run.sh --jitconfig "$RUNNER_JITCONFIG" &
+  listener=$!
+  ( sleep 600
+    pgrep -f Runner.Worker >/dev/null 2>&1 || kill "$listener" 2>/dev/null
+  ) &
+  wait "$listener"
+  exit
 fi
 : "${GITEA_INSTANCE_URL:?the forge URL}" "${GITEA_RUNNER_REGISTRATION_TOKEN:?a registration token}" "${RUNNER_LABELS:?the labels the job asked for}"
 act_runner register --no-interactive --ephemeral \
