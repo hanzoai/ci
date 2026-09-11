@@ -1941,19 +1941,23 @@ jobs:
         # the address that can answer.
         if: inputs.mode == 'delegate'
         env:
-          # The address the DEPLOYED cloud serves. /v1/build is where this is
-          # going — building is its own concept, not something platform owns —
-          # and it is already committed on cloud's side. Until that ships, a
-          # door that does not answer is worse than a nested name: every
-          # delegated build 404s and no repo can produce an image.
-          # The build door, reached as the SERVICE it is. The runner and cloud sit
-          # in the same cluster, and addressing the public host sent this request
-          # out to the edge, through a tunnel, and back to a pod one hop away —
-          # which is where it died: the ingress saw a 502 in 180ms and cloud
-          # logged the request not at all. A build should not leave the cluster to
-          # reach a service beside it. RUNNER_URL still overrides for anything
-          # running outside.
-          RUNNER_URL: ${{ vars.RUNNER_URL || 'http://cloud.hanzo.svc.cluster.local:8000/v1/platform/runner' }}
+          # `/v1/build`, FLAT, because building is its own service rather than
+          # something platform owns — cloud registers it there and at no other
+          # address (apps/platform/platform.go). The nested `/v1/platform/runner`
+          # this defaulted to answers 404, so every delegated build died on a
+          # reply that names no address and reads like an outage. Measured
+          # against the deployed cloud: `/v1/platform/runner` 404s, `/v1/build`
+          # takes the org's own machine identity and answers 400 for an empty
+          # body — the door, admitting the credential this step holds.
+          #
+          # Reached as the SERVICE it is. The runner and cloud sit in the same
+          # cluster, and addressing the public host sent this request out to the
+          # edge, through a tunnel, and back to a pod one hop away — which is
+          # where it died: the ingress saw a 502 in 180ms and cloud logged the
+          # request not at all. A build should not leave the cluster to reach a
+          # service beside it. RUNNER_URL still overrides for anything running
+          # outside.
+          RUNNER_URL: ${{ vars.RUNNER_URL || 'http://cloud.hanzo.svc.cluster.local:8000/v1/build' }}
           # The version tag is WRITTEN by this job, onto the manifest the door
           # pushed, so this lane needs the registry credential the buildx lane's
           # login steps hold — and the registry read bin/imgver takes its
