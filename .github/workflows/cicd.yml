@@ -1,0 +1,20 @@
+# The caller this repo never had. build.yml beside it is `on: workflow_call`
+# alone, so a push here fired nothing: hanzoai/ci built every other repo's
+# images and none of its own, which is how ghcr.io/hanzoai/git-runner came to
+# be a hand-cut amd64 image that no pipeline could replace.
+#
+# It calls the pipeline in THIS tree rather than hanzoai/ci@v1. A repo whose
+# product is the pipeline must be built by the pipeline it is shipping —
+# a v1 pin would build today's image with whatever v1 was tagged at, and v1
+# moves because this run is what moves it.
+name: CI/CD
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+jobs:
+  cicd:
+    uses: ./.github/workflows/build.yml
+    secrets: inherit
