@@ -232,6 +232,7 @@ test:
                'Delegate build to the runner (mode=delegate)' \
                'Build & push images (per hanzo.yml)' \
                'Build & publish binaries (per hanzo.yml)' \
+               'Publish to PyPI (per hanzo.yml)' \
                'Publish site (per hanzo.yml)'; do
         l=$(at "$s")
         [ "$k" -lt "$l" ] || { echo "::error::Kind (per hanzo.yml) (line $k) runs after '$s' (line $l) — a manifest this pipeline cannot serve would reach it"; exit 1; }
