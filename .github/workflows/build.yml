@@ -1980,6 +1980,16 @@ jobs:
           set -euo pipefail
           TMP="${RUNNER_TEMP:-/tmp}"
           refuse() { echo "::error::$1"; exit 1; }
+          # The same sentence the buildx lane says, for the same reason, and it
+          # has to be said in BOTH: `mode` chooses WHERE an image is built, so a
+          # caller with no image to build reaches whichever lane is the default
+          # and must be let past it. Without this a test-only caller asks the
+          # door for nothing, or dies on `jq: Cannot iterate over null`, and
+          # every step below it — the gates, the binaries, the index — is skipped
+          # because a step it does not use went red.
+          if [ "$(yq -r '.images // [] | length' hanzo.yml 2>/dev/null || echo 0)" = "0" ]; then
+            echo "::notice::no images: in hanzo.yml — test-only caller, nothing to delegate"; exit 0
+          fi
           [ -n "${HANZO_API_TOKEN:-}" ] || refuse "mode=delegate presents this org's IAM identity at the build door and HANZO_API_TOKEN is empty — the KMS login earlier in this job is what mints it, so it did not run or did not succeed"
           # THREE THINGS A hanzo.yml CAN MEAN THAT THIS DOOR CANNOT BUILD, each
           # refused here rather than downstream, where this run shows no logs at
