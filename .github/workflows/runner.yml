@@ -1,0 +1,224 @@
+name: Runner image
+# The machine a job runs ON, built by the pipeline it will run.
+#
+# Nothing built it before. oci.hanzo.ai/hanzoai/git-runner:5 — what cloud hands
+# every runner Job (RUNNER_IMAGE, universe charts/app/values/hanzo/cloud.yaml) —
+# was cut by hand and amd64 alone, so an arm64 job landed on spark and the
+# kubelet answered `failed to load /usr/bin/tini: exec format error`. The arm64
+# lane had never once started, and every multi-arch question in this estate
+# bottomed out there: the builder could not build arm64 because the builder was
+# not arm64.
+#
+# THIS LANE IS SEPARATE FROM build.yml ON PURPOSE. build.yml is the reusable
+# every other repo imports; it cannot build the image it runs inside without
+# depending on the artifact it is producing. So the runner image gets its own
+# file, and the two never share a job.
+#
+# ONE ARCHITECTURE PER JOB, EACH ON ITS OWN NATIVE POOL. `--load` takes a single
+# image into the local daemon and refuses a manifest list, so a job that TESTS
+# what it built can only build one platform — and testing each half is the whole
+# point here, since an image that starts on neither arch is the failure being
+# fixed. Neither arch is emulated: the binary that ships for an arch was
+# compiled and executed on that arch. `merge` joins the halves afterwards.
+#
+# Everything in runner/Dockerfile already branches on `dpkg --print-architecture`
+# for both. Only a lane that builds both was missing.
+on:
+  push:
+    branches: [main]
+    paths:
+      - runner/**
+      - .github/workflows/runner.yml
+  workflow_dispatch: {}
+
+concurrency:
+  group: runner-image
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            pool: linux-amd64
+          - arch: arm64
+            pool: linux-arm64
+    runs-on: ['${{ matrix.pool }}']
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute this arch's names
+        id: meta
+        # A per-arch name, never a release name. A release name that resolves to
+        # one architecture is worse than one that does not exist yet: it pulls on
+        # that arch and fails everywhere else, which is precisely how :5 shipped.
+        # Only merge writes the release names.
+        run: |
+          set -euo pipefail
+          v=$(tr -d '[:space:]' < runner/VERSION)
+          [ -n "$v" ] || { echo "::error::runner/VERSION is empty"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "ghcr=ghcr.io/hanzoai/git-runner:sha-${GITHUB_SHA:0:7}-${{ matrix.arch }}" >> "$GITHUB_OUTPUT"
+          echo "oci=oci.hanzo.ai/hanzoai/git-runner:sha-${GITHUB_SHA:0:7}-${{ matrix.arch }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
+          driver-opts: network=host
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ secrets.GHCR_USER }}
+          password: ${{ secrets.GHCR_TOKEN }}
+
+      - name: Sign in to oci.hanzo.ai
+        # NOT best-effort, unlike the mirror login in build.yml. The cluster
+        # pulls RUNNER_IMAGE from oci.hanzo.ai and from nowhere else, so a
+        # skipped push here publishes a release name that resolves at ghcr and
+        # 404s at the one address that matters.
+        uses: docker/login-action@v3
+        with:
+          registry: oci.hanzo.ai
+          username: ${{ secrets.REGISTRY_USER }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build ${{ matrix.arch }} (load for smoke, not yet pushed)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: runner/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          push: false
+          provenance: false
+          tags: ${{ steps.meta.outputs.ghcr }}
+
+      - name: Smoke — every binary a job reaches for loads on this arch
+        # `exec format error` is what an image of the wrong architecture says at
+        # the moment something tries to run, which on :5 was the kubelet starting
+        # tini. So the smoke RUNS things rather than inspecting them: a foreign
+        # binary passes every `test -x` and fails the instant it is executed.
+        run: |
+          set -euo pipefail
+          img='${{ steps.meta.outputs.ghcr }}'
+          want='${{ matrix.arch }}'
+
+          got=$(docker image inspect -f '{{.Architecture}}' "$img")
+          [ "$got" = "$want" ] || { echo "::error::built $got, wanted $want"; exit 1; }
+
+          # tini is the one that faulted, and it is pid 1 for every job.
+          docker run --rm --entrypoint /usr/bin/tini "$img" -- /bin/echo 'tini: ok'
+          # The two agents, one per plane: act_runner claims a forge job,
+          # Runner.Listener claims a GitHub one.
+          docker run --rm --entrypoint sh "$img" -c 'act_runner --version'
+          docker run --rm --entrypoint sh "$img" -c '/opt/actions-runner/bin/Runner.Listener --version'
+          # The toolchain a workflow assumes is on the PATH of its first step.
+          docker run --rm --entrypoint sh "$img" -c 'docker --version && node --version && bun --version && git --version'
+
+          # The real entrypoint chain, unconfigured. runner(1) refuses with
+          #   GITEA_INSTANCE_URL: the forge URL
+          # which proves tini loaded, exec'd the script, and the script ran. A
+          # wrong-arch image cannot reach that message — it dies at `exec format
+          # error` instead, so the two failures are never confused.
+          if out=$(docker run --rm "$img" 2>&1); then
+            echo "::error::entrypoint exited 0 with no forge configured"; exit 1
+          fi
+          case "$out" in
+            *GITEA_INSTANCE_URL*) echo "entrypoint: refused by name — ok" ;;
+            *) echo "::error::entrypoint failed for the wrong reason: $out"; exit 1 ;;
+          esac
+
+      - name: Push this arch to both registries
+        run: |
+          set -euo pipefail
+          docker push '${{ steps.meta.outputs.ghcr }}'
+          docker tag '${{ steps.meta.outputs.ghcr }}' '${{ steps.meta.outputs.oci }}'
+          docker push '${{ steps.meta.outputs.oci }}'
+
+      - name: Verify both pushed names resolve
+        run: |
+          set -euo pipefail
+          for img in '${{ steps.meta.outputs.ghcr }}' '${{ steps.meta.outputs.oci }}'; do
+            ok=
+            for i in 1 2 3 4 5 6; do
+              if docker manifest inspect "$img" >/dev/null 2>&1; then ok=1; break; fi
+              echo "not visible yet (${i}/6) — retrying"; sleep 5
+            done
+            [ -n "$ok" ] || { echo "::error::$img not pullable after push"; exit 1; }
+            echo "$img is resolvable"
+          done
+
+  merge:
+    needs: build
+    # Registry-side only: imagetools reads the per-arch manifests and writes a
+    # list pointing at both. No builder and no platform of its own, so which
+    # pool runs this does not matter.
+    runs-on: [linux-amd64]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute the release names
+        id: meta
+        # The version is an integer counter that moves one step at a time, and it
+        # lives in runner/VERSION beside the Dockerfile it names rather than in
+        # this file — bumping the image is then an edit a reader can see, not a
+        # workflow change. universe pins RUNNER_IMAGE to the same integer.
+        run: |
+          set -euo pipefail
+          v=$(tr -d '[:space:]' < runner/VERSION)
+          {
+            echo "tags<<EOF"
+            for r in ghcr.io/hanzoai/git-runner oci.hanzo.ai/hanzoai/git-runner; do
+              echo "${r}:${v}"
+              echo "${r}:sha-${GITHUB_SHA:0:7}"
+            done
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ secrets.GHCR_USER }}
+          password: ${{ secrets.GHCR_TOKEN }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: oci.hanzo.ai
+          username: ${{ secrets.REGISTRY_USER }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Join both architectures under every release name
+        # imagetools, not `docker manifest create`: buildx pushes a per-arch OCI
+        # index and `docker manifest create` rejects those outright. Each release
+        # name is built from the per-arch halves in ITS OWN registry, so neither
+        # registry's index points at blobs it does not hold.
+        run: |
+          set -euo pipefail
+          while IFS= read -r t; do
+            [ -z "$t" ] && continue
+            base="${t%:*}:sha-${GITHUB_SHA:0:7}"
+            docker buildx imagetools create -t "$t" "${base}-amd64" "${base}-arm64"
+          done <<< '${{ steps.meta.outputs.tags }}'
+
+      - name: Prove every release name carries BOTH architectures
+        # A one-entry manifest list pulls fine on the arch that built it and
+        # fails everywhere else — the exact state :5 was in. Counting the
+        # platforms is what makes "multi-arch" a fact rather than a hope.
+        run: |
+          set -euo pipefail
+          while IFS= read -r t; do
+            [ -z "$t" ] && continue
+            got=$(docker buildx imagetools inspect "$t" --format '{{range .Manifest.Manifests}}{{.Platform.OS}}/{{.Platform.Architecture}} {{end}}')
+            echo "$t -> ${got}"
+            for want in linux/amd64 linux/arm64; do
+              case " $got " in
+                *" $want "*) ;;
+                *) echo "::error::$t does not carry $want"; exit 1 ;;
+              esac
+            done
+          done <<< '${{ steps.meta.outputs.tags }}'
