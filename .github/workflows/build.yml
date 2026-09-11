@@ -2827,6 +2827,109 @@ jobs:
             echo "Index: \`$BASE/binaries.json\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Publish to PyPI (per hanzo.yml)
+        # THE INDEX LANE. `images:` ships an image a CLUSTER runs, `binaries:` an
+        # executable a HOST installs, `site:` an export an EDGE serves. This ships
+        # a DISTRIBUTION an INSTALLER resolves by name and version, which none of
+        # those three describes — so it is a fourth verb, not a flag on one of them.
+        #
+        # `pypi:` is a list of directory globs, each holding a pyproject.toml:
+        #
+        #   pypi: [., pkg/*]
+        #
+        # A GLOB RATHER THAN A LIST OF NAMES, because a list goes stale in silence.
+        # The per-repo workflow this replaces hardcoded its packages, and every one
+        # added after it was written simply stopped being published — with nothing
+        # red anywhere to say so.
+        #
+        # WHICH of the declared projects a run publishes is decided by the tag and
+        # by nothing else:
+        #
+        #   v1.2.3        every one of them. `twine --skip-existing` makes the ones
+        #                 whose version did not move a no-op, so a single tag
+        #                 releases exactly what moved out of a tree of 65 packages.
+        #   name-v1.2.3   the one whose [project] name is `name`. The separator may
+        #   name-1.2.3    be `-` or `@` and the `v` is optional, because all three
+        #   name@v1.2.3   shapes are already in this fleet's tags.
+        #
+        # THE NAME IS READ FROM THE pyproject, not from the directory, because the
+        # name is what an installer resolves. A directory that happens to match is
+        # a coincidence, and leaning on it is how a rename keeps publishing under
+        # the old name for months.
+        #
+        # ON A TAG, NEVER ON A BRANCH. A version on an index is immutable, so this
+        # is the one act in this file nobody can take back, and a tag is the only
+        # ref that says a human meant it.
+        #
+        # THE CREDENTIAL IS KMS'S. The only thing this job is given is the KMS
+        # machine identity; the index tokens are read at publish time and live
+        # nowhere else — not in Actions secrets, not in a flag, not in a file.
+        # PYPI_TOKEN owns most of `hanzo-*` and HANZO_AI_PYPI_TOKEN covers the
+        # rest, so each upload tries the first and then the second and a 403
+        # scope-miss on one is carried by the other. ONE pair for the estate: an
+        # index account is a fact about the account, not about a repository, so it
+        # is read from one name here rather than resealed per repo.
+        if: github.ref_type == 'tag'
+        env:
+          KMS_CLIENT_ID: ${{ secrets.KMS_CLIENT_ID }}
+          KMS_CLIENT_SECRET: ${{ secrets.KMS_CLIENT_SECRET }}
+          TWINE_USERNAME: __token__
+        run: |
+          set -euo pipefail
+          [ "$(yq -r '.pypi // [] | length' hanzo.yml 2>/dev/null || echo 0)" != 0 ] || {
+            echo "::notice::no pypi: in hanzo.yml — nothing to publish"; exit 0; }
+
+          TAG="${{ github.ref_name }}"
+          # A version suffix off the end leaves the distribution name. A tag that
+          # is ONLY a version names nothing, and naming nothing selects everything.
+          case "$TAG" in
+            v[0-9]*) WANT= ;;
+            *)       WANT=$(printf '%s' "$TAG" | sed -E 's/[-@]v?[0-9].*$//') ;;
+          esac
+
+          # Unquoted on purpose, and it is the whole of the expansion: the field
+          # split yields the globs, the pathname expansion yields the directories.
+          dirs=(); names=(); known=
+          for d in $(yq -r '.pypi[]' hanzo.yml); do
+            [ -f "$d/pyproject.toml" ] || continue
+            n=$(yq -r '.project.name // ""' -p toml "$d/pyproject.toml" 2>/dev/null || true)
+            [ -n "$n" ] || { echo "::warning::$d/pyproject.toml declares no [project] name — skipped"; continue; }
+            known="$known $n"
+            if [ -z "$WANT" ] || [ "$n" = "$WANT" ]; then dirs+=("$d"); names+=("$n"); fi
+          done
+          [ "${#dirs[@]}" -gt 0 ] || {
+            echo "::error::tag $TAG selects nothing. It names '${WANT:-<every project>}', and pypi: resolves to:${known:- <no directory matched a glob>}"; exit 1; }
+
+          # bin/kms is the one way anything here reads a secret, and it exits
+          # non-zero on an absent one — which for the fallback token is an ordinary
+          # state rather than a failure. Both empty is the failure, and it is named.
+          K="$CI_HOME/bin/kms"
+          PRIMARY=$(bash "$K" python-sdk-publish/PYPI_TOKEN prod || true)
+          FALLBACK=$(bash "$K" python-sdk-publish/HANZO_AI_PYPI_TOKEN prod || true)
+          if [ -n "$PRIMARY" ]; then echo "::add-mask::$PRIMARY"; fi
+          if [ -n "$FALLBACK" ]; then echo "::add-mask::$FALLBACK"; fi
+          [ -n "$PRIMARY$FALLBACK" ] || {
+            echo "::error::KMS holds no index token at python-sdk-publish — seal PYPI_TOKEN (and HANZO_AI_PYPI_TOKEN) there, not as an Actions secret."; exit 1; }
+
+          # uv, because the python gate already provisioned it and it carries its
+          # own interpreter — so nothing here turns on what the runner image ships.
+          py() { uv run --no-project --python 3.12 --with build --with twine "$@"; }
+
+          rc=0
+          for i in "${!dirs[@]}"; do
+            d="${dirs[$i]}"; n="${names[$i]}"
+            echo "::group::$n ($d)"
+            rm -rf "$d/dist" "$d/build"
+            if ! py python -m build "$d" --outdir "$d/dist"; then rc=1; echo "::endgroup::"; continue; fi
+            # --skip-existing keeps a re-run idempotent: a version already on the
+            # index is a no-op rather than a 400 that reds a release which worked.
+            if   [ -n "$PRIMARY"  ] && TWINE_PASSWORD="$PRIMARY"  py python -m twine upload --skip-existing "$d/dist"/*; then :
+            elif [ -n "$FALLBACK" ] && TWINE_PASSWORD="$FALLBACK" py python -m twine upload --skip-existing "$d/dist"/*; then :
+            else rc=1; fi
+            echo "::endgroup::"
+          done
+          exit $rc
+
       - name: Publish site (per hanzo.yml)
         # The site lane. `images:` ships an OCI image a CLUSTER runs; `binaries:`
         # ships an executable a HOST installs; neither describes a static export
