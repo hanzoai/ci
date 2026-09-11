@@ -36,8 +36,15 @@
 # A tag-suffix (hanzo.yml `tag-suffix`, e.g. ce/ee) qualifies every one of them.
 # There is no `<version>-amd64` alias: no CR in the fleet pinned one.
 #
-# NO `latest`: it names whatever finished most recently, so two digests wear it
-# within a day and a pull is a race rather than a choice.
+#   latest         ON A RELEASE ONLY. `docker pull <name>` with no tag asks for
+#                  it, so a repository that writes it nowhere answers a bare
+#                  pull with whatever wore it last -- ghcr.io/hanzoai/base:latest
+#                  was 1.5.22, sixty-nine patches and five weeks behind, amd64
+#                  alone, and a contributor typing the bare name got that.
+#                  Branch builds still write none: they are the case the old rule
+#                  was about, where several finish in a day and the tag becomes a
+#                  race rather than a choice. A release is deliberate and
+#                  ascending, so the newest one is what `latest` should mean.
 set -euo pipefail
 
 repo="${1:?usage: imgtags <image-repo> <version> <short-sha> <platforms> [tag-suffix]}"
@@ -66,6 +73,10 @@ else
 fi
 
 echo "${repo}:${ver}${sfx:+-$sfx}"
+# The leading v IS the discriminator, and it already exists: a release passes the
+# git tag verbatim (v1.26.19), a branch build passes bin/imgver's bare number
+# (1.5.96). So `latest` needs no new argument and no lane has to remember to ask.
 if [ "${ver#v}" != "$ver" ]; then
   echo "${repo}:${ver#v}${sfx:+-$sfx}"
+  echo "${repo}:latest${sfx:+-$sfx}"
 fi

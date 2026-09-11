@@ -26,19 +26,21 @@ t "single-arch: sha carries the architecture" \
 t "multi-arch: the arch-neutral manifest list" \
   "$R:sha-abc1234 $R:1.2.3" $R 1.2.3 abc1234 linux/amd64,linux/arm64
 t "release build: the git tag, plus its v-stripped alias" \
-  "$R:sha-abc1234-amd64 $R:v1.2.3 $R:1.2.3" $R v1.2.3 abc1234 linux/amd64
+  "$R:sha-abc1234-amd64 $R:v1.2.3 $R:1.2.3 $R:latest" $R v1.2.3 abc1234 linux/amd64
 t "a tag with no v publishes one version, not two" \
   "$R:sha-abc1234-amd64 $R:1.2.3" $R 1.2.3 abc1234 linux/amd64
 t "tag-suffix qualifies every tag" \
   "$R:sha-abc1234-amd64-ce $R:1.2.3-ce" $R 1.2.3 abc1234 linux/amd64 ce
 t "suffix on a release build too" \
-  "$R:sha-abc1234-ee $R:v2.0.0-ee $R:2.0.0-ee" $R v2.0.0 abc1234 linux/amd64,linux/arm64 ee
+  "$R:sha-abc1234-ee $R:v2.0.0-ee $R:2.0.0-ee $R:latest-ee" $R v2.0.0 abc1234 linux/amd64,linux/arm64 ee
+t "a branch build writes no latest, whatever the platforms" \
+  "$R:sha-abc1234 $R:1.2.3" $R 1.2.3 abc1234 linux/amd64,linux/arm64
 t "arm64-only names arm64, not amd64" \
   "$R:sha-abc1234-arm64 $R:1.2.3" $R 1.2.3 abc1234 linux/arm64
 t "space-separated platforms read the same as commas" \
   "$R:sha-abc1234 $R:1.2.3" $R 1.2.3 abc1234 "linux/amd64 linux/arm64"
 t "the sha- ref is always first" \
-  "$R:sha-abc1234-amd64 $R:v9.9.9 $R:9.9.9" $R v9.9.9 abc1234 linux/amd64
+  "$R:sha-abc1234-amd64 $R:v9.9.9 $R:9.9.9 $R:latest" $R v9.9.9 abc1234 linux/amd64
 
 # --- the refusals ------------------------------------------------------------
 t "no version: refuse, never fall back to the sha" "ERROR" $R "" abc1234 linux/amd64
