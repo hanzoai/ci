@@ -264,6 +264,9 @@ jobs:
           # so nothing has to be sealed for the tools to arrive; that is also
           # the whole of what it CAN do off its own repo (see the KMS step).
           JOB_TOKEN: ${{ github.token }}
+          # The commit of THIS file, said by the host that is running it. Every
+          # other name available to a reusable workflow describes the CALLER.
+          JOB_SHA: ${{ github.job_workflow_sha }}
         run: |
           set -euo pipefail
           echo "GITHUB_WORKFLOW_REF=${GITHUB_WORKFLOW_REF:-<unset>}"
@@ -274,9 +277,32 @@ jobs:
           # the "could not fetch" message never even ran and every host looked
           # blameless. The default was already there on the last expansion; it was
           # unreachable.
+          # GITHUB_WORKFLOW_REF IS THE CALLER'S REF, NOT THIS FILE'S, and the two
+          # are only ever equal by coincidence. A push to a caller's main derived
+          # `main` and cloned hanzoai/ci@main — so every caller pinned at @v2 ran
+          # v2's pipeline against MAIN's tools, which is the skew this step exists
+          # to prevent. A caller's `v1.5.94` tag derived `v1.5.94`, which names no
+          # ref in this repo at all, so the clone found nothing on either host and
+          # the run died at step one. That is every release in the estate: the tag
+          # cut the Go module, the image was never built, and the error named a
+          # missing tool rather than the ref it had invented.
+          #
+          # github.job_workflow_sha is the commit of the reusable a job is running
+          # — the one name GitHub gives that is about this file. It is exact, so
+          # the pipeline and its bin/ cannot skew by construction, and no tag has
+          # to be moved for a caller to reach a tool.
+          #
+          # Hanzo Git sets neither, so the derived ref stays as the fallback there;
+          # `v1` is the last resort rather than the usual answer.
           raw="${GITHUB_WORKFLOW_REF:-}"
           ref="${raw##*@}"; ref="${ref#refs/heads/}"; ref="${ref#refs/tags/}"; ref="${ref:-v1}"
-          echo "derived ref=${ref}"
+          echo "derived ref=${ref} (caller); job_workflow_sha=${JOB_SHA:-<unset>}"
+          # Two candidates, tried in order, because the exact one is not always
+          # available: this file's own commit where the host says it, then the
+          # caller's ref as the fallback that used to be the only answer. Trying
+          # both means the change cannot be a regression on any run where the
+          # old derivation already worked.
+          cands=(); [ -n "${JOB_SHA:-}" ] && cands+=("$JOB_SHA"); cands+=("$ref")
           # The Hanzo Git first, because Hanzo Git is where this repo is written and
           # GitHub is its mirror. `hanzo/ci` IS NOT THIS REPO and is gone from the
           # list: it is the tenant-org fork, whose v1 carries no bin/ at all, and
@@ -320,23 +346,45 @@ jobs:
           # it read and what was missing from it.
           need="certclaims conflictmarkers gover ignoretracked imgplat imgtags imgver modsize publishable site vendormark"
           miss='<no host answered>'
-          for url in https://git.hanzo.ai/hanzoai/ci https://github.com/hanzoai/ci; do
-            echo "::group::clone ${url}@${ref}"
-            # The header goes ONLY to Hanzo Git: git sends http.extraheader to
-            # whatever host it is talking to, and a Hanzo Git token must not be
-            # handed to github.com.
-            a=(); case "$url" in https://git.hanzo.ai/*) a=(${hdr[@]+"${hdr[@]}"}) ;; esac
-            if git ${a[@]+"${a[@]}"} clone -q --depth 1 --branch "$ref" "$url" "$RUNNER_TEMP/ci"; then
-              miss=; for b in $need; do [ -x "$RUNNER_TEMP/ci/bin/$b" ] || miss="${miss:+$miss }$b"; done
-              [ -z "$miss" ] && { echo "cloned ${url}@${ref}"; echo "::endgroup::"; break; }
-              echo "cloned ${url}@${ref}, which is missing: $miss"
+          # A sha cannot be a --branch, so it arrives by fetch rather than clone.
+          # Both are wrapped so a host that does not carry the ref is a return
+          # value here rather than the end of the step under `set -e` — walking
+          # past one is the whole job of this loop.
+          #
+          # The header goes ONLY to Hanzo Git: git sends http.extraheader to
+          # whatever host it is talking to, and a Hanzo Git token must not be
+          # handed to github.com.
+          get() {
+            local url=$1 want=$2 a=()
+            case "$url" in https://git.hanzo.ai/*) a=(${hdr[@]+"${hdr[@]}"}) ;; esac
+            if [ "$want" = "${JOB_SHA:-}" ]; then
+              git init -q "$RUNNER_TEMP/ci" \
+                && git -C "$RUNNER_TEMP/ci" ${a[@]+"${a[@]}"} fetch -q --depth 1 "$url" "$want" \
+                && git -C "$RUNNER_TEMP/ci" checkout -q FETCH_HEAD
             else
-              echo "failed ${url}@${ref}"
+              git ${a[@]+"${a[@]}"} clone -q --depth 1 --branch "$want" "$url" "$RUNNER_TEMP/ci"
             fi
-            echo "::endgroup::"; rm -rf "$RUNNER_TEMP/ci"
+          }
+          # A mirror that has not caught up does not carry the sha yet, and
+          # answers exactly as a wrong sha would. Falling through to the next
+          # host is the whole handling: a sha names the same bytes wherever it
+          # resolves, so whichever host answers is the right one.
+          for want in "${cands[@]}"; do
+            for url in https://git.hanzo.ai/hanzoai/ci https://github.com/hanzoai/ci; do
+              echo "::group::clone ${url}@${want}"
+              if get "$url" "$want"; then
+                miss=; for b in $need; do [ -x "$RUNNER_TEMP/ci/bin/$b" ] || miss="${miss:+$miss }$b"; done
+                [ -z "$miss" ] && { echo "cloned ${url}@${want}"; echo "::endgroup::"; break; }
+                echo "cloned ${url}@${want}, which is missing: $miss"
+              else
+                echo "failed ${url}@${want}"
+              fi
+              echo "::endgroup::"; rm -rf "$RUNNER_TEMP/ci"
+            done
+            [ -z "$miss" ] && break
           done
           [ -z "$miss" ] || {
-            echo "::error::hanzoai/ci@${ref} does not carry the tools this pipeline runs (missing: $miss). The tools resolve from ${ref} on every run because Hanzo Git does not tell a job its own ref, so a pipeline newer than ${ref} cannot reach them — move ${ref}, or pin the caller at a ref that carries both."
+            echo "::error::hanzoai/ci@${want} does not carry the tools this pipeline runs (missing: $miss). ${JOB_SHA:+That is this file's own commit, so a host answered with a tree that is not the one running — read the clone groups above for which.}${JOB_SHA:-No host told this job its own commit, so the tools were resolved from the caller's ref ${ref} instead; move ${ref}, or pin the caller at a ref that carries both.}"
             exit 1; }
           echo "CI_HOME=$RUNNER_TEMP/ci" >> "$GITHUB_ENV"
 
