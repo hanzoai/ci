@@ -17,23 +17,6 @@ images:
     # default when this line is absent is linux/amd64 alone, which is how the
     # v1.0.x series shipped amd64 only.
     platforms: [linux/amd64, linux/arm64]
-  # The machine a job runs ON, built by the pipeline it will run. Nothing built
-  # it until now: oci.hanzo.ai/hanzoai/git-runner:5, which cloud hands every
-  # runner Job (RUNNER_IMAGE, universe charts/app/values/hanzo/cloud.yaml), was
-  # cut by hand and amd64 alone. So an arm64 job — cloud reads the arch off the
-  # label and sets nodeSelector to match — lands on spark and the kubelet
-  # answers `failed to load /usr/bin/tini: exec format error`, retries three
-  # times and gives up. The arm64 lane has never once started, which is why 124
-  # of the 154 images this cluster runs publish amd64 alone and 177 of its pods
-  # are pinned to one of the two nodes.
-  #
-  # Everything in runner/Dockerfile already branches on dpkg --print-architecture
-  # for both; only the platform list was missing.
-  - name: runner
-    context: .
-    dockerfile: runner/Dockerfile
-    repo: ghcr.io/hanzoai/git-runner
-    platforms: [linux/amd64, linux/arm64]
 
 test:
   - name: go-vet
