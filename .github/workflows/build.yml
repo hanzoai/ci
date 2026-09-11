@@ -42,20 +42,31 @@ on:
         default: '["linux-amd64"]'
       mode:
         description: >-
-          Where the IMAGE is built. `buildx` (default) builds it on this runner.
-          `delegate` POSTs it to the build door on api.hanzo.ai (`/v1/build`),
-          which launches a BuildKit Job in-cluster and pushes the image. A repo
-          opts in with `with: { mode: delegate }` and needs no secret of its own:
-          the door reads this org's IAM identity, which the KMS login in this job
-          already mints from KMS_CLIENT_ID / KMS_CLIENT_SECRET.
+          Where the IMAGE is built. `delegate` (default) POSTs it to the build
+          door on api.hanzo.ai (`/v1/build`), which launches one BuildKit Job per
+          architecture, each on a node of that architecture, and joins them under
+          one manifest index. It needs no secret of its own: the door reads this
+          org's IAM identity, which the KMS login in this job already mints from
+          KMS_CLIENT_ID / KMS_CLIENT_SECRET. `buildx` builds on this runner
+          instead, for the ONE architecture that runner is.
+
+          DELEGATE IS THE DEFAULT BECAUSE ONE ARCHITECTURE IS NOT A BUILD WE CAN
+          SHIP. A runner builds natively for itself and refuses the other
+          platform rather than emulating it, so `buildx` publishes one half and
+          says so nowhere. Against two nodes that is an image the arm64 machine
+          either cannot pull or — where the image is a bare manifest rather than
+          an index, which is the common case — runs under qemu until it faults.
+          144 of the 185 images the estate ran carried amd64 alone, and every one
+          of them took this default. A repo that genuinely wants one machine's
+          architecture asks for it: `with: { mode: buildx }`.
 
           THE GATE RUNS IN BOTH MODES, and that is the whole point of the input
           being named for the build. Order it ahead of the toolchains and ahead of
           `test:` and it skips the gate along with the build, finishing green over
-          nothing. What a delegated run skips is buildx, publish and deploy. It
-          does not skip being tested.
+          nothing. What a delegated run skips is buildx and the image publish it
+          does — not the gate, not `client:`, not `binaries:`.
         type: string
-        default: buildx
+        default: delegate
       tests:
         description: >-
           Run the `test:` block. Default true, and a caller should leave it that
@@ -1284,7 +1295,7 @@ jobs:
         # without a JDK. Guarded on the lane, not on a file: a repo with a
         # `client:` block needs it in every language, and a repo without one
         # never pays for it.
-        if: inputs.mode != 'delegate' && hashFiles('hanzo.yml') != ''
+        if: hashFiles('hanzo.yml') != ''
         run: |
           set -euo pipefail
           yq -e '.client' hanzo.yml >/dev/null 2>&1 || { echo "no client: lane — skipping JDK"; exit 0; }
@@ -1339,7 +1350,7 @@ jobs:
         # whatever hanzoai/openapi's main happened to be rather than from the
         # document this tree names. A gate whose input moves is a gate two runs
         # of one commit can disagree about.
-        if: inputs.mode != 'delegate' && hashFiles('hanzo.yml') != ''
+        if: hashFiles('hanzo.yml') != ''
         id: client
         env:
           # ONE HOST, SO ONE CREDENTIAL. The document lives on git.hanzo.ai and
@@ -2060,9 +2071,40 @@ jobs:
             # naming different bytes from the sha- tag beside it.
             image=$(echo "$refs" | head -1)
             echo "$refs" | tail -n +2 | sed "s|^|$image |;s|\$| $plat|" >> "$TMP/alias.txt"
+            # The image's declared `args:`, CARRIED, and expanded by the SAME five
+            # spellings the buildx lane expands — ${VERSION} ${SHA} ${SHORT_SHA}
+            # ${BRANCH} ${BUILD_TIME}, literal substitution, no eval.
+            #
+            # The door takes args (cloud apps/platform/k8s.go
+            # buildFrontendCmdArgs appends one --opt build-arg each) and this
+            # lane was not sending any, so a delegated build of a repo that
+            # declares them got the Dockerfile's ARG DEFAULTS instead. That is
+            # the silent kind of wrong: a missing ARG has a default and a default
+            # builds, so the image is green, correctly tagged, and different from
+            # what the buildx lane produces for the same commit. Seven repos
+            # declare them (bot, collab, extract-svc, git, o11y, team, team-go)
+            # and hanzoai/o11y is the one that shows what it costs — it ldflags
+            # -X …version=${VERSION}, so it would publish an observability server
+            # reporting `dev` under a tag that reads v1.5.64.
+            bargs=$(echo "$img"|jq -c '.args // {}')
+            if [ "$bargs" != "{}" ]; then
+              BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+              acc='{}'
+              while IFS= read -r k; do
+                [ -n "$k" ] || continue
+                v=$(echo "$img"|jq -r --arg k "$k" '.args[$k]|tostring')
+                v=${v//'${VERSION}'/$ver}
+                v=${v//'${SHA}'/$SHA}
+                v=${v//'${SHORT_SHA}'/$SHORT}
+                v=${v//'${BRANCH}'/${GITHUB_REF_NAME:-}}
+                v=${v//'${BUILD_TIME}'/$BUILD_TIME}
+                acc=$(echo "$acc"|jq -c --arg k "$k" --arg v "$v" '.[$k]=$v')
+              done < <(echo "$img"|jq -r '(.args // {})|keys[]')
+              bargs="$acc"
+            fi
             body=$(jq -nc --arg repo "$REPO" --arg sha "$SHA" --arg image "$image" --arg dockerfile "$df" \
-              --arg plat "$plat" \
-              '{repo:$repo,sha:$sha,image:$image,dockerfile:$dockerfile,platforms:($plat|split(","))}')
+              --arg plat "$plat" --argjson args "$bargs" \
+              '{repo:$repo,sha:$sha,image:$image,dockerfile:$dockerfile,platforms:($plat|split(",")),args:$args}')
             echo "::group::delegate $name -> $image"
             code=$(curl -sS -o "$TMP/delegate.out" -w '%{http_code}' -X POST "$RUNNER_URL" \
               -H "Authorization: Bearer $HANZO_API_TOKEN" -H 'Content-Type: application/json' -d "$body")
@@ -2475,7 +2517,7 @@ jobs:
         # does.) The repo's OWN tag lane publishes to its registry; this only
         # mints the tag that starts it, so the publish credential stays where the
         # publish is.
-        if: inputs.mode != 'delegate' && steps.client.outputs.ran == '1' && steps.client.outputs.changed == '1' && github.event_name != 'pull_request'
+        if: steps.client.outputs.ran == '1' && steps.client.outputs.changed == '1' && github.event_name != 'pull_request'
         run: |
           set -euo pipefail
           git config user.name "Zach Kelling"; git config user.email z@zeekay.io
@@ -2624,7 +2666,6 @@ jobs:
         # dist/binaries.json is uploaded with them: url + sha256 for every
         # artifact, so the bits and the digest that authorizes them are the same
         # release, and a host reads url+sum from ONE place.
-        if: inputs.mode != 'delegate'
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
           GH_AUTOMATIC: ${{ secrets.GITHUB_TOKEN }}
