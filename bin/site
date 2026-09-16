@@ -489,10 +489,40 @@ else
     echo "  $got bytes"; return 0
   }
 
+  # A client preview is gated on purpose: the guard answers an API caller 401 and
+  # a browser a redirect to hanzo.id, so its bytes are NOT readable anonymously
+  # and the 200 above can never arrive. That is the gate working, not an
+  # unreadable object -- the "every host is gated" step in the calling workflow
+  # REQUIRES exactly this answer, so demanding 200 here asks one deploy to be two
+  # contradictory things. It cost 27 of 29 client sites: the first slug of each
+  # repo published, the read-back failed it, and `set -e` took the rest down with
+  # it, leaving hosts that resolve and gate with nothing behind them.
+  #
+  # Asking as a browser, without following, tells a gate from a failure: a gate
+  # redirects to hanzo.id naming THIS host as the callback, which proves the host
+  # is routed and guarded. Anything else still fails.
+  gated() {
+    local out code loc host
+    host=${live#*://}; host=${host%%/*}
+    out=$(curl -sS --max-time 30 -o /dev/null -H 'Accept: text/html' \
+            -w '%{http_code} %{redirect_url}' "$live" 2>/dev/null) || return 1
+    code=${out%% *}; loc=${out#* }
+    case "$code" in 301|302|303|307|308) ;; *) return 1 ;; esac
+    case "$loc" in https://hanzo.id/*|https://*.hanzo.id/*) ;; *) return 1 ;; esac
+    case "$loc" in *"$host"*) ;; *) return 1 ;; esac
+    return 0
+  }
+
   ok=
   for attempt in 1 2 3; do
     printf 'read-back %s (attempt %d): ' "$live" "$attempt"
     if readback; then ok=1; break; fi
+    # Named out loud, because a gated host counted as verified in silence is how
+    # a site that serves nothing would pass this check.
+    if gated; then
+      echo "  gated by hanzo.id: routed and guarded, so its bytes are not read back"
+      ok=1; break
+    fi
     [ "$attempt" -lt 3 ] && sleep 5
   done
 
