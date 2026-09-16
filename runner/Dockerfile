@@ -19,9 +19,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     RUNNER_TOOL_CACHE=/opt/hostedtoolcache
 
+# The toolchain the reusable build asks for at job time. A job cannot install
+# it: sudo is setuid and the runner's filesystem is nosuid, so `sudo apt-get`
+# answers "effective uid is not 0" and the step exits 1 — which is how every
+# repo with a `client:` lane went red. build.yml already guards each of those
+# steps with `command -v javac`, `pkg-config --exists openssl` and a libclang
+# lookup, so carrying the packages here makes all of them no-ops.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl wget git jq unzip zip xz-utils gnupg \
-      build-essential pkg-config \
+      build-essential pkg-config libssl-dev libclang-dev \
+      openjdk-21-jdk-headless \
       python3 python3-pip python3-venv \
       openssh-client rsync sudo tini procps \
  && rm -rf /var/lib/apt/lists/*
