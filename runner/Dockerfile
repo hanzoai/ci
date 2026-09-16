@@ -69,15 +69,16 @@ RUN install -m0755 -d /etc/apt/keyrings \
  && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli docker-buildx-plugin \
  && rm -rf /var/lib/apt/lists/*
 
-# act_runner: the agent that claims jobs from the forge.
-ARG ACT_RUNNER_VERSION=0.2.13
+# git-runner: the agent that claims jobs from Hanzo Git. The binary is Gitea's
+# act_runner release, installed under the name this estate calls it.
+ARG RUNNER_VERSION=0.2.13
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in amd64) a=amd64 ;; arm64) a=arm64 ;; *) echo "unsupported $arch" >&2; exit 1 ;; esac; \
-    curl -fsSL -o /usr/local/bin/act_runner \
-      "https://gitea.com/gitea/act_runner/releases/download/v${ACT_RUNNER_VERSION}/act_runner-${ACT_RUNNER_VERSION}-linux-${a}"; \
-    chmod +x /usr/local/bin/act_runner; \
-    act_runner --version
+    curl -fsSL -o /usr/local/bin/git-runner \
+      "https://gitea.com/gitea/act_runner/releases/download/v${RUNNER_VERSION}/act_runner-${RUNNER_VERSION}-linux-${a}"; \
+    chmod +x /usr/local/bin/git-runner; \
+    git-runner --version
 
 # The hanzo CLI, so a job can reach the cloud it builds for rather than
 # re-implementing a piece of it in shell.

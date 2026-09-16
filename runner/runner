@@ -1,5 +1,5 @@
 #!/bin/sh
-# The runner for one job. A forge job arrives as a registration token; a GitHub
+# The runner for one job. A Hanzo Git job arrives as a registration token; a GitHub
 # job arrives as a just-in-time configuration. Either way the process ends with
 # the job, and the pod with it.
 set -eu
@@ -23,8 +23,8 @@ if [ -n "${RUNNER_JITCONFIG:-}" ]; then
   wait "$listener"
   exit
 fi
-: "${GITEA_INSTANCE_URL:?the forge URL}" "${GITEA_RUNNER_REGISTRATION_TOKEN:?a registration token}" "${RUNNER_LABELS:?the labels the job asked for}"
-act_runner register --no-interactive --ephemeral \
-  --instance "$GITEA_INSTANCE_URL" --token "$GITEA_RUNNER_REGISTRATION_TOKEN" \
+: "${GIT_RUNNER_URL:?the Hanzo Git URL}" "${GIT_RUNNER_TOKEN:?a registration token}" "${RUNNER_LABELS:?the labels the job asked for}"
+git-runner register --no-interactive --ephemeral \
+  --instance "$GIT_RUNNER_URL" --token "$GIT_RUNNER_TOKEN" \
   --name "${RUNNER_NAME:-$(hostname)}" --labels "$RUNNER_LABELS"
-exec act_runner daemon --once
+exec git-runner daemon --once
