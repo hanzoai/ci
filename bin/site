@@ -399,16 +399,16 @@ put() {
   # `sslv3 alert bad record mac` (curl 56). Seventy-two of 7980 died that way on
   # a laptop publish; every one of them succeeded on a second attempt.
   local attempt
-  for attempt in 1 2 3; do
-    curl -sS --fail-with-body -o /dev/null \
+  for attempt in 1 2 3 4 5; do
+    curl -sS --fail-with-body -m 60 -o /dev/null \
       -X POST "$UP_URL" \
       -F "key=$PREFIX/$rel" "${args[@]}" \
       -F "Content-Type=$(ctype "$rel")" \
       -F "file=@$DIR/$rel" \
       && return 0
-    sleep "$attempt"
+    sleep "$((attempt * 2))"
   done
-  echo "::error::upload failed after 3 attempts: $rel"
+  echo "::error::upload failed after 5 attempts: $rel"
   return 1
 }
 export -f put ctype
