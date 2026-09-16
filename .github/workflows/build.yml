@@ -2069,6 +2069,15 @@ jobs:
             # back serving fewer platforms than hanzo.yml declares fails the run instead
             # of publishing an arch-neutral tag over one architecture.
             plat=$(echo "$img"|jq -r '(.platforms // ["linux/amd64","linux/arm64"]) | join(",")')
+            # A deliberate single architecture is allowed and is worth saying out
+            # loud, because the cost lands somewhere else: the workload can only be
+            # scheduled on nodes of that kind, so its pin needs a nodeSelector and
+            # the service goes down with that half of the fleet. Ninety-four values
+            # files carry one today.
+            case "$plat" in
+              *,*) : ;;
+              *) echo "::warning::images[$name] declares platforms: $plat. One architecture is one half of the fleet: this image cannot be scheduled on the other, and whatever runs it needs a nodeSelector to say so. Drop the line to publish both." ;;
+            esac
             # Same Go-builder check the buildx lane runs. It belongs here too:
             # delegating the build moves WHERE it runs, not whether the image
             # can compile the module, and a mismatch sent to the door fails on a
@@ -2277,21 +2286,28 @@ jobs:
             # (e.g. "ce"/"ee") it qualifies every tag; when absent the tags are
             # clean (no trailing dash). Build + deploy must agree on this shape.
             sfx=$(echo "$img"|jq -r '."tag-suffix" // ""')
-            # `platforms:` names the architectures the image must RUN on. Default
-            # linux/amd64, which is what every image in the estate serves today, so a
-            # repo that says nothing keeps the image it already had. A repo that needs
-            # both says so once:
+            # `platforms:` names the architectures the image must RUN on, and the
+            # default is BOTH — the same default the door lane above reads, stated
+            # once for the two of them.
             #
-            #   platforms: [linux/amd64, linux/arm64]
+            # It used to default to linux/amd64 here "because that is what every
+            # image in the estate serves", and that sentence was the whole problem:
+            # this fleet is two nodes and two architectures, so an image with one
+            # half is a service that cannot move. Measured 2026-09-15, eleven of the
+            # twelve images on the critical path had only amd64, and when the amd64
+            # node saturated its disk neither the edge nor the npm registry every JS
+            # build resolves through could be scheduled on the machine that was up.
+            # A default that quietly halves an image is a default that decides
+            # availability for repos that never made a choice.
             #
-            # THIS LANE BUILDS NATIVELY OR NOT AT ALL. A job holds one runner and a
-            # runner is one machine, so a second architecture here can only be emulated
-            # -- and an emulated build is slow enough to be the reason a queue forms on
-            # the one node that can serve it. `mode: delegate` is where a repo gets both
-            # without emulating either: the door schedules a build per architecture, on a
-            # node of that architecture. The refusal below says so rather than reaching
-            # for binfmt.
-            plats=$(echo "$img"|jq -r '(.platforms // ["linux/amd64"]) | join(",")')
+            # THIS LANE STILL BUILDS NATIVELY OR NOT AT ALL. A job holds one runner
+            # and a runner is one machine, so the second architecture here could only
+            # be emulated, and an emulated build is slow enough to be the reason a
+            # queue forms. `mode: delegate` — the default mode — is where a repo gets
+            # both natively: the door schedules a build per architecture on a node of
+            # that architecture. So a caller that asked for buildx and wants one
+            # architecture now says which one, and the refusal below says so.
+            plats=$(echo "$img"|jq -r '(.platforms // ["linux/amd64","linux/arm64"]) | join(",")')
             # The architecture this runner IS, in buildx's spelling, read from the kernel
             # rather than from the label the caller passed: a label is what somebody
             # asked for and uname is what arrived.
@@ -2302,7 +2318,7 @@ jobs:
             esac
             for p in ${plats//,/ }; do
               [ "$p" = "$self" ] && continue
-              echo "::error::images[$name] declares platforms: $plats, and this runner is $self. Building $p here means emulating it, which is slower than the fleet can absorb and is why one node carries every build. Two ways to get $p natively: \`with: { mode: delegate }\` builds each architecture in-cluster on a node of that architecture, or a caller that passes \`runner:\` for $p builds it on a machine of that kind."
+              echo "::error::images[$name] builds for $plats and this runner is $self. Building $p here means emulating it, which is slower than the fleet can absorb and is why one node carries every build. Three ways forward: drop \`mode: buildx\` and the door builds each architecture in-cluster on a node of that architecture; pass \`runner:\` for $p to build it on a machine of that kind; or declare \`platforms: [$self]\` in hanzo.yml to ship one architecture on purpose — an image with one half is a service that cannot move off the node that serves it."
               exit 1
             done
             # ---- Refuse a Go builder older than the module it compiles -------
