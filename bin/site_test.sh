@@ -122,7 +122,7 @@ fi
 shim="$tmp/bin"; mkdir -p "$shim"
 cat > "$shim/curl" <<'SHIM'
 #!/usr/bin/env bash
-out=/dev/null hdr=/dev/null url= method=GET body= src= fields=()
+out=/dev/null hdr=/dev/null url= method=GET body= src= wfmt= fields=()
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
@@ -135,6 +135,7 @@ while [ $# -gt 0 ]; do
     # than the thing sent, which is precisely the error a size test cannot carry.
     --data-binary) src="${2#@}"; shift 2 ;;
     -F) fields+=("$2"); shift 2 ;;
+    -w) wfmt="$2"; shift 2 ;;
     http*) url="$1"; shift ;;
     *) shift ;;
   esac
@@ -163,6 +164,16 @@ case "$url" in
                    case "${T_BACK:-ok}" in
                      empty) : > "$out";           len=0  ;;
                      short) printf 'hi' > "$out"; len=99 ;;
+                     # A gated client preview. The plain read-back is an API
+                     # caller and gets 401; the browser-shaped probe gets the
+                     # guard's redirect, naming this host as its own callback.
+                     gated) : > "$out"
+                            printf 'content-length: 0\r\n' > "$hdr"
+                            case "$wfmt" in
+                              *redirect_url*) printf '302 https://hanzo.id/v1/iam/oauth/authorize?client_id=hanzo-guard&redirect_uri=https%%3A%%2F%%2Fa-slug.hanzo.app%%2F__guard%%2Fcallback' ;;
+                              *) printf '401' ;;
+                            esac
+                            exit 0 ;;
                      *)     printf '<h1>hi</h1>\n' > "$out"
                             len=$(wc -c < "$out" | tr -d ' ') ;;
                    esac
@@ -393,6 +404,20 @@ out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
       bash "$SD" a-slug "$site" 2>&1); rc=$?
 t "a short read fails the deploy"      "$([ "$rc" != 0 ] && echo failed)"  "failed"
 t "  ...reporting both counts, thrice" "$(printf '%s' "$out" | grep -c 'content-length promised')"  "3"
+
+# A gated client preview answers the read-back 401 BY DESIGN -- and the same
+# workflow's "every host is gated" step refuses to publish any host that answers
+# otherwise. Demanding 200 here asked one deploy to be two contradictory things:
+# the first slug of each repo published, the read-back called it unreadable, and
+# `set -e` took the remaining 27 client sites down with it, leaving hosts that
+# resolve and gate with nothing behind them.
+rm -f "$tmp/calls"
+out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
+      SITE_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_BACK=gated \
+      bash "$SD" a-slug "$site" 2>&1); rc=$?
+t "a gated preview publishes"          "$rc"  "0"
+t "  ...and says it was not read back" "$(printf '%s' "$out" | grep -c 'gated by hanzo.id')"  "1"
+t "  ...not calling it unreadable"     "$(printf '%s' "$out" | grep -c 'does not serve its own bytes')"  "0"
 
 [ $fail -eq 0 ] && echo "PASS" || echo "FAIL"
 exit $fail
