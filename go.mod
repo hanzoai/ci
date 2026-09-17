@@ -1,6 +1,6 @@
 module hanzo.ai/ci
 
-go 1.26.5
+go 1.27.1
 
 require github.com/hanzoai/authz v1.10.37
 

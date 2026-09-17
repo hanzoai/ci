@@ -6,7 +6,7 @@
 # it. So the image is still the binary and a CA bundle — nothing served from
 # disk, nothing to go stale against the code, and no JS toolchain on the path
 # that ships the board you read when the builds are broken.
-FROM golang:1.26.5-alpine AS builder
+FROM golang:1.27.1-alpine AS builder
 WORKDIR /build
 # Resolve through the module proxy: proxy.golang.org and sum.golang.org agree
 # and neither can change under us, which a direct fetch against a moved tag

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 )
@@ -143,12 +144,7 @@ var fleetTmpl = template.Must(template.New("fleet").Funcs(template.FuncMap{
 	"explain": explain,
 	"sha":     shortSHA,
 	"has": func(s Pipeline, d string) bool {
-		for _, x := range s.Drift {
-			if x == d {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(s.Drift, d)
 	},
 }).Parse(`<!doctype html>
 <html lang="en" class="dark"><head>

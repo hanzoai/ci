@@ -1,6 +1,7 @@
 package ci
 
 import (
+	"slices"
 	"testing"
 	"time"
 )
@@ -453,10 +454,5 @@ func TestBuildInFlightIsNotDrift(t *testing.T) {
 }
 
 func hasDrift(s Pipeline, d string) bool {
-	for _, x := range s.Drift {
-		if x == d {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(s.Drift, d)
 }
