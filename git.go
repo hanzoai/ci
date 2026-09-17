@@ -302,7 +302,7 @@ func (g *gitSource) link(ctx context.Context, repo, branch string) (link, error)
 	window := min(len(commits), reach)
 	built := -1
 	var stuck []commit
-	for i := 0; i < window; i++ {
+	for i := range window {
 		b := g.built(ctx, repo, byCommit[shortSHA(commits[i].SHA)], commits[i].At)
 		if i == 0 {
 			c.Tip.Check = b
@@ -513,10 +513,8 @@ func each[T any](ctx context.Context, items []T, fn func(context.Context, T) err
 		errs error
 	)
 	in := make(chan T)
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range workers {
+		wg.Go(func() {
 			for it := range in {
 				if err := fn(ctx, it); err != nil {
 					mu.Lock()
@@ -524,7 +522,7 @@ func each[T any](ctx context.Context, items []T, fn func(context.Context, T) err
 					mu.Unlock()
 				}
 			}
-		}()
+		})
 	}
 	for _, it := range items {
 		select {

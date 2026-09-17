@@ -28,7 +28,7 @@ func declared(body string) (string, Artifact) {
 		image  string
 		inside bool
 	)
-	for _, raw := range strings.Split(body, "\n") {
+	for raw := range strings.SplitSeq(body, "\n") {
 		line := strings.TrimRight(raw, "\r")
 		if trimmed := strings.TrimSpace(line); trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue

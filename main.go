@@ -509,10 +509,8 @@ func poll(ctx context.Context, logger *slog.Logger, src *gitSource, cache *runCa
 			wg   sync.WaitGroup
 		)
 		jobs := make(chan string)
-		for i := 0; i < workers; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+		for range workers {
+			wg.Go(func() {
 				for name := range jobs {
 					rs, err := src.runs(rctx, name, cfg.runsPer)
 					mu.Lock()
@@ -526,7 +524,7 @@ func poll(ctx context.Context, logger *slog.Logger, src *gitSource, cache *runCa
 					}
 					mu.Unlock()
 				}
-			}()
+			})
 		}
 		for _, n := range names {
 			select {
