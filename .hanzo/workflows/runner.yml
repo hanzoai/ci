@@ -28,7 +28,7 @@ on:
     branches: [main]
     paths:
       - runner/**
-      - .github/workflows/runner.yml
+      - .hanzo/workflows/runner.yml
   workflow_dispatch: {}
 
 concurrency:
@@ -127,7 +127,7 @@ jobs:
           docker run --rm --entrypoint sh "$img" -c "$cc --version | head -1"
 
           # The real entrypoint chain, unconfigured. runner(1) refuses with
-          #   GITEA_INSTANCE_URL: the forge URL
+          #   GIT_RUNNER_URL: the Hanzo Git URL
           # which proves tini loaded, exec'd the script, and the script ran. A
           # wrong-arch image cannot reach that message — it dies at `exec format
           # error` instead, so the two failures are never confused.
@@ -135,7 +135,7 @@ jobs:
             echo "::error::entrypoint exited 0 with no forge configured"; exit 1
           fi
           case "$out" in
-            *GITEA_INSTANCE_URL*) echo "entrypoint: refused by name — ok" ;;
+            *GIT_RUNNER_URL*) echo "entrypoint: refused by name — ok" ;;
             *) echo "::error::entrypoint failed for the wrong reason: $out"; exit 1 ;;
           esac
 
