@@ -508,7 +508,8 @@ jobs:
           mkdir -p "$HOME/.local/bin"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           if ! command -v jq >/dev/null 2>&1; then
-            curl -fsSL https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64 \
+            case "$(uname -m)" in aarch64) jqarch=arm64;; *) jqarch=amd64;; esac
+            curl -fsSL "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-${jqarch}" \
               -o "$HOME/.local/bin/jq" && chmod +x "$HOME/.local/bin/jq" \
             || { sudo apt-get update -qq && sudo apt-get install -y -qq jq; }
           fi
@@ -2186,7 +2187,8 @@ jobs:
           if [ -s "$TMP/alias.txt" ]; then
             command -v crane >/dev/null 2>&1 || {
               mkdir -p "$HOME/.local/bin"
-              curl -fsSL https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_Linux_x86_64.tar.gz \
+              case "$(uname -m)" in aarch64) cranearch=arm64;; *) cranearch=x86_64;; esac
+              curl -fsSL "https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_Linux_${cranearch}.tar.gz" \
                 | tar -xz -C "$HOME/.local/bin" crane
               export PATH="$HOME/.local/bin:$PATH"
             }
@@ -2487,7 +2489,8 @@ jobs:
               # buildx's multi-scope token request (spec gap, tracked).
               command -v crane >/dev/null 2>&1 || {
                 mkdir -p "$HOME/.local/bin"
-                curl -fsSL https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_Linux_x86_64.tar.gz \
+                case "$(uname -m)" in aarch64) cranearch=arm64;; *) cranearch=x86_64;; esac
+                curl -fsSL "https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_Linux_${cranearch}.tar.gz" \
                   | tar -xz -C "$HOME/.local/bin" crane
                 export PATH="$HOME/.local/bin:$PATH"
               }
