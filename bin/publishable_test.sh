@@ -57,7 +57,7 @@ d="$tmp/msg"; mkdir -p "$d"
 printf 'images:\n  - name: app\n    build_secrets: [EVENT_INGEST_KEY]\n' > "$d/hanzo.yml"
 out=$(bash "$PUB" "$d/hanzo.yml" 2>&1)
 for pat in "EVENT_INGEST_KEY" "docker history" "PUBLISHABLE_" "cannot be a build_secret"; do
-  if printf '%s' "$out" | grep -qF "$pat"; then printf 'ok    %-56s\n' "message names '$pat'"
+  if grep -qF -- "$pat" <<<"$out"; then printf 'ok    %-56s\n' "message names '$pat'"
   else printf 'FAIL  %-56s\n      got: %s\n' "message names '$pat'" "$out"; fail=1; fi
 done
 

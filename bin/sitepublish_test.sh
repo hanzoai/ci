@@ -24,7 +24,7 @@ t() { # t <name> <want_rc> <got_rc> [<must-contain> <output>]
   if [ "$got" != "$want" ]; then
     printf 'FAIL  %-58s rc=%s (want %s)\n' "$name" "$got" "$want"; fail=1; return
   fi
-  if [ -n "$needle" ] && ! printf '%s' "$out" | grep -qF -- "$needle"; then
+  if [ -n "$needle" ] && ! grep -qF -- "$needle" <<<"$out"; then
     printf 'FAIL  %-58s rc=%s but missing %q\n' "$name" "$got" "$needle"; fail=1
     printf '      got: %s\n' "$(printf '%s' "$out" | head -c 300)"; return
   fi
