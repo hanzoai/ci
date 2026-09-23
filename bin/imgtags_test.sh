@@ -67,12 +67,12 @@ l() { # l <step name>
   if [ -z "$body" ]; then
     printf 'FAIL  %-52s -> step not found in %s\n' "$name" "$WF"; fail=1; return
   fi
-  if echo "$body" | grep -q 'bin/imgtags'; then
+  if grep -q 'bin/imgtags' <<<"$body"; then
     printf 'ok    %-52s -> takes its tags from bin/imgtags\n' "$name"
   else
     printf 'FAIL  %-52s -> does not call bin/imgtags\n' "$name"; fail=1
   fi
-  if echo "$body" | grep -q 'sha-\${SHORT}'; then
+  if grep -q 'sha-\${SHORT}' <<<"$body"; then
     printf 'FAIL  %-52s -> spells a sha- ref inline; the shape is imgtags'"'"' to state\n' "$name"; fail=1
   else
     printf 'ok    %-52s -> spells no tag of its own\n' "$name"
@@ -83,7 +83,7 @@ l "Build & push images (per hanzo.yml)"
 
 # The delegate lane derives its number the same way the buildx lane does, so a
 # branch build on either lane publishes the same series.
-if lane "Delegate build to the runner (mode=delegate)" | grep -q 'bin/imgver'; then
+if grep -q 'bin/imgver' <<<"$(lane "Delegate build to the runner (mode=delegate)")"; then
   printf 'ok    %-52s -> derives its version with bin/imgver\n' "delegate lane"
 else
   printf 'FAIL  %-52s -> does not call bin/imgver, so its number is a second rule\n' "delegate lane"; fail=1

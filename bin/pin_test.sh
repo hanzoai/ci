@@ -102,7 +102,7 @@ else
   echo "FAIL --apply: $out"; fail=1
 fi
 # The push must have actually LANDED on the branch, not merely been reported.
-if git -C "$tmp/applyme.git" show main:go.mod 2>/dev/null | grep -q 'v2.0.0'; then
+if grep -q 'v2.0.0' <<<"$(git -C "$tmp/applyme.git" show main:go.mod 2>/dev/null)"; then
   echo "ok   --apply lands the bump on the branch"
 else
   echo "FAIL --apply did not land: $(git -C "$tmp/applyme.git" show main:go.mod 2>&1 | tr '\n' ' ')"; fail=1
@@ -158,7 +158,7 @@ out=$(PATH="$tmp/stub:$PATH" bash "$PIN" --apply example.com/lib "$tmp/alreadyre
 grep -q "main already red in 1, unchanged" <<<"$out" &&
   echo "ok   an unchanged red suite still ships" ||
   { echo "FAIL already-red: $out"; fail=1; }
-git -C "$tmp/alreadyred.git" show main:go.mod 2>/dev/null | grep -q 'v2.0.0' &&
+grep -q 'v2.0.0' <<<"$(git -C "$tmp/alreadyred.git" show main:go.mod 2>/dev/null)" &&
   echo "ok   and the bump lands" ||
   { echo "FAIL already-red did not land"; fail=1; }
 
@@ -181,7 +181,7 @@ out=$(PATH="$tmp/stub:$PATH" bash "$PIN" --apply example.com/lib "$tmp/regressed
 grep -q "TESTS REGRESSED at v2.0.0: example.com/x/newlybroken" <<<"$out" &&
   echo "ok   a new failure is a regression and names it" ||
   { echo "FAIL regression: $out"; fail=1; }
-git -C "$tmp/regressed.git" show main:go.mod 2>/dev/null | grep -q 'v1.0.0' &&
+grep -q 'v1.0.0' <<<"$(git -C "$tmp/regressed.git" show main:go.mod 2>/dev/null)" &&
   echo "ok   and a regression does not land" ||
   { echo "FAIL a regression landed anyway"; fail=1; }
 

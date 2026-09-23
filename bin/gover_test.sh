@@ -25,7 +25,7 @@ tmsg() {
   printf 'module x\n\ngo %s\n' "$gomod" > "$d/go.mod"
   printf '%s\n' "$@" > "$d/Dockerfile"
   out=$(cd "$d" && bash "$GOVER" Dockerfile . 2>&1)
-  if printf '%s' "$out" | grep -q "$pat"; then printf 'ok    %-56s\n' "$name"
+  if grep -q -- "$pat" <<<"$out"; then printf 'ok    %-56s\n' "$name"
   else printf 'FAIL  %-56s\n      got: %s\n' "$name" "$out"; fail=1; fi
 }
 

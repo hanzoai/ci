@@ -71,7 +71,7 @@ m "$IDX1"; r "no expectation asserts nothing"           0 x:1
 # cloud:sha-ac39bda an arch-neutral tag over a single amd64 manifest.
 for lane in "Build & push images (per hanzo.yml)" "Delegate build to the runner (mode=delegate)"; do
   s=$(awk -v n="      - name: $lane" 'index($0,n)==1{f=1;next} f&&/^      - name: /{exit} f' "$WF")
-  if printf '%s' "$s" | grep -q 'bin/imgplat'; then
+  if grep -q 'bin/imgplat' <<<"$s"; then
     printf 'ok    %-56s -> proves what it published\n' "${lane%% (*}"
   else
     printf 'FAIL  %-56s -> publishes without reading the manifest back\n' "${lane%% (*}"; fail=1
