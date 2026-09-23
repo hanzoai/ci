@@ -457,7 +457,7 @@ pass their labels:
 ## Delegate the build (skip runner buildx)
 
 By default the build runs buildx **on** the runner. To instead hand the build to
-the fabric's build door — `POST /v1/runner` on **api.hanzo.ai**, which launches a
+the fabric's build door — `POST /v1/build` on **api.hanzo.ai**, which launches a
 BuildKit Job in-cluster and pushes the image — pass `mode: delegate`:
 
 ```yaml
@@ -475,7 +475,10 @@ own**: it presents this org's IAM identity, which the KMS login in the same job
 already mints from `KMS_CLIENT_ID` / `KMS_CLIENT_SECRET`. The build states the
 repository, the commit this run gated, the output image and the Dockerfile; the
 organization is the door's to read off that identity, so there is no field for
-one and nothing for a caller to get wrong.
+one and nothing for a caller to get wrong. The door builds only into the
+registry namespaces that org owns — hanzo: `ghcr.io/hanzoai`, `hanzo-inc`; lux:
+`ghcr.io/luxfi`, `lux-cpp`, `lux-gpu`; zoo: `ghcr.io/zooai` — and refuses every
+other, whoever asks.
 
 Two declarations the door cannot express, and the lane refuses each before it
 POSTs rather than publishing an image that is not the one the repo asked for:
@@ -504,7 +507,12 @@ the fleet runner, so delegation is strictly opt-in.
 ## Credentials
 
 The only GitHub secrets a repo sets are `KMS_CLIENT_ID` / `KMS_CLIENT_SECRET`
-(plus the `KMS_WORKSPACE` repo variable). Everything else — the GHCR push token,
+(plus the `KMS_WORKSPACE` repo variable), held once per GitHub org. They are that
+org's own CI identity: the IAM service application `<org>-ci` — `hanzo-ci` for
+the hanzo* orgs, `lux-ci` for luxfi, `zoo-ci` for zooai — whose secret lives in
+KMS at `<org>/iam/clients/<org>-ci`. A token minted from it names that org and
+no other, so a repo's CI reads its own org's secrets and publishes into its own
+org's registry. Everything else — the GHCR push token,
 the cluster kubeconfig, `HANZO_GIT_TOKEN` — is pulled from KMS (`kms.hanzo.ai`,
 Universal Auth) at run time. No long-lived registry or cluster credentials live
 in GitHub.
