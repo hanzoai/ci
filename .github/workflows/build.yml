@@ -30,15 +30,12 @@ on:
     inputs:
       runner:
         description: >-
-          The runners to test on, as a JSON array of labels — one runner, one
-          leg each, all at once. Every leg must pass before anything publishes,
-          and the FIRST label is where publishing runs. The default tests on
-          both architectures the fleet ships, so an arm64 image is never
-          published from tests that only ran on amd64. Bring-your-own: name
-          your own runners' labels. A label nobody advertises queues with no
-          error to read.
+          Labels of the runner that publishes, as a JSON array. Tests run on
+          linux-amd64 AND linux-arm64 whatever this names — every image ships
+          for both, so both are gated. Bring-your-own: name your own runner's
+          labels. A label nobody advertises queues with no error to read.
         type: string
-        default: '["linux-amd64","linux-arm64"]'
+        default: '["linux-amd64"]'
       mode:
         description: >-
           Where the IMAGE is built. `delegate` (default) POSTs it to the build
@@ -190,14 +187,17 @@ permissions:
 
 jobs:
   test:
-    # Every leg at once, one runner per architecture. Nothing publishes here:
-    # `cicd` needs this job, so a red leg on either architecture leaves no image,
-    # no tag and no release behind — a matrix leg cannot wait for its sibling,
-    # which is why publishing is a job of its own and not a step here.
+    # Both architectures at once, one runner each. Nothing publishes here: `cicd`
+    # needs this job, so a red leg on either architecture leaves no image, tag or
+    # release behind — a matrix leg cannot wait for its sibling, which is why
+    # publishing is a job of its own. The legs are written out, not read from an
+    # input: Hanzo Git expands a reusable workflow without evaluating `inputs` in
+    # `strategy.matrix`, and a leg labelled with the unevaluated expression waits
+    # for a runner forever.
     strategy:
       fail-fast: true
       matrix:
-        runner: ${{ fromJson(inputs.runner) }}
+        runner: [linux-amd64, linux-arm64]
     runs-on: ${{ matrix.runner }}
     env:
       # corepack fetches the pnpm/yarn TARBALL ITSELF from registry.npmjs.org,
@@ -3203,7 +3203,7 @@ jobs:
     concurrency:
       group: hanzoai-ci-${{ github.repository }}-${{ github.workflow }}-${{ github.ref }}
       cancel-in-progress: ${{ github.ref_type != 'tag' }}
-    runs-on: ${{ fromJson(inputs.runner)[0] }}
+    runs-on: ${{ fromJson(inputs.runner) }}
     env:
       COREPACK_NPM_REGISTRY: https://pkg.hanzo.ai
       HANZO_CI_ROLE: publish
