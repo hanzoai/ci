@@ -2137,8 +2137,19 @@ jobs:
               --arg plat "$plat" --argjson args "$bargs" \
               '{repo:$repo,sha:$sha,image:$image,dockerfile:$dockerfile,platforms:($plat|split(",")),args:$args}')
             echo "::group::delegate $name -> $image"
-            code=$(curl -sS -o "$TMP/delegate.out" -w '%{http_code}' -X POST "$RUNNER_URL" \
-              -H "Authorization: Bearer $HANZO_API_TOKEN" -H 'Content-Type: application/json' -d "$body")
+            # A 429 is the door's per-org build ceiling: a queue, not a refusal.
+            # Every build now fans out to both architectures and an org holds one
+            # build at a time, so two repos publishing together meet it as a
+            # matter of course. Wait for the slot on the same budget cloud's own
+            # image job gives it, and refuse only what is still 429 after that.
+            deadline=$(( $(date +%s) + 1200 ))
+            while :; do
+              code=$(curl -sS -o "$TMP/delegate.out" -w '%{http_code}' -X POST "$RUNNER_URL" \
+                -H "Authorization: Bearer $HANZO_API_TOKEN" -H 'Content-Type: application/json' -d "$body")
+              [ "$code" = 429 ] && [ "$(date +%s)" -lt "$deadline" ] || break
+              echo "build door at its per-org ceiling; waiting for the slot"
+              sleep 30
+            done
             cat "$TMP/delegate.out"; echo
             echo "::endgroup::"
             # 202 = a build job was created. The door says why for everything
