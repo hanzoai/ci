@@ -2608,7 +2608,6 @@ jobs:
             *)    FILE=${bump%%:*}; READ=${bump#*:}; CUR=$(bash -c "$READ") ;;
           esac
 
-          NEXT=""
           # THE RELEASE'S NUMBER WINS. A projection of one document answers to that
           # document's version, so when the release handed one down the cut uses it
           # verbatim instead of counting this repo's own patches. It is not a bump:
@@ -2618,24 +2617,43 @@ jobs:
           #
           # Already-published is not an error to pre-empt here: the registry refuses
           # a duplicate itself, and that refusal names the real condition.
-          RELEASED="${{ steps.client.outputs.version }}"
-          if [ -n "$RELEASED" ]; then
-            NEXT="$RELEASED"
-            MSG="$MSG (${NEXT})"
-          elif [ -n "$CUR" ]; then
-            case "$CUR" in
-              *.*.*[!0-9.]*|*[!0-9.]*) echo "::error::client version '$CUR' is not x.y.z — declare a version: this lane can derive a patch from, or drop the key and cut by hand"; exit 1 ;;
-            esac
-            NEXT="${CUR%.*}.$(( ${CUR##*.} + 1 ))"
-            MSG="$MSG (${NEXT})"
-            if [ -n "$FILE" ]; then
+          #
+          # bin/cut_test.sh lifts this function out of this file and runs it.
+          # cut BEGIN
+          # cut <released> <current> <file> <read>: set NEXT to the version to cut,
+          # and write it into <file> when the repo keeps it in one. An empty NEXT
+          # cuts nothing.
+          cut() {
+            local released=$1 cur=$2 file=$3 read=$4 next="" now
+            NEXT=""
+            if [ -n "$released" ]; then
+              # It becomes a tag and a sed replacement, so it is a version or nothing.
+              [[ $released =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::the release's version '$released' is not x.y.z"; return 1; }
+              next=$released
+            elif [ -n "$cur" ]; then
+              case "$cur" in
+                *.*.*[!0-9.]*|*[!0-9.]*) echo "::error::client version '$cur' is not x.y.z — declare a version: this lane can derive a patch from, or drop the key and cut by hand"; return 1 ;;
+              esac
+              next="${cur%.*}.$(( ${cur##*.} + 1 ))"
+            fi
+            # THE FILE CARRIES THE NUMBER THE TAG DOES, however it was chosen. The
+            # rewrite used to sit under the derived patch alone, so a release's
+            # number tagged a file still naming the last one: rust-sdk's release
+            # refused the tag against Cargo.toml, and the npm, PyPI and Maven
+            # publishers saw no new version and published nothing.
+            if [ -n "$next" ] && [ -n "$file" ] && [ "$cur" != "$next" ]; then
+              [ -n "$cur" ] || { echo "::error::$file names no version for the cut to rewrite (read: $read)"; return 1; }
               # Rewrite in place, then prove it moved. A sed that matched nothing
               # is a tag that names the previous release's bytes.
-              sed -i "0,/${CUR//./\\.}/s//${NEXT}/" "$FILE"
-              NOW=$(bash -c "$READ")
-              [ "$NOW" = "$NEXT" ] || { echo "::error::version bump did not take in $FILE ($CUR -> $NOW, wanted $NEXT)"; exit 1; }
+              sed -i "0,/${cur//./\\.}/s//${next}/" "$file"
+              now=$(bash -c "$read")
+              [ "$now" = "$next" ] || { echo "::error::version bump did not take in $file ($cur -> $now, wanted $next)"; return 1; }
             fi
-          fi
+            NEXT=$next
+          }
+          # cut END
+          cut "${{ steps.client.outputs.version }}" "$CUR" "$FILE" "$READ"
+          [ -z "$NEXT" ] || MSG="$MSG (${NEXT})"
 
           git add -A
           git commit -q --trailer "Co-authored-by: Hanzo Dev <dev@hanzo.ai>" -m "$MSG"
