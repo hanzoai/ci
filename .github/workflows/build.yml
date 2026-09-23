@@ -1981,14 +1981,14 @@ jobs:
           # takes the org's own machine identity and answers 400 for an empty
           # body — the door, admitting the credential this step holds.
           #
-          # Reached as the SERVICE it is. The runner and cloud sit in the same
-          # cluster, and addressing the public host sent this request out to the
-          # edge, through a tunnel, and back to a pod one hop away — which is
-          # where it died: the ingress saw a 502 in 180ms and cloud logged the
-          # request not at all. A build should not leave the cluster to reach a
-          # service beside it. RUNNER_URL still overrides for anything running
-          # outside.
-          RUNNER_URL: ${{ vars.RUNNER_URL || 'http://cloud.hanzo.svc.cluster.local:8000/v1/build' }}
+          # Reached by its PUBLIC name, the way any client reaches it. A runner
+          # executes whatever a repository says, so the cluster walls it off
+          # (universe infra/aws/k8s/ci.yaml, runner-isolation): egress is DNS and
+          # 80/443 to public addresses, and every RFC1918 range is excepted, so
+          # cloud's Service address is refused in milliseconds. Dialled here, it
+          # failed every delegated build on the AWS cluster before the door saw
+          # it. RUNNER_URL still overrides for a runner somewhere else.
+          RUNNER_URL: ${{ vars.RUNNER_URL || 'https://api.hanzo.ai/v1/build' }}
           # The version tag is WRITTEN by this job, onto the manifest the door
           # pushed, so this lane needs the registry credential the buildx lane's
           # login steps hold — and the registry read bin/imgver takes its
