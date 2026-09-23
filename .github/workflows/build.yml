@@ -30,16 +30,15 @@ on:
     inputs:
       runner:
         description: >-
-          Runner labels as a JSON array. `linux-amd64` is served on both planes:
-          the ephemeral `git-runner` Jobs the forge starts on git.hanzo.ai, and
-          the org-level self-hosted runners registered on github.com. Which of
-          the two answers depends on where the repository builds, not on this
-          input. Either way we run the build, metered as build minutes.
-          Bring-your-own: pass the labels of your own self-hosted runners.
-          A GitHub org with no runner registered advertises nothing, and a job
-          asking a label nobody advertises queues with no error to read.
+          The runners to test on, as a JSON array of labels — one runner, one
+          leg each, all at once. Every leg must pass before anything publishes,
+          and the FIRST label is where publishing runs. The default tests on
+          both architectures the fleet ships, so an arm64 image is never
+          published from tests that only ran on amd64. Bring-your-own: name
+          your own runners' labels. A label nobody advertises queues with no
+          error to read.
         type: string
-        default: '["linux-amd64"]'
+        default: '["linux-amd64","linux-arm64"]'
       mode:
         description: >-
           Where the IMAGE is built. `delegate` (default) POSTs it to the build
@@ -190,36 +189,16 @@ permissions:
   packages: write
 
 jobs:
-  cicd:
-    # One live run per ref. Every push queues a run and every queued run holds an
-    # ephemeral runner pod, so without this a burst of commits on one branch is a
-    # queue that grows rather than one that drains: on a single amd64 node those
-    # runs can never all execute, and each new push adds another pod behind them.
-    # The group is what makes a push supersede the one it replaces.
-    #
-    # The key is (repository, workflow, ref) — the three things that decide
-    # whether two runs are the same work:
-    #   two pushes to one branch  same ref, so the older run is cancelled the
-    #                             moment the newer one is admitted
-    #   a push during a tag build refs/heads/main and refs/tags/v1.2.3 are
-    #                             different refs, so the release is untouched;
-    #                             and cancel-in-progress is false on a tag either
-    #                             way, so nothing cancels a run that is producing
-    #                             an immutable artifact
-    #   two repositories          the repository is in the key, and both planes
-    #                             scope a group to its repository regardless
-    # A pull request is refs/pull/N/merge, so a re-push supersedes that PR's own
-    # run and never touches the branch it targets.
-    #
-    # Named for this reusable, because the forge compares a job group against
-    # run-level groups in the same repository: a caller that keeps its own group
-    # (hanzoai/ci pins one to the commit so a tag and a branch push of the same
-    # commit cannot both publish it) must not collide with this one. The two are
-    # separate mechanisms and both apply.
-    concurrency:
-      group: hanzoai-ci-${{ github.repository }}-${{ github.workflow }}-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref_type != 'tag' }}
-    runs-on: ${{ fromJson(inputs.runner) }}
+  test:
+    # Every leg at once, one runner per architecture. Nothing publishes here:
+    # `cicd` needs this job, so a red leg on either architecture leaves no image,
+    # no tag and no release behind — a matrix leg cannot wait for its sibling,
+    # which is why publishing is a job of its own and not a step here.
+    strategy:
+      fail-fast: true
+      matrix:
+        runner: ${{ fromJson(inputs.runner) }}
+    runs-on: ${{ matrix.runner }}
     env:
       # corepack fetches the pnpm/yarn TARBALL ITSELF from registry.npmjs.org,
       # and it does not read .npmrc to do it — so 317 repos that pin
@@ -228,7 +207,8 @@ jobs:
       # closes that hole; without it "installs go through our registry" is true
       # of the dependencies and false of the package manager fetching them.
       COREPACK_NPM_REGISTRY: https://pkg.hanzo.ai
-    steps:
+      HANZO_CI_ROLE: test
+    steps: &steps
       # ONE DOCKER CONFIG PER RUNNER, not one per machine. Several runner
       # services share a user on the build hosts, so they share
       # ~/.docker/config.json, and docker/login-action logs out in its post
@@ -419,6 +399,7 @@ jobs:
           echo "CI_HOME=$RUNNER_TEMP/ci" >> "$GITHUB_ENV"
 
       - name: Structural invariants (the repo agrees with itself)
+        if: env.HANZO_CI_ROLE == 'test'
         # Two cheap refusals, run before anything is built or pushed, for a
         # defect class no later stage can see: a declaration and the reality it
         # describes disagreeing in silence.
@@ -978,7 +959,7 @@ jobs:
           done
 
       - name: Log in to GHCR (GH_PAT, else the KMS GitHub token, else the automatic token)
-        if: inputs.mode != 'delegate' && steps.plan.outputs.images != '0'
+        if: env.HANZO_CI_ROLE == 'publish' && (inputs.mode != 'delegate' && steps.plan.outputs.images != '0')
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
         # GH_PAT is zeekay's PAT (org owner: write on every package, no
@@ -1042,7 +1023,7 @@ jobs:
 
 
       - name: GHCR push credential (KMS write:packages token)
-        if: inputs.mode != 'delegate' && steps.plan.outputs.images != '0'
+        if: env.HANZO_CI_ROLE == 'publish' && (inputs.mode != 'delegate' && steps.plan.outputs.images != '0')
         env:
           KUBECONFIG: ${{ steps.kms.outputs.kubeconfig }}
         # The per-job GITHUB_TOKEN — and a package-less GH_PAT — can only push a
@@ -1076,7 +1057,7 @@ jobs:
       # direct REGISTRY_USER/PASSWORD when one is set, otherwise the in-cluster
       # registry-credentials dockerconfig read through the KMS kubeconfig.
       - name: Native registry credential (oci.hanzo.ai)
-        if: inputs.mode != 'delegate' && steps.plan.outputs.images != '0'
+        if: env.HANZO_CI_ROLE == 'publish' && (inputs.mode != 'delegate' && steps.plan.outputs.images != '0')
         env:
           KUBECONFIG: ${{ steps.kms.outputs.kubeconfig }}
           # KMS first (exported to GITHUB_ENV by the step above), GitHub secret
@@ -1316,7 +1297,7 @@ jobs:
         # without a JDK. Guarded on the lane, not on a file: a repo with a
         # `client:` block needs it in every language, and a repo without one
         # never pays for it.
-        if: hashFiles('hanzo.yml') != ''
+        if: env.HANZO_CI_ROLE == 'publish' && (hashFiles('hanzo.yml') != '')
         run: |
           set -euo pipefail
           yq -e '.client' hanzo.yml >/dev/null 2>&1 || { echo "no client: lane — skipping JDK"; exit 0; }
@@ -1371,7 +1352,7 @@ jobs:
         # whatever hanzoai/openapi's main happened to be rather than from the
         # document this tree names. A gate whose input moves is a gate two runs
         # of one commit can disagree about.
-        if: hashFiles('hanzo.yml') != ''
+        if: env.HANZO_CI_ROLE == 'publish' && (hashFiles('hanzo.yml') != '')
         id: client
         env:
           # ONE HOST, SO ONE CREDENTIAL. The document lives on git.hanzo.ai and
@@ -1743,7 +1724,7 @@ jobs:
         # is the thing that passes or fails the phase. The split is the point — a
         # flag can only say what was INTENDED, a count says what HAPPENED, and the
         # verdict is taken from the count.
-        if: inputs.tests != 'false'
+        if: env.HANZO_CI_ROLE == 'test' && (inputs.tests != 'false')
         run: |
           set -euo pipefail
           NOTHING='\[no test files\]|\[no tests to run\]|no tests ran|collected 0 items|No tests found|no test specified|running 0 tests|Tests:[[:space:]]+0 total|(^|[^0-9])0 (passing|passed)'
@@ -1871,12 +1852,13 @@ jobs:
         # of these steps runs and a receipt always exists. Should a Hanzo Git ever make
         # both false — which is precisely how this input failed before — there is
         # no receipt, and the verdict refuses rather than reports green.
-        if: inputs.tests == 'false'
+        if: env.HANZO_CI_ROLE == 'test' && (inputs.tests == 'false')
         run: |
           set -euo pipefail
           echo "${GITHUB_SHA:-} off 0" > "${RUNNER_TEMP:-/tmp}/tests.receipt"
 
       - name: Test verdict
+        if: env.HANZO_CI_ROLE == 'test'
         # NO `if:`, and that is the design. This step's condition names no input,
         # so no input value can turn it off — not one a caller passes, not one a
         # default supplies, and not one a Hanzo Git substitutes for something the
@@ -1971,7 +1953,7 @@ jobs:
         # platform's own browser client, so the only token it admits is one that
         # a sign-in mints and no build holds one. One job, one address, and it is
         # the address that can answer.
-        if: inputs.mode == 'delegate'
+        if: env.HANZO_CI_ROLE == 'publish' && (inputs.mode == 'delegate')
         env:
           # `/v1/build`, FLAT, because building is its own service rather than
           # something platform owns — cloud registers it there and at no other
@@ -2254,7 +2236,7 @@ jobs:
         #
         # Nothing here needs the toolchains above it and Deploy still follows it,
         # so the ordering costs nothing and a red gate produces no image at all.
-        if: inputs.mode != 'delegate'
+        if: env.HANZO_CI_ROLE == 'publish' && (inputs.mode != 'delegate')
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
@@ -2566,7 +2548,7 @@ jobs:
         # does.) The repo's OWN tag lane publishes to its registry; this only
         # mints the tag that starts it, so the publish credential stays where the
         # publish is.
-        if: steps.client.outputs.ran == '1' && steps.client.outputs.changed == '1' && github.event_name != 'pull_request'
+        if: env.HANZO_CI_ROLE == 'publish' && (steps.client.outputs.ran == '1' && steps.client.outputs.changed == '1' && github.event_name != 'pull_request')
         run: |
           set -euo pipefail
           git config user.name "Zach Kelling"; git config user.email z@zeekay.io
@@ -2690,6 +2672,7 @@ jobs:
           fi
 
       - name: Build & publish binaries (per hanzo.yml)
+        if: env.HANZO_CI_ROLE == 'publish'
         # The plugin lane. `images:` ships an OCI image a CLUSTER runs;
         # `binaries:` ships an EXECUTABLE a RUNNING HOST installs — a zip plugin
         # (`zip.Load(zip.Plugin{URL, Sum})`), which fetches the artifact,
@@ -2959,7 +2942,7 @@ jobs:
         # scope-miss on one is carried by the other. ONE pair for the estate: an
         # index account is a fact about the account, not about a repository, so it
         # is read from one name here rather than resealed per repo.
-        if: github.ref_type == 'tag'
+        if: env.HANZO_CI_ROLE == 'publish' && (github.ref_type == 'tag')
         env:
           KMS_CLIENT_ID: ${{ secrets.KMS_CLIENT_ID }}
           KMS_CLIENT_SECRET: ${{ secrets.KMS_CLIENT_SECRET }}
@@ -3112,7 +3095,7 @@ jobs:
         # should reach the edge. Tying them meant a delegated build shipped the
         # image and left the site on its previous release, which is the half-roll
         # this lane exists to avoid.
-        if: github.event_name != 'pull_request'
+        if: env.HANZO_CI_ROLE == 'publish' && (github.event_name != 'pull_request')
         env:
           API: ${{ vars.API_ENDPOINT || 'https://api.hanzo.ai' }}
         run: |
@@ -3190,4 +3173,39 @@ jobs:
             echo "::endgroup::"
           done < "$RUNNER_TEMP/site-pairs"
 
-
+  cicd:
+    needs: test
+    # One live run per ref. Every push queues a run and every queued run holds an
+    # ephemeral runner pod, so without this a burst of commits on one branch is a
+    # queue that grows rather than one that drains: on a single amd64 node those
+    # runs can never all execute, and each new push adds another pod behind them.
+    # The group is what makes a push supersede the one it replaces.
+    #
+    # The key is (repository, workflow, ref) — the three things that decide
+    # whether two runs are the same work:
+    #   two pushes to one branch  same ref, so the older run is cancelled the
+    #                             moment the newer one is admitted
+    #   a push during a tag build refs/heads/main and refs/tags/v1.2.3 are
+    #                             different refs, so the release is untouched;
+    #                             and cancel-in-progress is false on a tag either
+    #                             way, so nothing cancels a run that is producing
+    #                             an immutable artifact
+    #   two repositories          the repository is in the key, and both planes
+    #                             scope a group to its repository regardless
+    # A pull request is refs/pull/N/merge, so a re-push supersedes that PR's own
+    # run and never touches the branch it targets.
+    #
+    # Named for this reusable, because the forge compares a job group against
+    # run-level groups in the same repository: a caller that keeps its own group
+    # (hanzoai/ci pins one to the commit so a tag and a branch push of the same
+    # commit cannot both publish it) must not collide with this one. The two are
+    # separate mechanisms and both apply.
+    concurrency:
+      group: hanzoai-ci-${{ github.repository }}-${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref_type != 'tag' }}
+    runs-on: ${{ fromJson(inputs.runner)[0] }}
+    env:
+      COREPACK_NPM_REGISTRY: https://pkg.hanzo.ai
+      HANZO_CI_ROLE: publish
+    # The same steps as `test`; HANZO_CI_ROLE decides which of them run here.
+    steps: *steps
