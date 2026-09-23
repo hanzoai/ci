@@ -178,10 +178,17 @@ test:
       cond() { awk -v s="$1" 'NR>=s && /^        run: /{exit} NR>=s && /^        if: /{sub(/^        if: /,""); print}' "$f"; }
       [ -z "$(cond "$v")" ] || {
         echo "::error::Test verdict carries \`if: $(cond "$v")\` — the one step that adjudicates the gate must name no input, or an input can switch off the thing that notices"; exit 1; }
-      [ "$(cond "$t")" = "inputs.tests != 'false'" ] || {
-        echo "::error::the test gate is guarded by \`$(cond "$t")\` — it must be \`inputs.tests != 'false'\`, so every value except the explicit opt-out RUNS it"; exit 1; }
-      [ "$(cond "$o")" = "inputs.tests == 'false'" ] || {
+      # The gate and its opt-out run in the test job (one leg per architecture);
+      # the role is set per job in the file, never by a caller.
+      [ "$(cond "$t")" = "env.HANZO_CI_ROLE == 'test' && (inputs.tests != 'false')" ] || {
+        echo "::error::the test gate is guarded by \`$(cond "$t")\` — it must be \`inputs.tests != 'false'\` in the test job, so every value except the explicit opt-out RUNS it"; exit 1; }
+      [ "$(cond "$o")" = "env.HANZO_CI_ROLE == 'test' && (inputs.tests == 'false')" ] || {
         echo "::error::the opt-out is guarded by \`$(cond "$o")\` — it must be the exact complement of the gate, so one of the two always writes a receipt"; exit 1; }
+      # Publishing is its own job, and it may exist only behind the test job:
+      # a verdict before the build steps adjudicates nothing if the build job
+      # could run without the tests.
+      grep -q '^    needs: test$' "$f" && grep -q 'HANZO_CI_TESTED: ${{ needs.test.result }}' "$f" || {
+        echo "::error::the publish job does not need the test job, or does not carry its answer to the verdict"; exit 1; }
       [ "$v" -gt "$t" ] && [ "$v" -gt "$o" ] || {
         echo "::error::Test verdict (line $v) runs before the steps that write the receipt it reads ($t, $o)"; exit 1; }
       [ "$v" -lt "$d" ] && [ "$v" -lt "$b" ] || {

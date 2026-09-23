@@ -1858,7 +1858,6 @@ jobs:
           echo "${GITHUB_SHA:-} off 0" > "${RUNNER_TEMP:-/tmp}/tests.receipt"
 
       - name: Test verdict
-        if: env.HANZO_CI_ROLE == 'test'
         # NO `if:`, and that is the design. This step's condition names no input,
         # so no input value can turn it off — not one a caller passes, not one a
         # default supplies, and not one a Hanzo Git substitutes for something the
@@ -1886,6 +1885,16 @@ jobs:
           set -euo pipefail
           r="${RUNNER_TEMP:-/tmp}/tests.receipt"
           say() { echo "$1"; echo "$1" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"; }
+          # The publish job holds no receipt: the tests ran on the test job's
+          # runners. It exists only through `needs: test`, and it refuses unless
+          # that job answered success. HANZO_CI_ROLE and HANZO_CI_TESTED are set
+          # per job in this file; no caller input reaches either.
+          if [ "${HANZO_CI_ROLE:-}" = publish ]; then
+            [ "${HANZO_CI_TESTED:-}" = success ] || {
+              echo "::error::publishing, and the test job answered '${HANZO_CI_TESTED:-nothing}'"; exit 1; }
+            say "**Tests: gated on linux-amd64 and linux-arm64 by the test job.**"
+            exit 0
+          fi
           [ -f "$r" ] || {
             echo "::error::no test verdict was recorded — neither the test phase nor the caller's opt-out ran. A build that cannot say it was tested is not tested."; exit 1; }
           read -r sha state gates < "$r" || true
@@ -3207,5 +3216,6 @@ jobs:
     env:
       COREPACK_NPM_REGISTRY: https://pkg.hanzo.ai
       HANZO_CI_ROLE: publish
+      HANZO_CI_TESTED: ${{ needs.test.result }}
     # The same steps as `test`; HANZO_CI_ROLE decides which of them run here.
     steps: *steps
