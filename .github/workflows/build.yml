@@ -2035,11 +2035,12 @@ jobs:
             ctx=$(echo "$img"|jq -r '.context // "."')
             df=$(echo "$img"|jq -r '.dockerfile // ((.context // ".")+"/Dockerfile")'); df="${df#./}"
             sfx=$(echo "$img"|jq -r '."tag-suffix" // ""')
-            # A build context below the repo root: the door's context is the
-            # repository itself, so a Dockerfile that COPYs from its own
-            # directory would copy the root instead and build a different image
-            # under the same tag.
-            [ "$ctx" = "." ] || refuse "images[$name] declares context: $ctx, and the build door's context is the whole repository at one commit — a relative COPY would read the root instead. Build on the runner (drop mode: delegate)."
+            # A build context below the repo root is sent to the door as
+            # `context`. The door clones the repository at this commit and scopes
+            # the build to that directory (BuildKit contextsubdir); the Dockerfile
+            # is still read at its root-relative path, which is what `dockerfile:`
+            # names on both lanes.
+            ctx="${ctx#./}"; ctx="${ctx%/}"; [ -n "$ctx" ] || ctx=.
             # THIS IS THE LANE THAT CAN BUILD BOTH ARCHITECTURES NATIVELY. The door
             # schedules a Job per platform and the cluster holds a node of each, so
             # `platforms:` is carried to it rather than refused: nothing is emulated, and
@@ -2134,8 +2135,8 @@ jobs:
               bargs="$acc"
             fi
             body=$(jq -nc --arg repo "$REPO" --arg sha "$SHA" --arg image "$image" --arg dockerfile "$df" \
-              --arg plat "$plat" --argjson args "$bargs" \
-              '{repo:$repo,sha:$sha,image:$image,dockerfile:$dockerfile,platforms:($plat|split(",")),args:$args}')
+              --arg context "$ctx" --arg plat "$plat" --argjson args "$bargs" \
+              '{repo:$repo,sha:$sha,image:$image,dockerfile:$dockerfile,context:$context,platforms:($plat|split(",")),args:$args}')
             echo "::group::delegate $name -> $image"
             # Two answers mean "not yet", and neither is a refusal. A 429 is the
             # door's per-org build ceiling: an org holds one build at a time and
