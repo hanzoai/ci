@@ -37,8 +37,8 @@ var brandCSS string
 // edit that silently restores the second source of truth this file removed, and
 // nothing would ever catch it.
 const (
-	brandCSSVersion = "1.4.9"
-	brandCSSSHA256  = "b7d97b57f82e9352ef1193d2a286ad3951690582ab1eb99ae378be9d11299405"
+	brandCSSVersion = "1.4.10"
+	brandCSSSHA256  = "a1e611f581a98bccb7fcef6e926e33a51d3ed50ec86430d9ab0b470721b4efc5"
 )
 
 // dashboardCSS is what this page adds on top: layout, not design. Every colour,
