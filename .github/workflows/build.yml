@@ -2162,20 +2162,19 @@ jobs:
             echo "::endgroup::"
             # 202 = a build job was created. The door says why for everything
             # else, so its answer is quoted rather than summarised: 400 is the
-            # request, 403 is an image outside the registry namespace this org
-            # owns — or the identity, which is the one refusal a rebuild will not
-            # clear. A build holds a MACHINE identity from the client-credentials
-            # exchange, and the door's identity path admits an ADMIN of the org:
-            # IAM mints no memberships for a machine and cloud denies a machine
-            # both admin scopes outright (auth_identity.go orgAdmin). So a 403
-            # here is a statement about what that door admits, not about this
-            # request; the subject it read is printed so it can be said exactly.
+            # request, 403 is an image outside the registry namespaces the
+            # credential's org owns. The credential is the org's own <org>-ci
+            # application (hanzo-ci, lux-ci, zoo-ci), and the door confines it to
+            # that org's namespaces — so the subject and the org the token names
+            # are printed, and a 403 naming another org is a GitHub org holding
+            # the wrong KMS_CLIENT_ID.
             if [ "$code" != "202" ]; then
               claim=$(printf '%s' "${HANZO_API_TOKEN#*.}" | cut -d. -f1 \
                       | tr '_-' '/+' | { read -r p; printf '%s' "$p$(printf '%*s' $(( (4 - ${#p} % 4) % 4 )) '' | tr ' ' '=')"; } \
                       | base64 -d 2>/dev/null || true)
               sub=$(printf '%s' "$claim" | jq -r '.sub // "unreadable"' 2>/dev/null || echo unreadable)
-              refuse "the build door refused $image (HTTP $code) for subject ${sub}: $(head -c 400 "$TMP/delegate.out")"
+              org=$(printf '%s' "$claim" | jq -r '.owner // "unreadable"' 2>/dev/null || echo unreadable)
+              refuse "the build door refused $image (HTTP $code) for subject ${sub}, org ${org}: $(head -c 400 "$TMP/delegate.out")"
             fi
           done < "$TMP/delegate.json"
 
