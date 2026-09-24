@@ -96,9 +96,11 @@ n=$(ls "$STORE/$key/" 2>/dev/null | grep -c '\.tar\.zst\.')
 before=$(puts); pod; warm; run push main branch save
 [ "$(puts)" = "$before" ] && ok "a key already saved is not written again" || no "a key already saved is not written again"
 
-pod; run push main branch restore
+pod; : > "$T/env"; GITHUB_ENV="$T/env" run push main branch restore
 [ "$(hit)" = exact ] && [ "$(tree)" = "$want" ] && ok "a fresh pod restores the exact bytes that were saved" \
   || no "a fresh pod restores the exact bytes that were saved"
+grep -qx "GOCACHE=$HOME/.cache/go-build" "$T/env" && grep -qx "GOMODCACHE=$HOME/go/pkg/mod" "$T/env" \
+  && ok "later steps are pinned to the directories restored" || no "later steps are pinned to the directories restored"
 
 pod; : > "$T/out"; HANZO_API_TOKEN=wrong run push main branch restore
 [ $? = 0 ] && [ "$(hit)" = miss ] && ok "a refused credential is a cold build, not a red one" || no "a refused credential is a cold build, not a red one"

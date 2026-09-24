@@ -55,6 +55,10 @@ done
 
 repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY}"
 mod=$(go env GOMODCACHE); build=$(go env GOCACHE)
+# Every later step reads the caches from exactly these directories, so a gate
+# that names its own with `${GOCACHE:-…}` (hanzo-inc/cloud's do) builds into what
+# was restored, and save archives what the gate built.
+[ "$cmd" = restore ] && printf 'GOMODCACHE=%s\nGOCACHE=%s\n' "$mod" "$build" >> "${GITHUB_ENV:-/dev/null}"
 prefix="$repo/$(go env GOVERSION)-$(go env GOARCH)"
 sum=$(sha256sum "$dir/go.sum" | cut -c1-32)
 tmp="${RUNNER_TEMP:-$(mktemp -d)}/gocache"; rm -rf "$tmp"; mkdir -p "$tmp"
