@@ -6,8 +6,10 @@
 #
 # The wire and the clock are faked. curl is a function that answers from a
 # script of codes, one per call; sleep is a function that records how long it
-# was asked for and advances bash's SECONDS by that much, so a 30-minute budget
-# runs in milliseconds.
+# was asked for and advances SECONDS by that much, so a 30-minute budget runs in
+# milliseconds. SECONDS is unset first, which strips bash's ticking and leaves a
+# plain variable only the fake sleep moves: on a starved runner the real clock
+# ran 14s during this suite and the budget came out 1786.
 #
 # Weighted toward the two ways a wait goes wrong: a refusal asked again, and a
 # budget overrun. Offline. Run: bash bin/enqueue_test.sh
@@ -48,6 +50,7 @@ curl() {
   printf '{"answer":%s}' "$code" > "$out"
   printf '%s' "$code"
 }
+unset SECONDS; SECONDS=0
 sleep() { echo "$1" >> "$tmp/sleeps"; SECONDS=$(( SECONDS + $1 )); }
 
 # ask <answer lines...> — run enqueue against that script; sets got, log, calls,
@@ -121,15 +124,14 @@ within "a stale Retry-After is not re-read"    "${2:-0}" 15 30
 # more at the edge, and then its answer is the step's.
 ask 429
 is  "a full door is refused as 429"      "$got"   429
-# Within a second or two: the fake clock rides on the real one, which ticks too.
-within "the waits spend the budget"      "$slept" 1795 1800
+is  "the waits spend the budget"          "$slept" 1800
 has "giving up says how long it asked"   "$log"   "over 30 minutes — giving up"
 max=0; for s in $sleeps; do [ "$s" -le "$max" ] || max=$s; done
 within "no wait passes the 120s ceiling"  "$max" 1 120
 within "the tries are bounded"            "$calls" 16 60
 # A Retry-After longer than the budget is trimmed to it, not obeyed past it.
 ask "429 99999"
-within "a huge Retry-After is trimmed to the budget" "${sleeps:-0}" 1795 1800
+is  "a huge Retry-After is trimmed to the budget" "${sleeps:-0}" 1800
 is  "and asked once more at the edge"             "$calls" 2
 
 if [ "$fail" = 0 ]; then echo "OK: enqueue — $ran assertions"; else exit 1; fi
