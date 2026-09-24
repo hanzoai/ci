@@ -3219,9 +3219,13 @@ jobs:
 
   cicd:
     # Exactly one of the two gating jobs runs; the other is skipped by its `if`,
-    # so publishing needs whichever ran to have succeeded.
+    # so publishing needs whichever ran to have succeeded. `always()` lets the
+    # condition be asked although one need was skipped, and the condition names a
+    # success, so two skipped needs publish nothing. It calls no other status
+    # function: Hanzo Git evaluates a job's `if` with no job in scope, and
+    # `cancelled()` (like `success()` and `failure()` of a step) dereferences it.
     needs: [test, test-amd64]
-    if: always() && !cancelled() && (needs.test.result == 'success' || needs.test-amd64.result == 'success')
+    if: always() && (needs.test.result == 'success' || needs.test-amd64.result == 'success')
     # One live run per ref. Every push queues a run and every queued run holds an
     # ephemeral runner pod, so without this a burst of commits on one branch is a
     # queue that grows rather than one that drains: on a single amd64 node those

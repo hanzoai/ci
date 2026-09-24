@@ -190,7 +190,7 @@ test:
       # runs, so the publish job needs both and requires the one that ran to
       # have succeeded; the advisory leg is needed by nothing.
       grep -q '^    needs: \[test, test-amd64\]$' "$f" \
-        && grep -qF "if: always() && !cancelled() && (needs.test.result == 'success' || needs.test-amd64.result == 'success')" "$f" \
+        && grep -qF "if: always() && (needs.test.result == 'success' || needs.test-amd64.result == 'success')" "$f" \
         && grep -qF "HANZO_CI_TESTED: \${{ needs.test.result == 'success' && 'success' || needs.test-amd64.result }}" "$f" || {
         echo "::error::the publish job does not need the gating test jobs, or does not carry their answer to the verdict"; exit 1; }
       ! grep -q 'needs:.*test-advisory' "$f" || {
