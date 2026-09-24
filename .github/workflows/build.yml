@@ -2049,6 +2049,57 @@ jobs:
           IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo 1 || echo 0)
           REL="${{ github.ref_name }}"   # the git tag, verbatim: v1.26.19
           yq -o=json -I=0 '.images' hanzo.yml | jq -c '.[]' > "$TMP/delegate.json"
+          # enqueue BEGIN
+          # enqueue <url> <body> <out> — POST one build to the door, print the
+          # HTTP code it last answered, and leave its reply in <out>.
+          #
+          # Two answers mean "not yet", and neither is a refusal. A 429 is the
+          # door's per-org build ceiling (three builds in flight, each fanned out
+          # to both architectures), so repos of one org publishing together meet
+          # it as a matter of course. A 502/503/504, or no answer at all, is
+          # cloud not answering — it restarts on every deploy and is back within
+          # a minute. Everything else is the door's verdict and is taken at once:
+          # a 400 does not become valid by being asked again.
+          #
+          # THE WAIT BACKS OFF, with jitter, and obeys Retry-After. A fixed 30s
+          # poll put every waiting repo of an org at the door in the same second
+          # a slot freed; the schedule doubles from 15s to a 120s ceiling and
+          # randomises the upper half of each step, and a numeric Retry-After
+          # from the door or the edge in front of it is a floor on the next wait.
+          #
+          # THIRTY MINUTES, because twenty was measured short: hanzoai/cd asked
+          # 41 times over 20 minutes on 2026-09-23 and was answered 429 every
+          # time. A build holds its slot for up to ~39 minutes, so 30 buys a
+          # turnover of the builds ahead of it in most queues; what is still
+          # refused after that is refused with the door's own words.
+          enqueue() {
+            local url=$1 body=$2 out=$3 code why wait ra left n=0 step=15 end=$(( SECONDS + 1800 ))
+            while :; do
+              n=$(( n + 1 ))
+              : > "$out.hdr"
+              code=$(curl -sS -m 60 -D "$out.hdr" -o "$out" -w '%{http_code}' -X POST "$url" \
+                -H "Authorization: Bearer $HANZO_API_TOKEN" -H 'Content-Type: application/json' -d "$body") || code=000
+              case "$code" in
+                429) why="is at its per-org build ceiling (HTTP 429)" ;;
+                000|502|503|504) why="is not answering (HTTP $code)" ;;
+                *) break ;;
+              esac
+              left=$(( end - SECONDS ))
+              if [ "$left" -le 0 ]; then
+                echo "::warning::build door $why after $n tries over $(( (SECONDS - end + 1800) / 60 )) minutes — giving up" >&2
+                break
+              fi
+              wait=$(( step / 2 + RANDOM % (step / 2 + 1) ))
+              ra=$(tr -d '\r' < "$out.hdr" | awk 'tolower($1) == "retry-after:" { v = $2 } END { print v }')
+              case "$ra" in ''|*[!0-9]*) ra= ;; *) [ "$ra" -le "$wait" ] || wait=$ra ;; esac
+              [ "$wait" -le "$left" ] || wait=$left
+              echo "build door $why; try $n, next in ${wait}s${ra:+ (Retry-After: ${ra}s)}, ${left}s of budget left" >&2
+              sleep "$wait"
+              step=$(( step * 2 > 120 ? 120 : step * 2 ))
+            done
+            echo "$code"
+          }
+          # enqueue END
           # Every version ref this run owes the registry, `<pushed> <alias>` a
           # line. The door is POSTed for every image first and the aliases are
           # written afterwards, so images that would build in parallel still do.
@@ -2169,26 +2220,7 @@ jobs:
               --arg context "$ctx" --arg plat "$plat" --argjson args "$bargs" --argjson tags "$tags" \
               '{repo:$repo,sha:$sha,image:$image,tags:$tags,dockerfile:$dockerfile,context:$context,platforms:($plat|split(",")),args:$args}')
             echo "::group::delegate $name -> $image"
-            # Two answers mean "not yet", and neither is a refusal. A 429 is the
-            # door's per-org build ceiling: an org holds one build at a time and
-            # every build fans out to both architectures, so two repos publishing
-            # together meet it as a matter of course. A 502/503/504, or no answer
-            # at all, is cloud not answering — it restarts on every deploy and is
-            # back within a minute. Wait out either on the same 20-minute budget
-            # cloud's own image job gives the ceiling; refuse whatever is left.
-            deadline=$(( $(date +%s) + 1200 ))
-            while :; do
-              code=$(curl -sS -o "$TMP/delegate.out" -w '%{http_code}' -X POST "$RUNNER_URL" \
-                -H "Authorization: Bearer $HANZO_API_TOKEN" -H 'Content-Type: application/json' -d "$body" || true)
-              case "$code" in
-                429) why="build door at its per-org ceiling; waiting for the slot" ;;
-                000|502|503|504) why="build door not answering (HTTP $code); waiting for it" ;;
-                *) break ;;
-              esac
-              [ "$(date +%s)" -lt "$deadline" ] || break
-              echo "$why"
-              sleep 30
-            done
+            code=$(enqueue "$RUNNER_URL" "$body" "$TMP/delegate.out")
             cat "$TMP/delegate.out"; echo
             echo "::endgroup::"
             # 202 = a build job was created. The door says why for everything
