@@ -64,10 +64,12 @@ ask() {
   sleeps=$(tr "\n" " " < "$tmp/sleeps" | sed "s/ \$//")
   slept=0; for s in $sleeps; do slept=$(( slept + s )); done
 }
-is() { ran=$((ran+1)); [ "$2" = "$3" ] || { echo "FAIL  $1: want [$3], got [$2]"; fail=1; }; }
-has() { ran=$((ran+1)); case "$2" in *"$3"*) ;; *) echo "FAIL  $1: want /$3/ in: $2"; fail=1 ;; esac; }
+# One `ok` or `FAIL` line per assertion: the reusable's test tally counts
+# those, and a suite that prints only a summary reads as one that ran nothing.
+is() { ran=$((ran+1)); if [ "$2" = "$3" ]; then echo "ok    $1"; else echo "FAIL  $1: want [$3], got [$2]"; fail=1; fi; }
+has() { ran=$((ran+1)); case "$2" in *"$3"*) echo "ok    $1" ;; *) echo "FAIL  $1: want /$3/ in: $2"; fail=1 ;; esac; }
 within() { # within <name> <value> <lo> <hi>
-  ran=$((ran+1)); [ "$2" -ge "$3" ] && [ "$2" -le "$4" ] || { echo "FAIL  $1: want $3..$4, got $2"; fail=1; }; }
+  ran=$((ran+1)); if [ "$2" -ge "$3" ] && [ "$2" -le "$4" ]; then echo "ok    $1"; else echo "FAIL  $1: want $3..$4, got $2"; fail=1; fi; }
 
 # Accepted at once: one ask, no wait, the door's reply left where the step reads it.
 ask 202
