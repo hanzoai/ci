@@ -82,6 +82,17 @@ on:
           does — not the gate, not `client:`, not `binaries:`.
         type: string
         default: delegate
+      wait:
+        description: >-
+          Hold the publish job until a delegated image is in the registry and
+          every version tag names its digest. Default 'false': the job ends once
+          the build door has queued the build and promised to write those tags
+          itself, and the run says which build to watch. A job held here does
+          nothing but hold a runner, for up to forty minutes a build — measured,
+          289 runner-minutes in 48 hours. A caller that uses the image later in
+          the same run, to deploy it or to test it, passes 'true'.
+        type: string
+        default: 'false'
       tests:
         description: >-
           Run the `test:` block. Default true, and a caller should leave it that
@@ -2002,6 +2013,7 @@ jobs:
           # KMS GitHub token (arrives via GITHUB_ENV), the automatic token.
           GH_PAT: ${{ secrets.GH_PAT }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WAIT: ${{ inputs.wait }}
         run: |
           set -euo pipefail
           TMP="${RUNNER_TEMP:-/tmp}"
@@ -2040,7 +2052,7 @@ jobs:
           # Every version ref this run owes the registry, `<pushed> <alias>` a
           # line. The door is POSTed for every image first and the aliases are
           # written afterwards, so images that would build in parallel still do.
-          : > "$TMP/alias.txt"
+          : > "$TMP/alias.txt"; : > "$TMP/queued.md"
           # Read from a file, not a pipe: a `while` on the end of a pipeline is a
           # subshell, and a refusal inside one is a message printed by a process
           # whose exit nobody reads.
@@ -2115,8 +2127,13 @@ jobs:
             # same digest below. Posting a second build for the second tag would
             # produce a second digest for one commit, which is a version tag
             # naming different bytes from the sha- tag beside it.
-            image=$(echo "$refs" | head -1)
-            echo "$refs" | tail -n +2 | sed "s|^|$image |;s|\$| $plat|" >> "$TMP/alias.txt"
+            # The first line by expansion, not `echo | head -1`: under pipefail
+            # head closing the pipe early fails the step with "echo: write error:
+            # Broken pipe", and it did, on hanzoai/ci's own publish.
+            image=${refs%%$'\n'*}
+            # The other refs name the same repository, so the door is handed just
+            # their tags and writes them onto the manifest it pushes.
+            tags=$(printf '%s\n' "$refs" | tail -n +2 | sed 's|.*:||' | jq -Rsc 'split("\n") | map(select(length > 0))')
             # The image's declared `args:`, CARRIED, and expanded by the SAME five
             # spellings the buildx lane expands — ${VERSION} ${SHA} ${SHORT_SHA}
             # ${BRANCH} ${BUILD_TIME}, literal substitution, no eval.
@@ -2149,8 +2166,8 @@ jobs:
               bargs="$acc"
             fi
             body=$(jq -nc --arg repo "$REPO" --arg sha "$SHA" --arg image "$image" --arg dockerfile "$df" \
-              --arg context "$ctx" --arg plat "$plat" --argjson args "$bargs" \
-              '{repo:$repo,sha:$sha,image:$image,dockerfile:$dockerfile,context:$context,platforms:($plat|split(",")),args:$args}')
+              --arg context "$ctx" --arg plat "$plat" --argjson args "$bargs" --argjson tags "$tags" \
+              '{repo:$repo,sha:$sha,image:$image,tags:$tags,dockerfile:$dockerfile,context:$context,platforms:($plat|split(",")),args:$args}')
             echo "::group::delegate $name -> $image"
             # Two answers mean "not yet", and neither is a refusal. A 429 is the
             # door's per-org build ceiling: an org holds one build at a time and
@@ -2190,7 +2207,24 @@ jobs:
               org=$(printf '%s' "$claim" | jq -r '.owner // "unreadable"' 2>/dev/null || echo unreadable)
               refuse "the build door refused $image (HTTP $code) for subject ${sub}, org ${org}: $(head -c 400 "$TMP/delegate.out")"
             fi
+            # THE DOOR'S ANSWER SAYS WHICH TAGS IT WILL WRITE, and a tag it names
+            # is one this run need not wait to write. A tag it does not name — a
+            # door from before it took `tags`, or one that dropped it — is aliased
+            # below as before, because a version nobody writes is an image the
+            # fleet cannot pin.
+            id=$(jq -r '.buildJobId // ""' "$TMP/delegate.out")
+            promised=$(jq -r '.tags // [] | .[]' "$TMP/delegate.out")
+            while IFS= read -r ref; do
+              [ -n "$ref" ] || continue
+              if [ "$WAIT" != true ] && grep -xF "${ref##*:}" >/dev/null <<< "$promised"; then continue; fi
+              echo "$image $ref $plat" >> "$TMP/alias.txt"
+            done < <(printf '%s\n' "$refs" | tail -n +2)
+            echo "| \`$image\` | ${id:-?} | $(printf '%s' "$promised" | tr '\n' ' ') |" >> "$TMP/queued.md"
           done < "$TMP/delegate.json"
+          { echo "### Queued at the build door"; echo
+            echo "Each build's progress: \`GET ${RUNNER_URL%/v1/build}/v1/platform/builds\` with this org's token, or the Builds page of the console."; echo
+            echo "| image | build | tags the door writes |"; echo "|---|---|---|"; cat "$TMP/queued.md"; } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          [ -s "$TMP/alias.txt" ] || { echo "queued; the door writes every tag, so this job is done (with: { wait: 'true' } holds it until the image lands)"; exit 0; }
 
           # ---- The version tag, on the digest the door pushed ----------------
           # THE COMPLETION SIGNAL IS THE sha- TAG RESOLVING AT THE REGISTRY. That
