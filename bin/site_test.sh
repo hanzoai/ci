@@ -174,6 +174,11 @@ case "$url" in
                               *) printf '401' ;;
                             esac
                             exit 0 ;;
+                     # A redirect hop then a chunked 200: -L keeps both
+                     # header blocks, and only the second one is the answer.
+                     redirected) printf '<h1>hi</h1>\n' > "$out"
+                            printf 'HTTP/2 301\r\ncontent-length: 17\r\nlocation: /\r\n\r\nHTTP/2 200\r\n\r\n' > "$hdr"
+                            printf '200'; exit 0 ;;
                      *)     printf '<h1>hi</h1>\n' > "$out"
                             len=$(wc -c < "$out" | tr -d ' ') ;;
                    esac
@@ -404,6 +409,16 @@ out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
       bash "$SD" a-slug "$site" 2>&1); rc=$?
 t "a short read fails the deploy"      "$([ "$rc" != 0 ] && echo failed)"  "failed"
 t "  ...reporting both counts, thrice" "$(printf '%s' "$out" | grep -c 'content-length promised')"  "3"
+
+# A root that redirects once before a chunked page. The redirect promises its own
+# 17 bytes; the page promises nothing. Comparing the page against the redirect's
+# length failed a healthy publish of dev-hanzo-ai three times over.
+rm -f "$tmp/calls"
+out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
+      SITE_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_BACK=redirected \
+      bash "$SD" a-slug "$site" 2>&1); rc=$?
+t "a redirect before the page publishes" "$rc"  "0"
+t "  ...not calling it unreadable"       "$(printf '%s' "$out" | grep -c 'does not serve its own bytes')"  "0"
 
 # A gated client preview answers the read-back 401 BY DESIGN -- and the same
 # workflow's "every host is gated" step refuses to publish any host that answers
