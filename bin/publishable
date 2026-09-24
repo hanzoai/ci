@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # publishable — refuse a `build_secrets` name that does not declare itself public.
 #
-# Usage: publishable <hanzo.yml>   (reads images[].build_secrets, rc=1 on refusal)
+# Usage: publishable <hanzo.yml>   (reads images[], site and sites[] build_secrets, rc=1 on refusal)
 #
 # WHY A NAME AND NOT A VALUE. A build_secret is handed to buildx as
 # `--build-arg NAME=value`, and a build-arg is IN THE PUBLISHED IMAGE: `docker
@@ -28,7 +28,7 @@ set -uo pipefail
 f=${1:-hanzo.yml}
 [ -r "$f" ] || exit 0   # no config, nothing declared, nothing to refuse
 
-names=$(yq -r '[(.images // [])[] | (.build_secrets // [])[]] | unique | .[]' "$f" 2>/dev/null) || exit 0
+names=$(yq -r '[(.images // [])[] | (.build_secrets // [])[]] + (.site.build_secrets // []) + [(.sites // [])[] | (.build_secrets // [])[]] | unique | .[]' "$f" 2>/dev/null) || exit 0
 [ -n "$names" ] || exit 0
 
 rc=0

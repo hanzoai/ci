@@ -42,6 +42,20 @@ t "PUBLIC_ prefix"                           0 '[PUBLIC_ANALYTICS_ID]'
 t "_PUBLISHABLE suffix"                      0 '[STRIPE_PUBLISHABLE]'
 t "_PUBLIC suffix"                           0 '[ANALYTICS_ID_PUBLIC]'
 
+echo "--- a site declares them too ---"
+# A static export has no image, but it inlines at build all the same, so the
+# same names are refused or allowed. webby-ai/intel-hub is the live case.
+ts() {
+  local name=$1 want=$2 yml=$3
+  local d="$tmp/$RANDOM$RANDOM"; mkdir -p "$d"; printf '%b' "$yml" > "$d/hanzo.yml"
+  out=$(bash "$PUB" "$d/hanzo.yml" 2>&1); rc=$?
+  if [ "$rc" = "$want" ]; then printf 'ok    %-56s rc=%s\n' "$name" "$rc"
+  else printf 'FAIL  %-56s rc=%s (want %s)\n      %s\n' "$name" "$rc" "$want" "$out"; fail=1; fi
+}
+ts "site: VITE_PUBLISHABLE_KEY"              0 'site:\n  slug: intel\n  build_secrets: [VITE_PUBLISHABLE_KEY]\n'
+ts "site: a bare name is refused"            1 'site:\n  slug: intel\n  build_secrets: [INGEST_KEY]\n'
+ts "sites: a bare name in any entry"         1 'sites:\n  - slug: a\n    build_secrets: [VITE_A]\n  - slug: b\n    build_secrets: [API_TOKEN]\n'
+
 echo "--- silent: nothing declared, nothing to say ---"
 # 44 of the fleet's 47 repos are this case and must be byte-for-byte unchanged.
 t "no build_secrets key at all"              0 ''

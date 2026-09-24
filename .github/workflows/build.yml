@@ -699,7 +699,7 @@ jobs:
           # is exactly how docs/chat/app shipped bundles that could not write, and
           # how a stale key survived: every failure looked like "not in KMS", and
           # "not in KMS" was survivable.
-          DECLARED="$(yq -r '[(.images // [])[] | (.build_secrets // [])[]] | unique | .[]' hanzo.yml 2>/dev/null || true)"
+          DECLARED="$(yq -r '[(.images // [])[] | (.build_secrets // [])[]] + (.site.build_secrets // []) + [(.sites // [])[] | (.build_secrets // [])[]] | unique | .[]' hanzo.yml 2>/dev/null || true)"
           # A build_secret becomes `--build-arg NAME=value` below, and a build-arg
           # is IN THE PUBLISHED IMAGE — `docker history` prints it to anyone who
           # can pull. So `build_secrets` can only ever carry values that are
@@ -917,6 +917,9 @@ jobs:
           # name — one name, one place. For publishable client tokens a Vite SPA
           # must embed at build (e.g. VITE_MAPBOX_TOKEN). Undeclared → no-op, so
           # every existing repo is byte-for-byte unchanged.
+          # A site declares them the same way (`site.build_secrets`, or per entry
+          # of `sites:`) and gets them as env: its build runs later in this job,
+          # so a static export inlines VITE_* from here as an image bakes them.
           for bs in $DECLARED; do
             case "$bs" in ''|*[!A-Za-z0-9_]*) echo "::error::invalid build_secret name '$bs'"; exit 1;; esac
             v=$(get "$bs" || true)
