@@ -30,12 +30,28 @@ on:
     inputs:
       runner:
         description: >-
-          Labels of the runner that publishes, as a JSON array. Tests run on
-          linux-amd64 AND linux-arm64 whatever this names — every image ships
-          for both, so both are gated. Bring-your-own: name your own runner's
-          labels. A label nobody advertises queues with no error to read.
+          Labels of the runner that publishes, as a JSON array. Which
+          architectures' tests gate publishing is `test-runners`, not this.
+          Bring-your-own: name your own runner's labels. A label nobody
+          advertises queues with no error to read.
         type: string
         default: '["linux-amd64"]'
+      test-runners:
+        description: >-
+          The architectures whose tests gate publishing, as a JSON array: both
+          (the default) or `["linux-amd64"]`. Nothing else is accepted, because
+          Hanzo Git does not evaluate `inputs` in `strategy.matrix`, so each
+          choice is a job of its own below and this input only selects one.
+        type: string
+        default: '["linux-amd64","linux-arm64"]'
+      advisory-runners:
+        description: >-
+          One architecture whose tests run and report without gating anything,
+          as a JSON array of that runner's labels (e.g. `["linux-arm64"]`).
+          Nothing needs the job, so a slow or red leg here never holds a
+          release. Default `[]` runs no advisory leg.
+        type: string
+        default: '[]'
       mode:
         description: >-
           Where the IMAGE is built. `delegate` (default) POSTs it to the build
@@ -194,6 +210,7 @@ jobs:
     # input: Hanzo Git expands a reusable workflow without evaluating `inputs` in
     # `strategy.matrix`, and a leg labelled with the unevaluated expression waits
     # for a runner forever.
+    if: join(fromJson(inputs.test-runners), ',') != 'linux-amd64'
     strategy:
       fail-fast: true
       matrix:
@@ -1853,7 +1870,7 @@ jobs:
           if [ "${HANZO_CI_ROLE:-}" = publish ]; then
             [ "${HANZO_CI_TESTED:-}" = success ] || {
               echo "::error::publishing, and the test job answered '${HANZO_CI_TESTED:-nothing}'"; exit 1; }
-            say "**Tests: gated on linux-amd64 and linux-arm64 by the test job.**"
+            say "**Tests: gated on ${HANZO_CI_GATED:-both architectures} by the test job.**"
             exit 0
           fi
           [ -f "$r" ] || {
@@ -3179,8 +3196,32 @@ jobs:
             echo "::endgroup::"
           done < "$RUNNER_TEMP/site-pairs"
 
+  # The same test, gating on linux-amd64 alone, for a caller whose
+  # `test-runners` names only that architecture. It is a job rather than a matrix
+  # leg for the reason `test` gives: an input cannot choose a matrix here.
+  test-amd64:
+    if: join(fromJson(inputs.test-runners), ',') == 'linux-amd64'
+    runs-on: [linux-amd64]
+    env:
+      COREPACK_NPM_REGISTRY: https://pkg.hanzo.ai
+      HANZO_CI_ROLE: test
+    steps: *steps
+
+  # The advisory leg: the same test on `advisory-runners`, reported and never
+  # needed, so publishing does not wait on it.
+  test-advisory:
+    if: inputs.advisory-runners != '[]'
+    runs-on: ${{ fromJson(inputs.advisory-runners) }}
+    env:
+      COREPACK_NPM_REGISTRY: https://pkg.hanzo.ai
+      HANZO_CI_ROLE: test
+    steps: *steps
+
   cicd:
-    needs: test
+    # Exactly one of the two gating jobs runs; the other is skipped by its `if`,
+    # so publishing needs whichever ran to have succeeded.
+    needs: [test, test-amd64]
+    if: always() && !cancelled() && (needs.test.result == 'success' || needs.test-amd64.result == 'success')
     # One live run per ref. Every push queues a run and every queued run holds an
     # ephemeral runner pod, so without this a burst of commits on one branch is a
     # queue that grows rather than one that drains: on a single amd64 node those
@@ -3213,6 +3254,7 @@ jobs:
     env:
       COREPACK_NPM_REGISTRY: https://pkg.hanzo.ai
       HANZO_CI_ROLE: publish
-      HANZO_CI_TESTED: ${{ needs.test.result }}
+      HANZO_CI_TESTED: ${{ needs.test.result == 'success' && 'success' || needs.test-amd64.result }}
+      HANZO_CI_GATED: ${{ inputs.test-runners }}
     # The same steps as `test`; HANZO_CI_ROLE decides which of them run here.
     steps: *steps

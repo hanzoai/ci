@@ -184,11 +184,17 @@ test:
         echo "::error::the test gate is guarded by \`$(cond "$t")\` — it must be \`inputs.tests != 'false'\` in the test job, so every value except the explicit opt-out RUNS it"; exit 1; }
       [ "$(cond "$o")" = "env.HANZO_CI_ROLE == 'test' && (inputs.tests == 'false')" ] || {
         echo "::error::the opt-out is guarded by \`$(cond "$o")\` — it must be the exact complement of the gate, so one of the two always writes a receipt"; exit 1; }
-      # Publishing is its own job, and it may exist only behind the test job:
-      # a verdict before the build steps adjudicates nothing if the build job
-      # could run without the tests.
-      grep -q '^    needs: test$' "$f" && grep -q 'HANZO_CI_TESTED: ${{ needs.test.result }}' "$f" || {
-        echo "::error::the publish job does not need the test job, or does not carry its answer to the verdict"; exit 1; }
+      # Publishing is its own job, and it may exist only behind the gating test
+      # jobs: a verdict before the build steps adjudicates nothing if the build
+      # job could run without the tests. Exactly one of `test` and `test-amd64`
+      # runs, so the publish job needs both and requires the one that ran to
+      # have succeeded; the advisory leg is needed by nothing.
+      grep -q '^    needs: \[test, test-amd64\]$' "$f" \
+        && grep -qF "if: always() && !cancelled() && (needs.test.result == 'success' || needs.test-amd64.result == 'success')" "$f" \
+        && grep -qF "HANZO_CI_TESTED: \${{ needs.test.result == 'success' && 'success' || needs.test-amd64.result }}" "$f" || {
+        echo "::error::the publish job does not need the gating test jobs, or does not carry their answer to the verdict"; exit 1; }
+      ! grep -q 'needs:.*test-advisory' "$f" || {
+        echo "::error::a job needs test-advisory — the advisory leg reports and gates nothing"; exit 1; }
       [ "$v" -gt "$t" ] && [ "$v" -gt "$o" ] || {
         echo "::error::Test verdict (line $v) runs before the steps that write the receipt it reads ($t, $o)"; exit 1; }
       [ "$v" -lt "$d" ] && [ "$v" -lt "$b" ] || {
