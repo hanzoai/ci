@@ -199,6 +199,21 @@ on:
           gates the result (see that repo's scripts/check-export.sh).
         type: string
         default: ''
+    # `secrets: inherit` passes nothing to a reusable in ANOTHER org, and a
+    # caller may only name a secret the called workflow declares. Declared, so
+    # a luxfi, zooai or hanzo-apps caller hands its own org's pair by name;
+    # a hanzoai caller's `inherit` is unchanged.
+    secrets:
+      KMS_CLIENT_ID:
+        required: false
+      KMS_CLIENT_SECRET:
+        required: false
+      GH_PAT:
+        required: false
+      REGISTRY_USER:
+        required: false
+      REGISTRY_PASSWORD:
+        required: false
 
 permissions:
   contents: write # release assets for `binaries:`; read is enough without it
