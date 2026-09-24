@@ -422,6 +422,15 @@ test:
     # would have worked, and those are the ones people learn to route around.
     # Offline and deterministic: SITE_PLAN prints the manifest, no network.
     run: bash bin/site_test.sh
+  - name: gocache
+    # bin/gocache carries every Go repo's module and build cache between
+    # runners, and Go trusts what it restores without re-hashing it. So the suite
+    # pins who may write (the default branch and tags, never a pull request),
+    # that an index is written only after all of its parts, that an archive not
+    # matching its index is never unpacked, and that a refused or absent
+    # identity is a cold build rather than a red one. Offline: a stub curl plays
+    # cloud's presigning /v1/s3 and the store behind it.
+    run: bash bin/gocache_test.sh
   - name: conflictmarkers
     # bin/conflictmarkers runs against every repo in the fleet, so a false
     # positive is as expensive as a miss: it blocks a build that would have
