@@ -18,6 +18,12 @@
 # is wrong. Whatever a job needs has to be in this file.
 FROM ubuntu:24.04
 
+# The build door pushes with its own credential, so ghcr links the package to
+# no repository unless the image names one. Linked to this repo, the package is
+# readable by this repo's workflow token, which is how bin/imgver reads the
+# published floor and never writes one version over two digests.
+LABEL org.opencontainers.image.source=https://github.com/hanzoai/ci
+
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     RUNNER_TOOL_CACHE=/opt/hostedtoolcache \
