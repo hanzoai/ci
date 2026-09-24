@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# gocache — this org's Go module and build cache, carried between runners.
+#
+#   gocache restore <module-dir>     # prints hit=exact|partial|miss to $GITHUB_OUTPUT
+#   gocache save    <module-dir>     # writes on a trusted ref, on a miss, and nowhere else
+#
+# A runner is a pod that lives for one job, so a cache on its disk dies with it.
+# Measured across 188 job logs: not one Go cache was restored, and 142 Go-gate
+# minutes were 31 downloading modules, 69 compiling and 41 testing. A second
+# pass over a warm cache compiled hanzoai/commerce's vet in 15s instead of 198s.
+#
+# WHERE IT LIVES: the org's own bucket in cloud's object store (/v1/s3), reached
+# with the IAM identity the KMS step already minted (HANZO_API_TOKEN). cloud
+# derives the bucket's physical name from that identity's org, so one org can
+# never read or write another's cache: the tenancy boundary is the server's, not
+# a prefix chosen here. CI holds no bucket credential. Every object moves over a
+# URL cloud presigns for that one key, for five minutes.
+#
+# THE KEY: <owner/repo>/<go version>-<arch>/<sha256 of go.sum>. Modules are a
+# function of go.sum, and a build cache is only valid for the toolchain and
+# architecture that wrote it. A key that misses restores the newest key the repo
+# saved (`latest`), so a go.sum bump still reuses every module that did not move.
+#
+# ONLY A TRUSTED REF WRITES. Go trusts GOMODCACHE and GOCACHE without re-hashing
+# them, so a cache is code. A pull request reads and never writes; the default
+# branch and tags write, and only on a miss, so a key names one archive for good.
+#
+# PARTS: the store's public name sits behind Cloudflare, which refuses a request
+# body over 100 MB, so an archive travels as 90 MiB parts listed in an index.
+#
+# BEST EFFORT: every failure is a notice and exit 0. A cache that cannot be read
+# is a cold build, never a red one.
+#
+# ENV: HANZO_API_TOKEN  the org's IAM bearer (the KMS step exports it)
+#      HANZO_API        https://api.hanzo.ai
+#      GOCACHE_BUCKET   ci-cache
+#      GOCACHE_PART     94371840 (90 MiB), the size of one uploaded part
+set -uo pipefail
+
+cmd="${1:-}"; dir="${2:-.}"
+base="${HANZO_API:-https://api.hanzo.ai}"
+bucket="${GOCACHE_BUCKET:-ci-cache}"
+part="${GOCACHE_PART:-94371840}"
+out="${GITHUB_OUTPUT:-/dev/null}"
+
+say() { echo "gocache: $*"; }
+skip() { echo "::notice::gocache: $*"; echo "hit=miss" >> "$out"; exit 0; }
+case "$cmd" in restore|save) ;; *) echo "usage: gocache restore|save <module-dir>" >&2; exit 2 ;; esac
+
+[ -n "${HANZO_API_TOKEN:-}" ] || skip "no HANZO_API_TOKEN (the KMS login did not run), so there is no org store to use"
+for t in go zstd tar curl jq sha256sum; do
+  command -v "$t" >/dev/null 2>&1 || skip "$t is not on this runner"
+done
+[ -f "$dir/go.sum" ] || skip "$dir has no go.sum"
+
+repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY}"
+mod=$(go env GOMODCACHE); build=$(go env GOCACHE)
+prefix="$repo/$(go env GOVERSION)-$(go env GOARCH)"
+sum=$(sha256sum "$dir/go.sum" | cut -c1-32)
+tmp="${RUNNER_TEMP:-$(mktemp -d)}/gocache"; rm -rf "$tmp"; mkdir -p "$tmp"
+
+# api <METHOD> <path> [json] -> body on stdout when 2xx. A lost answer, a 429 or
+# a 5xx is asked again; anything else is the store answering.
+# Parts move four at a time, so each call answers into a file of its own.
+api() {
+  local code w f
+  f=$(mktemp -p "$tmp" api.XXXXXX)
+  for w in 0 2 5; do
+    [ "$w" = 0 ] || sleep "$w"
+    code=$(curl -sS -m 30 -o "$f" -w '%{http_code}' -X "$1" "$base$2" \
+      -H "Authorization: Bearer $HANZO_API_TOKEN" -H 'Content-Type: application/json' \
+      ${3:+-d "$3"}) || code=000
+    case "$code" in 2*) cat "$f"; rm -f "$f"; return 0 ;; 000|429|5*) continue ;; *) break ;; esac
+  done
+  echo "HTTP $code $(head -c 200 "$f")" >&2
+  rm -f "$f"
+  return 1
+}
+
+# get <key> <file>: the object's bytes, or non-zero when it is not there.
+get() {
+  local url
+  url=$(api GET "/v1/s3/buckets/$bucket/objects/$1" | jq -r '.url // empty') && [ -n "$url" ] || return 1
+  curl -fsS -m 600 -o "$2" "$url"
+}
+
+# put <key> <file>: presigned just before it is spent, since it lives five minutes.
+put() {
+  local url
+  url=$(api POST "/v1/s3/buckets/$bucket/objects" "$(jq -nc --arg k "$1" '{key:$k}')" | jq -r '.url // empty') \
+    && [ -n "$url" ] || return 1
+  curl -fsS -m 600 -o /dev/null -T "$2" "$url"
+}
+
+# fetch <sum>: download and verify the archive an index names; leaves the parts in $tmp.
+fetch() {
+  local idx="$prefix/$1.idx" hash n i
+  get "$idx" "$tmp/idx" || return 1
+  read -r hash n < "$tmp/idx"
+  case "$n" in ''|*[!0-9]*) return 1 ;; esac
+  for i in $(seq 0 $((n - 1))); do printf '%03d\n' "$i"; done \
+    | xargs -P 4 -I{} bash -c 'get "$0.{}" "$1.{}"' "$prefix/$1.tar.zst" "$tmp/part" || return 1
+  [ "$(cat "$tmp"/part.* | sha256sum | cut -d' ' -f1)" = "$hash" ] || { say "archive $1 does not match its index"; return 1; }
+}
+
+if [ "$cmd" = restore ]; then
+  export -f get api; export base bucket tmp HANZO_API_TOKEN
+  t0=$(date +%s)
+  hit=exact
+  if ! fetch "$sum"; then
+    hit=partial
+    rm -f "$tmp"/part.*
+    get "$prefix/latest" "$tmp/latest" && last=$(tr -dc 'a-f0-9' < "$tmp/latest") \
+      && [ -n "$last" ] && [ "$last" != "$sum" ] && fetch "$last" || {
+      say "nothing saved for $prefix yet"; echo "hit=miss" >> "$out"; exit 0; }
+  fi
+  mkdir -p "$mod" "$build"
+  cat "$tmp"/part.* | zstd -dq -T0 | tar -x --no-same-owner -C "$tmp" || skip "the archive did not unpack"
+  # Moved rather than copied: the pod is fresh, so both targets are empty and the
+  # rename is instant on one filesystem.
+  for d in mod build; do
+    t=$mod; [ "$d" = build ] && t=$build
+    rmdir "$t" 2>/dev/null && mv "$tmp/$d" "$t" || { cp -a "$tmp/$d/." "$t/"; chmod -R u+w "$tmp/$d"; }
+  done
+  bytes=$(cat "$tmp"/part.* | wc -c); rm -rf "$tmp"
+  say "$hit hit for $prefix: $((bytes / 1048576)) MiB in $(( $(date +%s) - t0 ))s"
+  echo "hit=$hit" >> "$out"
+  exit 0
+fi
+
+# save: a trusted ref, and only when the exact key is not already there.
+case "${GITHUB_EVENT_NAME:-}" in pull_request*) say "a pull request reads the cache and never writes it"; exit 0 ;; esac
+default=$(jq -r '.repository.default_branch // empty' "${GITHUB_EVENT_PATH:-/dev/null}" 2>/dev/null || true)
+if [ "${GITHUB_REF_TYPE:-}" != tag ] && { [ -z "$default" ] || [ "${GITHUB_REF_NAME:-}" != "$default" ]; }; then
+  say "${GITHUB_REF_NAME:-this ref} is not the default branch or a tag, so it does not write"; exit 0
+fi
+get "$prefix/$sum.idx" "$tmp/have" 2>/dev/null && { say "$prefix/$sum is already saved"; exit 0; }
+[ -d "$mod" ] || { say "no module cache to save"; exit 0; }
+mkdir -p "$build"
+t0=$(date +%s)
+api POST /v1/s3/buckets "{\"name\":\"$bucket\"}" >/dev/null 2>&1 || true   # 201 made, 409 already there
+ln -s "$mod" "$tmp/mod"; ln -s "$build" "$tmp/build"
+tar -c -h -C "$tmp" mod build 2>/dev/null | zstd -q -T0 | split -b "$part" -d -a 3 - "$tmp/part." \
+  || { say "could not archive the cache"; exit 0; }
+n=$(ls "$tmp"/part.* | wc -l)
+hash=$(cat "$tmp"/part.* | sha256sum | cut -d' ' -f1)
+bytes=$(cat "$tmp"/part.* | wc -c)
+export -f put api; export base bucket tmp HANZO_API_TOKEN
+ls "$tmp"/part.* | xargs -P 4 -I{} bash -c 'put "$0.${1##*.}" "$1"' "$prefix/$sum.tar.zst" {} \
+  || { say "a part did not upload; nothing is indexed, so nothing half-written is ever read"; exit 0; }
+# The index goes last, so a reader never finds a key whose parts are not all there.
+printf '%s %s\n' "$hash" "$n" > "$tmp/idx"; printf '%s\n' "$sum" > "$tmp/latest"
+put "$prefix/$sum.idx" "$tmp/idx" && put "$prefix/latest" "$tmp/latest" || { say "the index did not upload"; exit 0; }
+say "saved $prefix/$sum: $((bytes / 1048576)) MiB in $n part(s), $(( $(date +%s) - t0 ))s"
+rm -rf "$tmp"

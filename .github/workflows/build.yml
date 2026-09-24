@@ -119,21 +119,18 @@ on:
         type: string
         default: 'true'
       go-cache:
-        # OFF by default, and that default is the whole point: this workflow is
-        # the shared one, and turning Go caching on for ~2700 repos at once grows
-        # a per-runner cache that is EPHEMERAL and NOT on the runner PVC
-        # (/root/.cache/actcache, while the claim mounts at /data). Measured
-        # today: 3.4 GB on git-runner-0, 5.8 GB on git-runner-3, already. The
-        # runner config records a previous disk exhaustion as "infrastructure
-        # damage wearing a build defect's clothes", so the fleet does not opt in
-        # by accident — a repo that wants it says so.
-        #
-        # A repo that DOES want it: hanzoai/cloud's gate builds 122 app binaries
-        # to regenerate their documents and takes 18-27 minutes cold, which is
-        # wide enough that most runs are cancelled before they finish.
-        description: "Cache Go modules and build output between runs (setup-go)."
+        description: >-
+          Carry GOMODCACHE and GOCACHE between runs through this org's own
+          bucket in cloud's object store (bin/gocache). ON by default: a runner
+          is a pod that lives one job, so without it every Go gate downloads
+          every module and compiles every dependency from nothing. Measured, not
+          one Go cache was restored across 188 job logs, and a warm second pass
+          compiled hanzoai/commerce's vet in 15s instead of 198s. The cache is
+          keyed by go.sum, Go version and architecture, isolated per org by the
+          server, and written only from the default branch or a tag. 'false'
+          turns it off.
         required: false
-        default: "false"
+        default: "true"
         type: string
       spec-ref:
         # THE SECOND WAY INTO `move`, AND ON HANZO GIT THE ONLY ONE.
@@ -389,7 +386,7 @@ jobs:
           # Naming the list here also makes the release order self-announcing: a
           # pipeline that has grown a tool refuses at step one, and says which ref
           # it read and what was missing from it.
-          need="certclaims conflictmarkers gover ignoretracked imgplat imgtags imgver modsize publishable site vendormark"
+          need="certclaims conflictmarkers gocache gover ignoretracked imgplat imgtags imgver modsize publishable site vendormark"
           miss='<no host answered>'
           # A sha cannot be a --branch, so it arrives by fetch rather than clone.
           # Both are wrapped so a host that does not carry the ref is a return
@@ -1183,7 +1180,19 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: ${{ steps.gomod.outputs.file }}
-          cache: ${{ inputs.go-cache == 'true' }}
+          # GitHub's cache service is a store off our infrastructure, and the
+          # forge has none. The cache is bin/gocache's, in the next step.
+          cache: false
+
+      - name: Restore the Go cache (this org's store)
+        # Before the first gate, so `go vet` and `go test` start from this org's
+        # modules and compiled dependencies instead of the network. A miss, a
+        # refusal or an outage is a cold build and never a red one; the script
+        # says which on the log.
+        id: gocache
+        if: steps.gomod.outputs.file != '' && env.HANZO_CI_ROLE == 'test' && inputs.go-cache != 'false'
+        run: |
+          "$CI_HOME/bin/gocache" restore "$(dirname '${{ steps.gomod.outputs.file }}')"
 
       - name: Provision C toolchain (cgo test gates)
         # CGO_ENABLED=1 gates (e.g. go-sqlite3, which bundles the sqlite
@@ -1835,6 +1844,15 @@ jobs:
             fi
             printf '%s\t%s\t%s\n' "$n" "$claims" "$name" >> "$receipt"
           done
+
+      - name: Save the Go cache (this org's store)
+        # After a green gate, so what is saved is what a passing build compiled.
+        # bin/gocache writes only from the default branch or a tag and only a key
+        # the store does not hold: a pull request reads this org's cache and
+        # never writes it, because Go trusts a cache without re-hashing it.
+        if: steps.gomod.outputs.file != '' && env.HANZO_CI_ROLE == 'test' && inputs.go-cache != 'false' && steps.gocache.outputs.hit != 'exact'
+        run: |
+          "$CI_HOME/bin/gocache" save "$(dirname '${{ steps.gomod.outputs.file }}')"
 
       - name: Tests not run (declared by caller)
         # The complement of the step above, and the reason opting out cannot be
