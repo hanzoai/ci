@@ -17,6 +17,18 @@ images:
     # default when this line is absent is linux/amd64 alone, which is how the
     # v1.0.x series shipped amd64 only.
     platforms: [linux/amd64, linux/arm64]
+  # The runner image: what every CI job runs inside (RUNNER_IMAGE in universe
+  # charts/app/values/hanzo/cloud.yaml, pinned by digest). Built here like any
+  # other image, so every change to this repo rebuilds it and nothing is cut by
+  # hand. Its version is runner/VERSION, patched by bin/imgver on each build.
+  - name: git-runner
+    context: runner
+    dockerfile: runner/Dockerfile
+    repo: ghcr.io/hanzoai/git-runner
+    # A runner Job is pinned to the architecture its labels name, so an index
+    # missing either half strands every job of that architecture at `exec
+    # format error` before it registers.
+    platforms: [linux/amd64, linux/arm64]
 
 test:
   - name: go-vet
