@@ -289,6 +289,13 @@ test:
     # that text. The case it holds: a release that hands its number down gets it
     # in the file too, or the repo's publisher sees nothing new.
     run: bash bin/cut_test.sh
+  - name: enqueue
+    # The delegate lane's POST to the build door. Its suite lifts `enqueue` out
+    # of build.yml and runs that text against a faked wire and clock: a 429 or
+    # an outage waits on a jittered backoff doubling to a 120s ceiling, a
+    # Retry-After is a floor, the 30-minute budget is never overrun, and a
+    # refusal is taken on the first answer. Offline.
+    run: bash bin/enqueue_test.sh
   - name: kms
     # bin/kms is the ONE way anything here reads a secret. It replaced three
     # copies — this repo's site action, this repo's build.yml, and hanzoai/gui's
