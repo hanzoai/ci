@@ -1335,10 +1335,9 @@ jobs:
         # — cloud's next release included — ask a client repo "which document are
         # you?" without running a generator.
         #
-        # CREDENTIAL: HANZO_API_TOKEN from KMS, contents:read on the spec repo and
-        # on hanzoai/openapi at git.hanzo.ai. Both are repos this run does not
-        # belong to and at least one of them is private, which is exactly the
-        # reach the per-job token does not have.
+        # NO CREDENTIAL. The document is served by api.hanzo.ai and the driver,
+        # hanzoai/openapi, is a public repository, so this lane reads both
+        # anonymously and no identity has to be linked anywhere for it to run.
         # TWO MODES, ONE FETCH, decided by the payload — because there are two
         # questions and they need the same document.
         #
@@ -1358,23 +1357,8 @@ jobs:
         if: env.HANZO_CI_ROLE == 'publish' && (hashFiles('hanzo.yml') != '')
         id: client
         env:
-          # ONE HOST, SO ONE CREDENTIAL. The document lives on git.hanzo.ai and
-          # HANZO_API_TOKEN is what reads git.hanzo.ai. It arrives from KMS via
-          # the step above, so nothing is declared here.
-          #
-          # What stood here was a fallback chain, SPEC_TOKEN then GH_PAT, and both
-          # halves were wrong about which Hanzo Git holds the document. SPEC_TOKEN is
-          # provisioned nowhere, so the lane always fell through; GH_PAT reads
-          # github.com, which mirrors hanzoai/cloud 4,968 commits behind and does
-          # not carry openapi.yaml at all. The chain therefore resolved to a
-          # credential that authenticated fine against a host with no document on
-          # it. It has never been safe — only unreached.
-          #
-          # The per-job token is not a substitute either, for a nearer reason: it
-          # is scoped to the repo the run belongs to, and every read below is of
-          # some OTHER repo — the spec repo, then hanzoai/openapi, which is
-          # private. A scoped token gets a 404 there, and a 404 from this API is
-          # indistinguishable from a document that was never written.
+          # No credential: the document comes from api.hanzo.ai and the driver from
+          # the public hanzoai/openapi, both read anonymously below.
           PAYLOAD: ${{ toJson(github.event.client_payload) }}
           SPEC_REF: ${{ inputs.spec-ref }}
           SPEC_VERSION_IN: ${{ inputs.spec-version }}
@@ -1493,43 +1477,17 @@ jobs:
           # different file over raw.githubusercontent.com. Five ways to reach one
           # tool, four of them needing a credential the call site does not have.
           #
-          # An anonymous clone of a private repo dies at `fatal: could not read
-          # Username for 'https://git.hanzo.ai'`, exit 128 — from a job already
-          # holding the token that reads it. The lane has the credential, so the
-          # lane fetches the tool, once, and hands it over. A call site that does
-          # not clone cannot be wrong about where to.
-          #
-          # extraheader rather than a token in the URL: a clone URL is echoed by
-          # git on failure and lands in the log verbatim.
+          # The driver is public, so it is cloned from github.com with no
+          # credential. The runner's own git config is set aside for this one
+          # clone: a global `url.https://git.hanzo.ai/hanzoai/.insteadOf` would
+          # otherwise send it to git.hanzo.ai, which serves git to linked
+          # accounts only, and this job's machine identity is linked to none.
           export OPENAPI="$RUNNER_TEMP/driver"
-          # Named, not assumed. Bare $HANZO_API_TOKEN under `set -u` aborts with
-          # "unbound variable" and git follows with "could not read Username" —
-          # two lines that describe the shell and the transport, and neither one
-          # says which credential nobody handed this step.
-          [ -n "${HANZO_API_TOKEN:-}" ] || { echo "::error::the client lane clones the driver from git.hanzo.ai with this org's IAM identity, and HANZO_API_TOKEN is empty — the KMS login earlier in this job is what mints it, so it did not run or did not succeed"; exit 1; }
-          # A 401 here arrives as "could not read Username": git has no terminal to
-          # prompt on, so a REFUSED credential and an ABSENT one read identically.
-          # Say which one it was, because they have different fixes.
           if [ ! -d "$OPENAPI" ]; then
-            git -c http.extraheader="Authorization: Basic $(printf 'x-access-token:%s' "$HANZO_API_TOKEN" | base64 -w0)" \
-              clone --depth 1 -q https://git.hanzo.ai/hanzoai/openapi "$OPENAPI" 2>"$RUNNER_TEMP/driver.err" || {
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 \
+              git clone --depth 1 -q https://github.com/hanzoai/openapi "$OPENAPI" 2>"$RUNNER_TEMP/driver.err" || {
               sed 's/^/  /' "$RUNNER_TEMP/driver.err" >&2
-              # The subject and issuer, decoded from the token's PAYLOAD. Both are
-              # identifiers — `<owner>/<name>` and a URL — and neither is the
-              # credential; the signature is never touched. Printed because the
-              # fix is "link THIS subject", and every other way to learn it means
-              # handling the token by hand.
-              claim=$(printf '%s' "${HANZO_API_TOKEN#*.}" | cut -d. -f1 \
-                      | tr '_-' '/+' | { read -r p; printf '%s' "$p$(printf '%*s' $(( (4 - ${#p} % 4) % 4 )) '' | tr ' ' '=')"; } \
-                      | base64 -d 2>/dev/null || true)
-              sub=$(printf '%s' "$claim" | jq -r '.sub // "unreadable"' 2>/dev/null || echo unreadable)
-              iss=$(printf '%s' "$claim" | jq -r '.iss // "unreadable"' 2>/dev/null || echo unreadable)
-              # The subject prints masked when the app name is also registered as
-              # a secret here, which is exactly the case that needs diagnosing.
-              # A SHA-256 of it is not: it cannot carry the value out, and it
-              # still lets a candidate be confirmed by hashing it and comparing.
-              subh=$(printf '%s' "$sub" | sha256sum | cut -c1-16)
-              echo "::error::hanzoai/openapi is private and git.hanzo.ai refused this org's IAM token. The token is a MACHINE identity from the KMS client-credentials exchange — subject ${sub} (sha256:${subh}), issued by ${iss} — and git.hanzo.ai resolves an IAM subject through the account it is linked to (services/auth/iam.go). A machine subject no sign-in ever linked resolves to nobody, so the credential verifies and still authorizes nothing. Link ${sub} to a service account on git.hanzo.ai, or let the driver repo be readable by it." >&2
+              echo "::error::could not clone the client driver from https://github.com/hanzoai/openapi anonymously. It must stay a public repository; this lane holds no credential for it." >&2
               exit 1
             }
           fi
