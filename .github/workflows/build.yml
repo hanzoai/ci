@@ -38,12 +38,15 @@ on:
         default: '["linux-amd64"]'
       test-runners:
         description: >-
-          The architectures whose tests gate publishing, as a JSON array: both
-          (the default) or `["linux-amd64"]`. Nothing else is accepted, because
-          Hanzo Git does not evaluate `inputs` in `strategy.matrix`, so each
-          choice is a job of its own below and this input only selects one.
+          The architectures whose tests gate publishing, as a JSON array:
+          `["linux-amd64"]` (the default) or both. Nothing else is accepted,
+          because Hanzo Git does not evaluate `inputs` in `strategy.matrix`, so
+          each choice is a job of its own below and this input only selects one.
+          amd64 alone is the default because the arm64 leg doubled every repo's
+          runner demand on the smaller arm64 pool while catching almost nothing
+          amd64 did not; a repo with architecture-specific code opts in.
         type: string
-        default: '["linux-amd64","linux-arm64"]'
+        default: '["linux-amd64"]'
       advisory-runners:
         description: >-
           One architecture whose tests run and report without gating anything,
