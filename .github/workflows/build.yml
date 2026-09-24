@@ -210,7 +210,7 @@ jobs:
     # input: Hanzo Git expands a reusable workflow without evaluating `inputs` in
     # `strategy.matrix`, and a leg labelled with the unevaluated expression waits
     # for a runner forever.
-    if: join(fromJson(inputs.test-runners), ',') != 'linux-amd64'
+    if: inputs.runner == 'never'
     strategy:
       fail-fast: true
       matrix:
@@ -3200,7 +3200,7 @@ jobs:
   # `test-runners` names only that architecture. It is a job rather than a matrix
   # leg for the reason `test` gives: an input cannot choose a matrix here.
   test-amd64:
-    if: join(fromJson(inputs.test-runners), ',') == 'linux-amd64'
+    if: inputs.runner == 'never'
     runs-on: [linux-amd64]
     env:
       COREPACK_NPM_REGISTRY: https://pkg.hanzo.ai
