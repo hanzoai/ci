@@ -480,8 +480,12 @@ else
       echo "  transfer failed: $(tr -d '\r' < "$work"/sd-vfy.err | tail -1)"; return 1; }
     [ "$code" = "200" ] || { echo "  HTTP $code"; return 1; }
     got=$(wc -c < "$work"/sd-vfy.body | tr -d ' ')
-    len=$(awk 'BEGIN{IGNORECASE=1} /^content-length:/{gsub(/\r/,"");print $2}' \
-            "$work"/sd-vfy.hdr | tail -1)
+    # -L writes every hop's headers to one file. Only the answer that carried
+    # the body may promise its length: a redirect hop's `content-length: 17`
+    # ("Moved Permanently") ahead of a chunked 200 is not a short read.
+    len=$(awk 'BEGIN{IGNORECASE=1} /^HTTP\//{len=""}
+               /^content-length:/{gsub(/\r/,""); len=$2} END{print len}' \
+            "$work"/sd-vfy.hdr)
     [ "${got:-0}" -gt 0 ] || { echo "  200 with an EMPTY body"; return 1; }
     if [ -n "$len" ] && [ "$got" -ne "$len" ]; then
       echo "  got $got bytes, content-length promised $len"; return 1
