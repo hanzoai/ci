@@ -1320,7 +1320,11 @@ jobs:
         run: |
           set -euo pipefail
           grep -q '^name = "bindgen"' Cargo.lock || { echo "no bindgen in the lock — skipping libclang"; exit 0; }
-          ldconfig -p 2>/dev/null | grep -q 'libclang\.so' && { echo "libclang already present"; exit 0; }
+          # Ubuntu caches libclang only under its versioned names (libclang-18.so.18,
+          # libclang-18.so), never a bare libclang.so, and clang-sys searches those
+          # names itself. Probing for the bare name missed the runner image's own
+          # copy and fell through to a sudo the runner cannot use.
+          ldconfig -p 2>/dev/null | grep -qE 'libclang(-[0-9.]+)?\.so' && { echo "libclang already present"; exit 0; }
           sudo apt-get update -qq || {
             sudo find /etc/apt -name '*.list' -o -name '*.sources' | \
               xargs -r sudo sed -i 's|https\?://archive.ubuntu.com/ubuntu|http://mirrors.digitalocean.com/ubuntu|g'
