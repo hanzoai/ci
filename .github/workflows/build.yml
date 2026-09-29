@@ -686,6 +686,7 @@ jobs:
           KMS_CLIENT_SECRET: ${{ secrets.KMS_CLIENT_SECRET }}
           KMS_ENDPOINT: ${{ vars.KMS_ENDPOINT || 'https://api.hanzo.ai' }}
           KMS_ORG: ${{ vars.KMS_ORG }}
+          EVENT: ${{ github.event_name }}
         run: |
           # This step is BEST-EFFORT (see below): GHCR push already works via the
           # workflow token, and deploy creds are optional. GitHub wraps `run:` in
@@ -947,7 +948,13 @@ jobs:
           echo "::add-mask::$TOKEN"
           echo "HANZO_API_TOKEN=$TOKEN" >> "$GITHUB_ENV"
 
-          if [ "$SITE_DECL" = '!!map' ] || [ "$(yq -r '.sites | type' hanzo.yml 2>/dev/null || echo '!!null')" = '!!seq' ]; then
+          # The deploy token is read only where the site lane runs: the publish role,
+          # off a pull request. The test role runs the repo's own code before any
+          # gate has passed, and a branch pushed for a pull request is code no one
+          # has reviewed, so neither is handed a token that can publish this org's
+          # sites.
+          if { [ "$SITE_DECL" = '!!map' ] || [ "$(yq -r '.sites | type' hanzo.yml 2>/dev/null || echo '!!null')" = '!!seq' ]; } \
+            && [ "$HANZO_CI_ROLE" = publish ] && [ "$EVENT" != pull_request ]; then
             # The Sites plane issues its presigned upload grant to the org of an
             # `sk-` key, so the JWT above cannot stand in for it. Sealed once per
             # org at deploy/HANZO_DEPLOY_TOKEN and read here like every other one.
