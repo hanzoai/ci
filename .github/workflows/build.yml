@@ -2660,6 +2660,8 @@ jobs:
         # mints the tag that starts it, so the publish credential stays where the
         # publish is.
         if: env.HANZO_CI_ROLE == 'publish' && (steps.client.outputs.ran == '1' && steps.client.outputs.changed == '1' && github.event_name != 'pull_request')
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           set -euo pipefail
           git config user.name "Zach Kelling"; git config user.email z@zeekay.io
@@ -2750,20 +2752,34 @@ jobs:
           # first)` and `[remote rejected] v3.2.3`. The regeneration was correct
           # and landed nowhere, which is indistinguishable from never running.
           #
-          # GITHUB_SERVER_URL is the host this run belongs to — Hanzo Git's
-          # in-cluster address on a Hanzo Git runner — so the push is addressed the
-          # same way the checkout was, and HANZO_API_TOKEN is the credential that
+          # GITHUB_SERVER_URL is the host this run belongs to — github.com, or
+          # Hanzo Git's in-cluster address on a Hanzo Git runner — so the push is
+          # addressed the same way the checkout was, with the credential that
           # host takes. The tag lands where the publish workflow that watches
           # for it also lives.
-          #
-          # AND IT IS THE SEALED ONE, not the per-job token, which the paragraph
-          # below already measured being refused here: `User -2` IS the per-job
-          # token's identity, and main is protected. Reaching for it because it is
-          # the credential already on the wire is how that refusal happened the
-          # first time.
-          [ -n "${HANZO_API_TOKEN:-}" ] || { echo "::error::the cut pushes the projection back to git.hanzo.ai and needs the IAM identity; HANZO_API_TOKEN is empty, so the KMS login above did not mint one"; exit 1; }
           REMOTE="${GITHUB_SERVER_URL:-https://git.hanzo.ai}"
           REMOTE="${REMOTE%/}/${{ github.repository }}"
+          # bin/credential_test.sh lifts this function out of this file and runs it.
+          # credential BEGIN
+          # credential <remote>: print the token the push to <remote> carries. Each
+          # host refuses the other's: github.com answers the IAM token with
+          # `invalid credentials`. Never the per-job token: on github.com its push
+          # starts no workflow, so the tag would publish nothing, and on Hanzo Git
+          # it is `User -2`, refused on a protected main.
+          credential() {
+            case "$1" in
+              https://github.com/*)
+                [ -n "${GH_PAT:-}${GIT_TOKEN:-}" ] || {
+                  echo "::error::the cut pushes to $1 and needs a GitHub token: set GH_PAT on this org or seal GITHUB_TOKEN under the kms.path in hanzo.yml" >&2; return 1; }
+                printf '%s' "${GH_PAT:-$GIT_TOKEN}" ;;
+              *)
+                [ -n "${HANZO_API_TOKEN:-}" ] || {
+                  echo "::error::the cut pushes to $1 and needs the IAM identity; HANZO_API_TOKEN is empty, so the KMS login above did not mint one" >&2; return 1; }
+                printf '%s' "$HANZO_API_TOKEN" ;;
+            esac
+          }
+          # credential END
+          TOKEN=$(credential "$REMOTE")
           # CLEAR WHAT CHECKOUT WROTE FIRST. `http.extraHeader` is MULTI-VALUED
           # and url-matching does not displace a less specific entry: git sends
           # EVERY matching header, and the server honours the first
@@ -2784,7 +2800,7 @@ jobs:
           # checkout's own post-step only unsets what it still finds.
           git config --local --name-only --get-regexp '^http\..*extraheader$' 2>/dev/null \
             | while read -r k; do git config --local --unset-all "$k"; done
-          git config --local http.extraheader "Authorization: Basic $(printf 'x-access-token:%s' "$HANZO_API_TOKEN" | base64 -w0)"
+          git config --local http.extraheader "Authorization: Basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
           # The branch this run is on. act_runner leaves ref_name empty on an
           # ordinary push, and `HEAD:` with nothing after the colon is not a
           # refspec, so the default is spelled out rather than assumed.

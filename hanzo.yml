@@ -289,6 +289,12 @@ test:
     # that text. The case it holds: a release that hands its number down gets it
     # in the file too, or the repo's publisher sees nothing new.
     run: bash bin/cut_test.sh
+  - name: credential
+    # The token the cut pushes with, chosen by host. Its suite lifts `credential`
+    # out of build.yml and runs that text: github.com gets a GitHub token that
+    # starts the tag's publish, the forge gets the org's IAM token, and neither
+    # host is handed the other's. Offline.
+    run: bash bin/credential_test.sh
   - name: enqueue
     # The delegate lane's POST to the build door. Its suite lifts `enqueue` out
     # of build.yml and runs that text against a faked wire and clock: a 429 or
