@@ -316,8 +316,10 @@ The third state is not a gap to fill later. A repo whose version is not `x.y.z`
 (a `-alpha.N` gradle build) has no patch for this lane to derive, and guessing
 one would tag bytes under a number nobody chose.
 
-Credential: **`SPEC_TOKEN`** — a fine-grained token with `contents:read` on the
-spec repo.
+Credential: the push goes to the host the run belongs to, with that host's
+token. github.com takes **`GH_PAT`**, else the KMS **`GITHUB_TOKEN`**; the forge
+takes the org's IAM token. The per-job token is never used: on github.com its
+push starts no workflow, so the tag would publish nothing.
 
 ## `binaries:` — publish a plugin once, install it everywhere
 
