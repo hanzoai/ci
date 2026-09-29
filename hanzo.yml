@@ -295,6 +295,12 @@ test:
     # starts the tag's publish, the forge gets the org's IAM token, and neither
     # host is handed the other's. Offline.
     run: bash bin/credential_test.sh
+  - name: get
+    # How the tools arrive at the ref a caller pinned. Its suite lifts `get` out
+    # of build.yml and runs that text against a local repository: a branch and a
+    # tag clone, and any sha, the caller's pin included, arrives by fetch.
+    # Offline.
+    run: bash bin/get_test.sh
   - name: enqueue
     # The delegate lane's POST to the build door. Its suite lifts `enqueue` out
     # of build.yml and runs that text against a faked wire and clock: a 429 or
