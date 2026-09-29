@@ -301,6 +301,14 @@ test:
     # tag clone, and any sha, the caller's pin included, arrives by fetch.
     # Offline.
     run: bash bin/get_test.sh
+  - name: alone
+    # The PyPI lane's clean install. Its suite lifts `alone` out of build.yml and
+    # runs that text on wheels it builds: one that declares what it imports
+    # installs and imports, one that does not is refused. Needs uv, provisioned
+    # here as the pipeline provisions it, and the index for the seeded pip.
+    run: |
+      command -v uv >/dev/null 2>&1 || { curl -fsSL https://astral.sh/uv/install.sh | sh; export PATH="$HOME/.local/bin:$PATH"; }
+      bash bin/alone_test.sh
   - name: enqueue
     # The delegate lane's POST to the build door. Its suite lifts `enqueue` out
     # of build.yml and runs that text against a faked wire and clock: a 429 or

@@ -3138,41 +3138,40 @@ jobs:
           # own interpreter — so nothing here turns on what the runner image ships.
           py() { uv run --no-project --python 3.12 --with build --with twine "$@"; }
 
-          rc=0
-          for i in "${!dirs[@]}"; do
-            d="${dirs[$i]}"; n="${names[$i]}"
-            echo "::group::$n ($d)"
-            rm -rf "$d/dist" "$d/build"
-            if ! py python -m build "$d" --outdir "$d/dist"; then rc=1; echo "::endgroup::"; continue; fi
-
-            # INSTALL THE WHEEL ALONE AND IMPORT IT, before the index can serve
-            # it to anybody. A monorepo supplies every sibling, so a package can
-            # import what it never declared, pass all of its own tests, and fail
-            # at import for everyone who installs it by name. hanzo-agent 0.1.0
-            # shipped exactly that — numpy and httpx imported, neither declared
-            # — and an outside adopter gave up on three of our packages and
-            # wrote their own clients. It is the most expensive kind of bug we
-            # publish, because nothing inside the tree can see it.
-            #
-            # A clean environment is the only thing that can tell a declared
-            # dependency from one the workspace happened to have, and
-            # --no-cache-dir stops a wheel cached from the build above standing
-            # in for a missing declaration. Here rather than in each repo's own
-            # lane: one check, every package that publishes through this
-            # pipeline.
+          # INSTALL THE WHEEL ALONE AND IMPORT IT, before the index can serve
+          # it to anybody. A monorepo supplies every sibling, so a package can
+          # import what it never declared, pass all of its own tests, and fail
+          # at import for everyone who installs it by name. hanzo-agent 0.1.0
+          # shipped exactly that — numpy and httpx imported, neither declared
+          # — and an outside adopter gave up on three of our packages and
+          # wrote their own clients. It is the most expensive kind of bug we
+          # publish, because nothing inside the tree can see it.
+          #
+          # A clean environment is the only thing that can tell a declared
+          # dependency from one the workspace happened to have, and
+          # --no-cache-dir stops a wheel cached from the build above standing
+          # in for a missing declaration. Here rather than in each repo's own
+          # lane: one check, every package that publishes through this
+          # pipeline.
+          #
+          # bin/alone_test.sh lifts this function out of this file and runs it.
+          # alone BEGIN
+          # alone <name> <wheel...>: install the wheels into a venv holding
+          # nothing else and import the top levels distribution <name> provides.
+          # Seeded, because `uv venv` makes a venv without pip.
+          alone() {
+            local n=$1 clean rc=0; shift
             clean="$(mktemp -d)/venv"
-            uv venv --python 3.12 "$clean" >/dev/null 2>&1
-            if ! "$clean/bin/python" -m pip install --quiet --no-cache-dir "$d/dist/"*.whl; then
-              echo "::error::$n builds but its own wheel does not install"
-              rm -rf "$clean"; rc=1; echo "::endgroup::"; continue
-            fi
+            uv venv --seed --python 3.12 "$clean" >/dev/null 2>&1
+            if ! "$clean/bin/python" -m pip install --quiet --no-cache-dir "$@"; then
+              echo "::error::$n builds but its own wheel does not install"; rc=1
             # ASK THE WHEEL what it provides, rather than guessing from the tree.
             # Guessing picked `examples` for hanzo-agent, because that directory
             # has an __init__.py and sorts first — a check importing the wrong
             # module can pass while the package is broken, which is worse than
             # not checking. The installed distribution's own top-level list is
             # what a consumer gets, so it is what gets imported here.
-            if ! "$clean/bin/python" - "$n" <<'VERIFY'
+            elif ! "$clean/bin/python" - "$n" <<'VERIFY'
           import importlib, sys
           from importlib.metadata import distribution
           dist = distribution(sys.argv[1])
@@ -3190,10 +3189,21 @@ jobs:
           print(f"{sys.argv[1]}: imported {', '.join(tops)}")
           VERIFY
             then
-              echo "::error::$n installs but does not import — it uses something it does not declare"
-              rm -rf "$clean"; rc=1; echo "::endgroup::"; continue
+              echo "::error::$n installs but does not import — it uses something it does not declare"; rc=1
             fi
             rm -rf "$clean"
+            return $rc
+          }
+          # alone END
+
+          rc=0
+          for i in "${!dirs[@]}"; do
+            d="${dirs[$i]}"; n="${names[$i]}"
+            echo "::group::$n ($d)"
+            rm -rf "$d/dist" "$d/build"
+            if ! py python -m build "$d" --outdir "$d/dist"; then rc=1; echo "::endgroup::"; continue; fi
+
+            if ! alone "$n" "$d/dist/"*.whl; then rc=1; echo "::endgroup::"; continue; fi
 
             # --skip-existing keeps a re-run idempotent: a version already on the
             # index is a no-op rather than a 400 that reds a release which worked.
