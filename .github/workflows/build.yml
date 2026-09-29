@@ -399,18 +399,22 @@ jobs:
           # it read and what was missing from it.
           need="certclaims conflictmarkers gocache gover ignoretracked imgplat imgtags imgver modsize publishable site vendormark"
           miss='<no host answered>'
-          # A sha cannot be a --branch, so it arrives by fetch rather than clone.
-          # Both are wrapped so a host that does not carry the ref is a return
-          # value here rather than the end of the step under `set -e` — walking
-          # past one is the whole job of this loop.
+          # A sha cannot be a --branch, so it arrives by fetch rather than clone:
+          # the caller's pin as well as this file's own commit. Both are wrapped
+          # so a host that does not carry the ref is a return value here rather
+          # than the end of the step under `set -e` — walking past one is the
+          # whole job of this loop.
           #
           # The header goes ONLY to Hanzo Git: git sends http.extraheader to
           # whatever host it is talking to, and a Hanzo Git token must not be
           # handed to github.com.
+          #
+          # bin/get_test.sh lifts this function out of this file and runs it.
+          # get BEGIN
           get() {
             local url=$1 want=$2 a=()
             case "$url" in https://git.hanzo.ai/*) a=(${hdr[@]+"${hdr[@]}"}) ;; esac
-            if [ "$want" = "${JOB_SHA:-}" ]; then
+            if [[ $want =~ ^[0-9a-f]{40}$ ]]; then
               git init -q "$RUNNER_TEMP/ci" \
                 && git -C "$RUNNER_TEMP/ci" ${a[@]+"${a[@]}"} fetch -q --depth 1 "$url" "$want" \
                 && git -C "$RUNNER_TEMP/ci" checkout -q FETCH_HEAD
@@ -418,6 +422,7 @@ jobs:
               git ${a[@]+"${a[@]}"} clone -q --depth 1 --branch "$want" "$url" "$RUNNER_TEMP/ci"
             fi
           }
+          # get END
           # A mirror that has not caught up does not carry the sha yet, and
           # answers exactly as a wrong sha would. Falling through to the next
           # host is the whole handling: a sha names the same bytes wherever it
