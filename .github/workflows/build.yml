@@ -253,8 +253,12 @@ jobs:
     env:
       # 'true' only when this run's code came from this repository. Every step
       # that reads a credential requires it, so an empty or unevaluated value
-      # withholds the credential rather than handing it out.
-      HANZO_CI_TRUSTED: &trusted ${{ !(startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) }}
+      # withholds the credential rather than handing it out. Spelled out in each
+      # job, not aliased: Hanzo Git re-encodes every job as its own document and
+      # keeps `env` as a raw node, so an alias to another job's anchor arrives
+      # with no definition and the run is never created. `steps` survives an
+      # alias only because it is decoded into structs first.
+      HANZO_CI_TRUSTED: ${{ !(startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) }}
       # corepack fetches the pnpm/yarn TARBALL ITSELF from registry.npmjs.org,
       # and it does not read .npmrc to do it — so 317 repos that pin
       # `packageManager` reach out to npmjs on every install no matter how
@@ -3399,7 +3403,7 @@ jobs:
     env:
       COREPACK_NPM_REGISTRY: https://pkg.hanzo.ai
       HANZO_CI_ROLE: test
-      HANZO_CI_TRUSTED: *trusted
+      HANZO_CI_TRUSTED: ${{ !(startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) }}
     steps: *steps
 
   # The advisory leg: the same test on `advisory-runners`, reported and never
@@ -3413,7 +3417,7 @@ jobs:
     env:
       COREPACK_NPM_REGISTRY: https://pkg.hanzo.ai
       HANZO_CI_ROLE: test
-      HANZO_CI_TRUSTED: *trusted
+      HANZO_CI_TRUSTED: ${{ !(startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) }}
     steps: *steps
 
   cicd:
@@ -3461,7 +3465,7 @@ jobs:
     env:
       COREPACK_NPM_REGISTRY: https://pkg.hanzo.ai
       HANZO_CI_ROLE: publish
-      HANZO_CI_TRUSTED: *trusted
+      HANZO_CI_TRUSTED: ${{ !(startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) }}
       HANZO_CI_TESTED: ${{ needs.test.result == 'success' && 'success' || needs.test-amd64.result }}
       HANZO_CI_GATED: ${{ inputs.test-runners }}
     # The same steps as `test`; HANZO_CI_ROLE decides which of them run here.
