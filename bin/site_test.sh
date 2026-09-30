@@ -136,10 +136,29 @@ while [ $# -gt 0 ]; do
     --data-binary) src="${2#@}"; shift 2 ;;
     -F) fields+=("$2"); shift 2 ;;
     -w) wfmt="$2"; shift 2 ;;
+    # A batch: one section per object, answered on stdout the way `write-out`
+    # would, so bin/site reads its own results out of what the shim prints.
+    -K) cfg="$2"; shift 2 ;;
     http*) url="$1"; shift ;;
     *) shift ;;
   esac
 done
+if [ -n "${cfg:-}" ]; then
+  awk -v dir="$T_DIR" '
+    function flush(   ok) {
+      if (url != "") {
+        ok = (url ~ /^https:\/\/s3\.test\//)
+        if (ok) print fields >> (dir "/uploads")
+        printf "%s %s\n", (ok ? "204" : "000"), rel
+      }
+      url = ""; fields = ""; rel = ""
+    }
+    /^url = /   { flush(); u = $0; sub(/^url = "/, "", u); sub(/"$/, "", u); url = u; next }
+    /^form = /  { f = $0; sub(/^form = "/, "", f); sub(/"$/, "", f); fields = (fields == "" ? f : fields "|" f); next }
+    /^write-out = / { w = $0; sub(/^write-out = "%\{http_code\} /, "", w); sub(/\\n"$/, "", w); rel = w; next }
+    END { flush() }' "$cfg"
+  exit 0
+fi
 printf '%s %s\n' "$method" "$url" >> "$T_DIR/calls"
 case "$url" in
   # /complete before /deployments: the completion address ends in the collection
