@@ -52,6 +52,13 @@ inputs:
     description: KMS base, which holds the deploy key
     required: false
     default: https://kms.hanzo.ai
+  ref:
+    description: >-
+      The hanzoai/ci ref whose bin/site runs. Defaults to the ref this action was
+      pinned at (github.action_ref), which a composite step cannot always read
+      back, and then to v1.
+    required: false
+    default: ''
   jobs:
     description: Parallel uploads
     required: false
@@ -65,6 +72,7 @@ runs:
         # The forge stopped serving git anonymously, so this clone needs a
         # credential. The job's own token is the one it already has.
         FORGE_TOKEN_FOR_CLONE: ${{ github.token }}
+        SITE_REF: ${{ inputs.ref || github.action_ref || 'v1' }}
       # The action ref is the script ref: an action pinned to @v1 runs v1's
       # site. Both hosts, because this repo is served from each.
       #
@@ -90,7 +98,7 @@ runs:
       #   literally".
       run: |
         set -euo pipefail
-        ref="${GITHUB_ACTION_REF:-v1}"
+        ref="$SITE_REF"
         dst="$RUNNER_TEMP/site-ci"
         export GIT_TERMINAL_PROMPT=0
 
