@@ -53,6 +53,8 @@
 #      SITE_COMMIT / SITE_BRANCH  recorded on the deployment
 #      SITE_URL            the public host serving the prefix; the previous release's
 #                          hash manifest is read from it (default: the project's liveUrl)
+#      SITE_COPY_FROM      <slug>:<dir> of a site just published from the same build;
+#                          its identical objects are copied by the plane, not sent
 #      SITE_PLAN=1   print the manifest and exit; no network. The test seam.
 set -euo pipefail
 
@@ -432,6 +434,27 @@ if [ -s "$work/prev" ]; then
   fi
 else
   echo "no previous manifest at the live host; sending everything"
+fi
+# ---- 1c. what the plane can copy ----------------------------------------------
+# A host that shares its build with a site published a moment ago (SITE_COPY_FROM
+# = "<slug>:<dir>") differs from it by a page or two. The objects of this upload
+# that are byte-identical to that site's are not sent: the completion names them
+# and cloud copies them inside the object store. Only when the grant says the
+# plane does so; one that does not would leave those keys missing.
+: > "$work/copy"
+if [ -n "${SITE_COPY_FROM:-}" ] && [ "$(jq -r '.upload.copy // false' "$work"/sd-enq.json)" = true ]; then
+  peer_slug=${SITE_COPY_FROM%%:*}; peer_dir=${SITE_COPY_FROM#*:}
+  while IFS= read -r k; do
+    [ -f "$peer_dir/$k" ] && cmp -s "$dir/$k" "$peer_dir/$k" && printf '%s\n' "$k"
+  done < "$work/upload" > "$work/copy" || true
+  if [ -s "$work/copy" ]; then
+    grep -vxFf "$work/copy" "$work/upload" > "$work/upload.rest" || true
+    mv "$work/upload.rest" "$work/upload"
+    jq --arg f "$peer_slug" --rawfile c "$work/copy" \
+       '. + {copyFrom:$f, copy:($c | rtrimstr("\n") | split("\n"))}' "$work/sd-done.json" > "$work/sd-done2.json"
+    mv "$work/sd-done2.json" "$work/sd-done.json"
+    echo "copy: $(grep -c . "$work/copy") objects from $peer_slug inside the store"
+  fi
 fi
 cp "$work/hashes" "$dir/$mkey"
 
