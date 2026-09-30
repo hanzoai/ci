@@ -117,6 +117,51 @@ test:
         echo "::error::the test gate is guarded by \`inputs.mode != 'delegate'\` — delegate would skip it"; exit 1
       fi
       echo "OK: test gate at line $t, delegate POST at line $d, gate not delegate-guarded"
+  - name: fork-is-sandboxed
+    # A pull request from a fork runs code no member wrote, so it gets a one-job
+    # sandboxed runner, no credential, and no publish job. Three properties, one
+    # predicate, and the predicate is read off HANZO_CI_TRUSTED's definition so
+    # every copy must match it byte for byte — two spellings of "is this a fork"
+    # are two answers:
+    #
+    #   RUNNER — every job's `runs-on` sends the fork to an `ephemeral-` label,
+    #     which only the platform's one-job runners advertise.
+    #   CREDENTIAL — every job carries HANZO_CI_TRUSTED, and every step that
+    #     names a secret either requires it to be 'true' or runs in the publish
+    #     role alone.
+    #   PUBLISH — the publish job and the advisory leg skip a fork, and the build
+    #     door is never asked for one.
+    run: |
+      set -e
+      f=.github/workflows/build.yml
+      def=$(grep -m1 "^      HANZO_CI_TRUSTED: &trusted " "$f") || {
+        echo "::error::HANZO_CI_TRUSTED is not defined under the anchor &trusted — the predicate has no one definition"; exit 1; }
+      p=${def#*'${{ !('}; p=${p%') }}'}
+      [ -n "$p" ] && [ "$p" != "$def" ] || { echo "::error::cannot read the predicate out of: $def"; exit 1; }
+      echo "predicate: $p"
+      n=$(grep -c '^    runs-on: ' "$f")
+      r=$(grep -cF "    runs-on: \${{ ($p) && " "$f")
+      e=$(grep '^    runs-on: ' "$f" | grep -cF "($p) && format('ephemeral-{0}', matrix.runner) ||" || true)
+      e=$((e + $(grep '^    runs-on: ' "$f" | grep -cF "($p) && 'ephemeral-linux-amd64' ||" || true)))
+      [ "$n" -gt 0 ] && [ "$r" = "$n" ] && [ "$e" = "$n" ] || {
+        echo "::error::$n job(s) name a runner, $r route a fork by the predicate, $e of those to an ephemeral label — a fork's code would reach a runner that outlives its job"; exit 1; }
+      t=$(grep -c '^      HANZO_CI_TRUSTED: ' "$f")
+      [ "$t" = "$n" ] || { echo "::error::$n job(s), $t carry HANZO_CI_TRUSTED — a job without it reads its credentials unguarded"; exit 1; }
+      for j in test-advisory cicd; do
+        awk -v j="  $j:" '$0==j{on=1;next} on&&/^  [a-z]/{exit} on&&/^    if: /{print;exit}' "$f" | grep -qF "&& !($p)" || {
+          echo "::error::job $j does not skip a fork — it runs on caller-chosen labels or holds the publish credentials"; exit 1; }
+      done
+      bad=$(awk '
+        function done_() { if (name != "" && sec && cond !~ /env\.HANZO_CI_TRUSTED == .true./ && cond !~ /^env\.HANZO_CI_ROLE == .publish./) print name }
+        /^      - (name|uses): / { done_(); name=$0; sub(/^      - (name|uses): /, "", name); cond=""; sec=0; next }
+        /^  [a-z][a-z0-9-]*:$/   { done_(); name="" }
+        /^        if: /          { cond=$0; sub(/^        if: /, "", cond) }
+        !/^[[:space:]]*#/ && /secrets\./ { sec=1 }
+        END { done_() }' "$f")
+      [ -z "$bad" ] || { echo "::error::these steps read a secret with no HANZO_CI_TRUSTED guard and outside the publish role:"; echo "$bad"; exit 1; }
+      grep '^      - name: Delegate build to the runner (mode=delegate)$' -A80 "$f" | grep -m1 '^        if: ' | grep -qF "env.HANZO_CI_TRUSTED == 'true'" || {
+        echo "::error::the delegate step does not require HANZO_CI_TRUSTED — a fork could reach the build door"; exit 1; }
+      echo "OK: $n job(s) route a fork to an ephemeral runner, every secret is guarded, publish and advisory skip it"
   - name: inputs-are-strings
     # EVERY workflow_call input is `type: string`, and carries a default.
     #
