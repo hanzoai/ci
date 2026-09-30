@@ -515,6 +515,13 @@ test:
     # hanzoai/app's same-line fixture and an eight-bracket heredoc still pass.
     # Offline and deterministic: git repos in temp dirs, no network.
     run: bash bin/conflictmarkers_test.sh
+  - name: narrative
+    # bin/narrative reads every public repository's commit messages, so the suite
+    # pins both directions: a severity label fails a pull request and only warns on
+    # a push, a narrative only ever warns, and a message that states the
+    # engineering reason ("Rotate the signing key into KMS") passes clean.
+    # Offline and deterministic: git repos in temp dirs, no network.
+    run: bash bin/narrative_test.sh
 
 # No `deploy:` key exists any more — for any repo. A build ends at a published
 # image; what RUNS is a reviewed pin in hanzo/universe, which cd.hanzo.ai reads.

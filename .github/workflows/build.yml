@@ -409,7 +409,7 @@ jobs:
           # Naming the list here also makes the release order self-announcing: a
           # pipeline that has grown a tool refuses at step one, and says which ref
           # it read and what was missing from it.
-          need="certclaims conflictmarkers gocache gover ignoretracked imgplat imgtags imgver modsize publishable site vendormark"
+          need="certclaims conflictmarkers gocache gover ignoretracked imgplat imgtags imgver modsize narrative publishable site vendormark"
           miss='<no host answered>'
           # A sha cannot be a --branch, so it arrives by fetch rather than clone:
           # the caller's pin as well as this file's own commit. Both are wrapped
@@ -531,6 +531,40 @@ jobs:
               echo "::warning::.gitmodules declares submodules this checkout did not fetch: ${miss}— the build sees empty directories where that source should be. Pass \`submodules: recursive\` if it needs them."
               echo "**Submodules: not fetched** — \`${miss}\`" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"; }
           fi
+
+      - name: Commit messages state the engineering reason (public repositories)
+        # A public commit message is published when it is pushed and stays in
+        # history, so it says what a change does and why; severity labels and
+        # incident accounts belong in the private record. bin/narrative flags
+        # both. A pull request can still be reworded, so a severity label fails
+        # it; a push is already public and history is never rewritten, so a push
+        # only annotates and never holds a release. Private repositories skip it.
+        # One leg is enough: the commits are the same on both architectures.
+        if: >-
+          env.HANZO_CI_ROLE == 'test' && matrix.runner == 'linux-amd64' &&
+          github.event.repository.private == false
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after || github.sha }}
+        run: |
+          set -uo pipefail
+          # The checkout is shallow, so the range is fetched first; a range that
+          # cannot be read is reported by the tool and checks nothing.
+          case "$EVENT" in
+            pull_request*)
+              git fetch -q --no-tags --depth=200 origin "$BASE" "$HEAD" 2>/dev/null || true
+              "$RUNNER_TEMP/ci/bin/narrative" --strict "$BASE..$HEAD" ;;
+            *)
+              git fetch -q --no-tags --depth=200 origin "$AFTER" 2>/dev/null || true
+              if [ -n "$BEFORE" ] && ! [[ $BEFORE =~ ^0+$ ]] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+                "$RUNNER_TEMP/ci/bin/narrative" "$BEFORE..$AFTER"
+              else
+                "$RUNNER_TEMP/ci/bin/narrative" -1 "$AFTER"
+              fi ;;
+          esac
 
       - name: Provision parse toolchain (jq + PyYAML)
         # This reusable parses the caller's hanzo.yml with python3 + PyYAML and
