@@ -68,7 +68,11 @@ echo "$declared" | grep -qE "$semver" || declared=""
 # token can fetch a manifest by name but returns an EMPTY tag list, so a v2 read
 # would silently report "nothing published" and restart the series at 0.
 published="${IMGVER_PUBLISHED:-}"
-tok="${GH_PAT:-${GITHUB_TOKEN:-}}"
+# The token climbs the ladder the registry logins climb: the org PAT, the KMS
+# GitHub token (GIT_TOKEN, written by the KMS step), the automatic token. The
+# automatic token reads only a package its repository was granted, so an org
+# package it was never linked to reads as nothing published.
+tok="${GH_PAT:-${GIT_TOKEN:-${GITHUB_TOKEN:-}}}"
 if [ -z "$published" ] && [ -n "$tok" ] && [ "${repo#ghcr.io/}" != "$repo" ]; then
   org="${repo#ghcr.io/}"; pkg="${org#*/}"; org="${org%%/*}"
   published=$(curl -fsSL -H "Authorization: Bearer $tok" \
