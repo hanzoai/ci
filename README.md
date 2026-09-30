@@ -456,6 +456,17 @@ pass their labels:
     secrets: inherit
 ```
 
+### Pull requests from forks
+
+A pull request whose head repository is not the caller's own (a fork, or a
+head that was deleted) runs its tests on `ephemeral-linux-<arch>`: a label only
+the platform's one-job sandboxed runners advertise, so no host runner and no
+`runner:` of your own ever receives it. It reads no credential (no KMS login, no
+`GH_PAT`, no Go cache), skips the advisory leg, and runs no publish job — no
+build door, no registry. Pull requests from branches of the repository itself
+are unchanged. The org setting that holds a fork's run until a maintainer
+approves it is the other half; hanzo.yml `fork-is-sandboxed` pins this one.
+
 ## Delegate the build (skip runner buildx)
 
 By default the build runs buildx **on** the runner. To instead hand the build to

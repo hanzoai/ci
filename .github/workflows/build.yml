@@ -236,13 +236,25 @@ jobs:
     # input: Hanzo Git expands a reusable workflow without evaluating `inputs` in
     # `strategy.matrix`, and a leg labelled with the unevaluated expression waits
     # for a runner forever.
+    #
+    # A PULL REQUEST FROM A FORK runs code no member of this org wrote. It runs
+    # on an `ephemeral-` label, which only the platform's one-job sandboxed
+    # runners advertise — a host runner that serves many jobs never carries it —
+    # reads no credential (HANZO_CI_TRUSTED), and publishes nothing (`cicd`
+    # skips). A head repo that is not this repository is a fork, and a head repo
+    # that is gone reads as one. The predicate is spelled identically at every
+    # use; hanzo.yml `fork-is-sandboxed` holds it to that.
     if: join(fromJson(inputs.test-runners), ',') != 'linux-amd64'
     strategy:
       fail-fast: true
       matrix:
         runner: [linux-amd64, linux-arm64]
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ (startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) && format('ephemeral-{0}', matrix.runner) || matrix.runner }}
     env:
+      # 'true' only when this run's code came from this repository. Every step
+      # that reads a credential requires it, so an empty or unevaluated value
+      # withholds the credential rather than handing it out.
+      HANZO_CI_TRUSTED: &trusted ${{ !(startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) }}
       # corepack fetches the pnpm/yarn TARBALL ITSELF from registry.npmjs.org,
       # and it does not read .npmrc to do it — so 317 repos that pin
       # `packageManager` reach out to npmjs on every install no matter how
@@ -661,6 +673,7 @@ jobs:
         # scoped GITHUB_TOKEN) in the checked-out repo's local config. So use a
         # FRESH per-job GIT_CONFIG_GLOBAL + GIT_CONFIG_NOSYSTEM=1 and verify from
         # a NEUTRAL dir (matches where go clones modules — GOMODCACHE).
+        if: env.HANZO_CI_TRUSTED == 'true'
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
@@ -681,6 +694,9 @@ jobs:
 
       - name: Fetch deploy credentials from KMS
         id: kms
+        # Mints this org's IAM identity (HANZO_API_TOKEN), which the Go cache and
+        # the build door both accept, so it is never minted for a fork's code.
+        if: env.HANZO_CI_TRUSTED == 'true'
         env:
           KMS_CLIENT_ID: ${{ secrets.KMS_CLIENT_ID }}
           KMS_CLIENT_SECRET: ${{ secrets.KMS_CLIENT_SECRET }}
@@ -1648,7 +1664,7 @@ jobs:
         # tree that builds reads as broken code.
         #
         # Choosing a host is not this step's concern. Authenticating one is.
-        if: steps.gomod.outputs.file != ''
+        if: steps.gomod.outputs.file != '' && env.HANZO_CI_TRUSTED == 'true'
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
           OWNER: ${{ github.repository_owner }}
@@ -2003,7 +2019,7 @@ jobs:
         # platform's own browser client, so the only token it admits is one that
         # a sign-in mints and no build holds one. One job, one address, and it is
         # the address that can answer.
-        if: env.HANZO_CI_ROLE == 'publish' && (inputs.mode == 'delegate')
+        if: env.HANZO_CI_ROLE == 'publish' && (inputs.mode == 'delegate') && env.HANZO_CI_TRUSTED == 'true'
         env:
           # `/v1/build`, FLAT, because building is its own service rather than
           # something platform owns — cloud registers it there and at no other
@@ -3345,20 +3361,25 @@ jobs:
   # leg for the reason `test` gives: an input cannot choose a matrix here.
   test-amd64:
     if: join(fromJson(inputs.test-runners), ',') == 'linux-amd64'
-    runs-on: [linux-amd64]
+    runs-on: ${{ (startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) && 'ephemeral-linux-amd64' || 'linux-amd64' }}
     env:
       COREPACK_NPM_REGISTRY: https://pkg.hanzo.ai
       HANZO_CI_ROLE: test
+      HANZO_CI_TRUSTED: *trusted
     steps: *steps
 
   # The advisory leg: the same test on `advisory-runners`, reported and never
-  # needed, so publishing does not wait on it.
+  # needed, so publishing does not wait on it. A fork skips it: those labels are
+  # the caller's choice, and may name a host runner. The fork's `runs-on` still
+  # names an ephemeral label, so a plane that hands a job to a runner before it
+  # reads `if:` hands it to a sandbox.
   test-advisory:
-    if: inputs.advisory-runners != '[]'
-    runs-on: ${{ fromJson(inputs.advisory-runners) }}
+    if: inputs.advisory-runners != '[]' && !(startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository)
+    runs-on: ${{ (startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) && 'ephemeral-linux-amd64' || fromJson(inputs.advisory-runners) }}
     env:
       COREPACK_NPM_REGISTRY: https://pkg.hanzo.ai
       HANZO_CI_ROLE: test
+      HANZO_CI_TRUSTED: *trusted
     steps: *steps
 
   cicd:
@@ -3368,8 +3389,12 @@ jobs:
     # success, so two skipped needs publish nothing. It calls no other status
     # function: Hanzo Git evaluates a job's `if` with no job in scope, and
     # `cancelled()` (like `success()` and `failure()` of a step) dereferences it.
+    #
+    # A fork publishes nothing, so this job does not run for one: no build door,
+    # no registry, no credential. Its `runs-on` still names an ephemeral label for
+    # a fork, for the reason `test-advisory` gives.
     needs: [test, test-amd64]
-    if: always() && (needs.test.result == 'success' || needs.test-amd64.result == 'success')
+    if: always() && (needs.test.result == 'success' || needs.test-amd64.result == 'success') && !(startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository)
     # One live run per ref. Every push queues a run and every queued run holds an
     # ephemeral runner pod, so without this a burst of commits on one branch is a
     # queue that grows rather than one that drains: on a single amd64 node those
@@ -3398,10 +3423,11 @@ jobs:
     concurrency:
       group: hanzoai-ci-${{ github.repository }}-${{ github.workflow }}-${{ github.ref }}
       cancel-in-progress: ${{ github.ref_type != 'tag' }}
-    runs-on: ${{ fromJson(inputs.runner) }}
+    runs-on: ${{ (startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) && 'ephemeral-linux-amd64' || fromJson(inputs.runner) }}
     env:
       COREPACK_NPM_REGISTRY: https://pkg.hanzo.ai
       HANZO_CI_ROLE: publish
+      HANZO_CI_TRUSTED: *trusted
       HANZO_CI_TESTED: ${{ needs.test.result == 'success' && 'success' || needs.test-amd64.result }}
       HANZO_CI_GATED: ${{ inputs.test-runners }}
     # The same steps as `test`; HANZO_CI_ROLE decides which of them run here.
