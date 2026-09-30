@@ -3,7 +3,11 @@
 #
 #   kms <NAME> [env]                 # prints the value, or exits non-zero
 #
-# Needs KMS_CLIENT_ID and KMS_CLIENT_SECRET in the environment. KMS_ENDPOINT
+# THE CREDENTIAL, in order: HANZO_API_TOKEN when a step before this one already
+# holds the IAM bearer; else, on GitHub with `id-token: write`, the run's own
+# Actions ID token, exchanged at IAM for the CI application its repository
+# speaks for (RFC 7523) — nothing stored; else KMS_CLIENT_ID and
+# KMS_CLIENT_SECRET, which only Hanzo Git runs still carry. KMS_ENDPOINT
 # defaults to https://kms.hanzo.ai; both it and api.hanzo.ai are Ingresses onto
 # the same cloud service, so the host is a preference and not a fallback.
 #
@@ -40,8 +44,9 @@ name=${1:-}
 env=${2:-prod}
 endpoint=${KMS_ENDPOINT:-https://kms.hanzo.ai}
 [ -n "$name" ] || { echo "::error::kms: usage: kms <NAME> [env]" >&2; exit 2; }
-[ -n "${KMS_CLIENT_ID:-}" ] && [ -n "${KMS_CLIENT_SECRET:-}" ] || {
-  echo "::error::kms: KMS_CLIENT_ID and KMS_CLIENT_SECRET are unset — set them from the org-level secrets on git.hanzo.ai" >&2
+run=${ACTIONS_ID_TOKEN_REQUEST_URL:-}
+[ -n "${HANZO_API_TOKEN:-}" ] || [ -n "$run" ] || { [ -n "${KMS_CLIENT_ID:-}" ] && [ -n "${KMS_CLIENT_SECRET:-}" ]; } || {
+  echo "::error::kms: no credential — on GitHub grant the job \`permissions: id-token: write\`; on git.hanzo.ai KMS_CLIENT_ID and KMS_CLIENT_SECRET are unset" >&2
   exit 1
 }
 
@@ -69,11 +74,27 @@ ask() {
   return 1
 }
 
-token=$(ask login "$endpoint/v1/kms/auth/login" \
-  -H 'Content-Type: application/json' \
-  -d "{\"clientId\":\"$KMS_CLIENT_ID\",\"clientSecret\":\"$KMS_CLIENT_SECRET\"}" \
-  | jq -r '.accessToken // empty' 2>/dev/null) || exit 1
-[ -n "$token" ] || { echo "::error::kms: login returned no accessToken at $endpoint/v1/kms/auth/login" >&2; exit 1; }
+token=${HANZO_API_TOKEN:-}
+if [ -z "$token" ] && [ -n "$run" ]; then
+  id=$(ask "ID token" "$run&audience=https://hanzo.id" -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" \
+    | jq -r '.value // empty' 2>/dev/null) || id=
+  if [ -n "$id" ]; then
+    echo "::add-mask::$id"
+    token=$(ask exchange "$endpoint/v1/iam/oauth/token" \
+      --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer' \
+      --data-urlencode "assertion=$id" | jq -r '.access_token // empty' 2>/dev/null) || token=
+  fi
+  if [ -z "$token" ] && [ -z "${KMS_CLIENT_ID:-}" ]; then
+    echo "::error::kms: IAM gave this run no token at $endpoint/v1/iam/oauth/token" >&2; exit 1
+  fi
+fi
+if [ -z "$token" ]; then
+  token=$(ask login "$endpoint/v1/kms/auth/login" \
+    -H 'Content-Type: application/json' \
+    -d "{\"clientId\":\"$KMS_CLIENT_ID\",\"clientSecret\":\"$KMS_CLIENT_SECRET\"}" \
+    | jq -r '.accessToken // empty' 2>/dev/null) || exit 1
+  [ -n "$token" ] || { echo "::error::kms: login returned no accessToken at $endpoint/v1/kms/auth/login" >&2; exit 1; }
+fi
 
 value=$(ask "secret $name" "$endpoint/v1/kms/secrets/$name?env=$env" \
   -H "Authorization: Bearer $token" | jq -r '.value // empty' 2>/dev/null) || exit 1

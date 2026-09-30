@@ -6,11 +6,16 @@ description: Publish a built static export to the Hanzo PaaS Sites plane.
 # transcriptions that drift (see the imgver action next door for the same story
 # told about image tags).
 #
-#   - uses: hanzoai/ci/.github/actions/site@v1
-#     with:  { slug: hanzo-ai, dir: out }
-#     env:
-#       KMS_CLIENT_ID:     '${{ secrets.KMS_CLIENT_ID }}'
-#       KMS_CLIENT_SECRET: '${{ secrets.KMS_CLIENT_SECRET }}'
+#   jobs:
+#     site:
+#       permissions: { contents: read, id-token: write }
+#       steps:
+#         - uses: hanzoai/ci/.github/actions/site@v1
+#           with:  { slug: hanzo-ai, dir: out }
+#
+# The job's own ID token is the credential: bin/kms exchanges it at IAM for the
+# CI identity the repository's account speaks for. On Hanzo Git, which issues no
+# ID token, pass KMS_CLIENT_ID and KMS_CLIENT_SECRET as env instead.
 #
 # A SITE IS NOT AN APP. This publishes files and stops: no image, no CR, no
 # replicas, no registry. Building a container so a Go binary can serve /public is
