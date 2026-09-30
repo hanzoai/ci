@@ -43,7 +43,7 @@ t "nested paths keep their subdirs"   "$(plan "$site" | awk -F'\t' '$1=="nested/
 # CNAME is a GitHub Pages artifact: it means nothing to S3 and would ship a stale
 # hostname claim into the bucket.
 t "CNAME does not travel"             "$(plan "$site" | awk -F'\t' '$1=="CNAME"{print "leaked"}')" ""
-t "file count excludes CNAME"         "$(plan "$site" | head -1 | grep -o 'files=[0-9]*')" "files=6"
+t "file count excludes CNAME"         "$(plan "$site" | head -1 | grep -o 'files=[0-9]*')" "files=7"
 
 # --- content type ------------------------------------------------------------
 # What the object stores, and the fallback the serving path uses for a key whose
@@ -155,6 +155,12 @@ case "$url" in
   */v1/projects)   n=$(cat "$T_DIR/n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$T_DIR/n"
                    printf '{}' > "$out"
                    if [ "$n" -le "${T_5XX:-0}" ]; then printf '503'; else printf '200'; fi ;;
+  # The live host's record of the last release (bin/site step 1b). T_PREV is
+  # its body; unset answers 404, which is a first publish.
+  https://a-slug.hanzo.app/_site/manifest.txt*)
+                   if [ -n "${T_PREV:-}" ]; then printf '%s\n' "$T_PREV" > "$out"; printf '200'; else : > "$out"; printf '404'; fi ;;
+  https://a-slug.hanzo.app/_next/*) printf '200' ;;
+  */v1/projects/a-slug) if [ -n "$wfmt" ]; then printf '200'; else printf '{"liveUrl":"https://a-slug.hanzo.app"}'; fi ;;
   https://s3.test/*) printf '%s\n' "$(IFS='|'; printf '%s' "${fields[*]}")" >> "$T_DIR/uploads" ;;
   # The published page, read back. bin/site downloads the live URL and compares
   # what arrived against the promised content-length, so an answer here is a body
@@ -221,26 +227,26 @@ t "the enqueue body is commit and nothing else" \
 t "the commit travels"  "$(jq -r .commit "$tmp/enqueue.body")"  "abc123"
 
 # The completion carries the manifest cloud prunes against, so a short one
-# deletes live pages. It is the same six keys the plan enumerated.
+# deletes live pages. It is the six files plus the release's own hash manifest.
 t "the completion reports live"        "$(jq -r .status "$tmp/complete.body")"        "live"
-t "the completion carries every key"   "$(jq -r '.keys|length' "$tmp/complete.body")" "6"
+t "the completion carries every key"   "$(jq -r '.keys|length' "$tmp/complete.body")" "7"
 t "the manifest is relative"           "$(jq -r '.keys|index("nested/deep/page.html")|type' "$tmp/complete.body")" "number"
-t "the completion counts the files"    "$(jq -r .files "$tmp/complete.body")"         "6"
+t "the completion counts the files"    "$(jq -r .files "$tmp/complete.body")"         "7"
 
 # One object POST per file, each carrying the grant verbatim EXCEPT `key`: the
 # grant's key is the starts-with placeholder, and forwarding it alongside the
 # real one posts `key` twice, which S3 answers 400 for every object — the whole
 # of the first end-to-end run, 8403 files and 8403 400s.
-t "one upload per file"  "$(wc -l < "$tmp/uploads" | tr -d ' ')"  "6"
+t "one upload per file"  "$(wc -l < "$tmp/uploads" | tr -d ' ')"  "7"
 t "the real key is sent, once" \
   "$(grep -c 'key=acme/a-slug/index\.html' "$tmp/uploads")"  "1"
 t "the placeholder key is dropped" \
   "$(grep -c 'key=acme/a-slug/|' "$tmp/uploads")"  "0"
 t "the signed fields travel untouched" \
-  "$(grep -c 'policy=POLICY' "$tmp/uploads")"  "6"
+  "$(grep -c 'policy=POLICY' "$tmp/uploads")"  "7"
 # S3 ignores every field after the file part, so a grant field trailing the body
 # is silently dropped and the signature check fails.
-t "file goes last"  "$(grep -c 'file=@[^|]*$' "$tmp/uploads")"  "6"
+t "file goes last"  "$(grep -c 'file=@[^|]*$' "$tmp/uploads")"  "7"
 # The cache policy is the server's: it composes CacheControlFor on every request
 # and does not read the stored header, so a copy of that rule sent from here
 # reaches no reader and is free to drift.
@@ -344,7 +350,7 @@ out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
       SITE_JOBS=8 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" \
       bash "$SD" a-slug "$wide" 2>&1); rc=$?
 t "a 627-object export publishes"         "$rc"  "0"
-t "  ...with every key in the manifest"   "$(jq -r '.keys|length' "$tmp/complete.body")"  "627"
+t "  ...with every key in the manifest"   "$(jq -r '.keys|length' "$tmp/complete.body")"  "628"
 
 # A deploy that cannot upload must leave cloud an honest terminal state rather
 # than a deployment queued forever behind a build that is gone.
@@ -433,6 +439,33 @@ out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
 t "a gated preview publishes"          "$rc"  "0"
 t "  ...and says it was not read back" "$(printf '%s' "$out" | grep -c 'gated by hanzo.id')"  "1"
 t "  ...not calling it unreadable"     "$(printf '%s' "$out" | grep -c 'does not serve its own bytes')"  "0"
+
+# --- incremental publish -----------------------------------------------------
+# The previous release's hash manifest is read back over the live host, and only
+# keys whose hash differs (or that it lacks) are uploaded. The completion still
+# names EVERY key, or reconciliation would delete the unchanged ones.
+inc="$tmp/inc"; mkdir -p "$inc/_next/static"
+echo one > "$inc/index.html"; echo two > "$inc/about.html"; echo js > "$inc/_next/static/a.js"
+prev=$(cd "$inc" && sha256sum index.html about.html _next/static/a.js 2>/dev/null || shasum -a 256 index.html about.html _next/static/a.js)
+echo changed > "$inc/about.html"
+rm -f "$tmp/calls" "$tmp/uploads" "$tmp/complete.body"
+out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
+      SITE_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_PREV="$prev" \
+      bash "$SD" a-slug "$inc" 2>&1); rc=$?
+t "an incremental publish succeeds"          "$rc"  "0"
+t "  ...uploads the changed page and the manifest" "$(wc -l < "$tmp/uploads" | tr -d ' ')"  "2"
+t "  ...not the unchanged ones"              "$(grep -c 'key=acme/a-slug/index.html\|a.js' "$tmp/uploads")"  "0"
+t "  ...but the completion names every key"  "$(jq -r '.keys|length' "$tmp/complete.body")"  "4"
+rm -f "$tmp/calls" "$tmp/uploads"
+out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
+      SITE_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_PREV="not a manifest" \
+      bash "$SD" a-slug "$inc" 2>&1); rc=$?
+t "a malformed manifest sends everything"    "$(wc -l < "$tmp/uploads" | tr -d ' ')"  "4"
+rm -f "$tmp/calls" "$tmp/uploads"
+out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
+      SITE_JOBS=1 SITE_FULL=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_PREV="$prev" \
+      bash "$SD" a-slug "$inc" 2>&1); rc=$?
+t "SITE_FULL sends everything"               "$(wc -l < "$tmp/uploads" | tr -d ' ')"  "4"
 
 [ $fail -eq 0 ] && echo "PASS" || echo "FAIL"
 exit $fail
