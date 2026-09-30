@@ -12,7 +12,8 @@ check() { # check <name> <expected-substring> <actual>
   case "$3" in *"$2"*) ;; *) echo "FAIL $1: wanted /$2/, got: $3"; fails=$((fails+1)) ;; esac
 }
 
-out=$(KMS_CLIENT_ID= KMS_CLIENT_SECRET= bash bin/kms NAME 2>&1); rc=$?
+out=$(ACTIONS_ID_TOKEN_REQUEST_URL= HANZO_API_TOKEN= KMS_CLIENT_ID= KMS_CLIENT_SECRET= bash bin/kms NAME 2>&1); rc=$?
+check "no credential names the grant a GitHub caller gives" "grant the job \`permissions: id-token: write\`" "$out"
 check "no credential names both variables" "KMS_CLIENT_ID and KMS_CLIENT_SECRET are unset" "$out"
 ran=$((ran+1)); [ "$rc" -eq 1 ] || { echo "FAIL no credential: rc=$rc want 1"; fails=$((fails+1)); }
 
@@ -39,6 +40,18 @@ out=$(KMS_CLIENT_ID=x KMS_CLIENT_SECRET=y KMS_ENDPOINT=http://127.0.0.1:1 bash b
 check "an outage says it is one" "An outage, not a missing secret" "$out"
 check "an outage names the tries" "over four tries" "$out"
 ran=$((ran+1)); [ "$rc" -eq 1 ] || { echo "FAIL outage: rc=$rc want 1"; fails=$((fails+1)); }
+
+# A RUN THAT HAS AN ID TOKEN spends it, not a stored client: a refusal names the
+# exchange, and no login is attempted.
+out=$(ACTIONS_ID_TOKEN_REQUEST_URL='http://127.0.0.1:1/token?x=1' ACTIONS_ID_TOKEN_REQUEST_TOKEN=t HANZO_API_TOKEN= KMS_CLIENT_ID= KMS_CLIENT_SECRET= bash bin/kms NAME 2>&1); rc=$?
+check "a run asks GitHub for its ID token" "did not answer the ID token" "$out"
+check "a run with no token and no stored client says so" "IAM gave this run no token" "$out"
+ran=$((ran+1)); case "$out" in *"the login"*) echo "FAIL a run with no stored client tried a login"; fails=$((fails+1)) ;; esac
+ran=$((ran+1)); [ "$rc" -eq 1 ] || { echo "FAIL run: rc=$rc want 1"; fails=$((fails+1)); }
+
+# A run whose ID token IAM will not exchange falls back to a stored client.
+out=$(ACTIONS_ID_TOKEN_REQUEST_URL='http://127.0.0.1:1/token?x=1' ACTIONS_ID_TOKEN_REQUEST_TOKEN=t HANZO_API_TOKEN= KMS_CLIENT_ID=x KMS_CLIENT_SECRET=y KMS_ENDPOINT=https://kms.hanzo.ai bash bin/kms NAME 2>&1); rc=$?
+check "a stored client carries a run IAM would not exchange" "refused the login: HTTP 401" "$out"
 
 echo "kms_test: $((ran-fails)) passed, $fails failed"
 [ "$fails" -eq 0 ]

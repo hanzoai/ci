@@ -226,6 +226,7 @@ on:
 permissions:
   contents: write # release assets for `binaries:`; read is enough without it
   packages: write
+  id-token: write # the run's own ID token, which IAM exchanges for the org's CI identity
 
 jobs:
   test:
@@ -833,11 +834,11 @@ jobs:
             esac
           done
           required() { [ -n "$DECLARED" ]; }
-          if [ -z "${KMS_CLIENT_ID:-}" ] || [ -z "$ORG" ]; then
+          if [ -z "$ORG" ]; then
             if required; then
-              echo "::error::KMS not configured (no KMS_CLIENT_ID or org) but hanzo.yml declares build_secrets:$(echo " $DECLARED" | tr '\n' ' ')— refusing to build an image with empty credentials"; exit 1
+              echo "::error::no KMS org for ${{ github.repository_owner }} but hanzo.yml declares build_secrets — refusing to build an image with empty credentials"; exit 1
             fi
-            echo "::notice::KMS not configured (no KMS_CLIENT_ID or org) — skipping; GHCR push uses the workflow token"; exit 0
+            echo "::notice::no KMS org for ${{ github.repository_owner }} — skipping"; exit 0
           fi
           # A LOST answer is not an absent secret. cloud serves KMS as a plugin over a
           # unix socket, and that socket drops responses mid-write under load — measured
@@ -865,15 +866,48 @@ jobs:
               *) echo "::warning::KMS answered $code for $url: $(head -c 200 /tmp/kms.body)" >&2 ;;
             esac
           }
-          TOKEN=$(kms "$KMS_ENDPOINT/v1/kms/auth/login" \
-            -H 'Content-Type: application/json' \
-            -d "{\"clientId\":\"$KMS_CLIENT_ID\",\"clientSecret\":\"$KMS_CLIENT_SECRET\"}" | jq -r '.accessToken // empty')
-          if [ -z "$TOKEN" ]; then
-            if required; then
-              echo "::error::KMS login failed (endpoint=$KMS_ENDPOINT org=$ORG client=$KMS_CLIENT_ID) but hanzo.yml declares build_secrets — refusing to build an image with empty credentials"; exit 1
+          # THE RUN IS THE CREDENTIAL. On GitHub the job asks for its own Actions ID
+          # token, audience https://hanzo.id, and IAM exchanges it (RFC 7523) for
+          # the CI application this repository's account speaks for — cloud's
+          # IAM_REPOSITORIES, pinned to the account id. Nothing is stored in the
+          # repository or its org. The caller grants `id-token: write`; a caller
+          # that does not is told so below.
+          #
+          # Hanzo Git issues no ID token, so a run there logs in with its org's
+          # KMS_CLIENT_ID/KMS_CLIENT_SECRET, the one place those still live.
+          TOKEN="" CRED=""
+          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            ID=$(curl -s --max-time 30 -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://hanzo.id" | jq -r '.value // empty')
+            if [ -n "$ID" ]; then
+              echo "::add-mask::$ID"
+              TOKEN=$(kms "$KMS_ENDPOINT/v1/iam/oauth/token" \
+                --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer' \
+                --data-urlencode "assertion=$ID" | jq -r '.access_token // empty')
+              CRED="this run's GitHub ID token"
             fi
-            echo "::warning::KMS login failed (org=$ORG client=$KMS_CLIENT_ID) — cross-org private deps & deploy unavailable"; exit 0
           fi
+          # A stored client is what Hanzo Git runs carry, and what a GitHub run still
+          # holding one falls back to when IAM would not exchange its ID token.
+          if [ -z "$TOKEN" ] && [ -n "${KMS_CLIENT_ID:-}" ]; then
+            TOKEN=$(kms "$KMS_ENDPOINT/v1/kms/auth/login" \
+              -H 'Content-Type: application/json' \
+              -d "{\"clientId\":\"$KMS_CLIENT_ID\",\"clientSecret\":\"$KMS_CLIENT_SECRET\"}" | jq -r '.accessToken // empty')
+            CRED="client $KMS_CLIENT_ID"
+          fi
+          if [ -z "$TOKEN" ]; then
+            if [ -z "$CRED" ] && [ "${GITHUB_SERVER_URL:-}" = https://github.com ]; then
+              WHY="the caller did not grant \`permissions: id-token: write\` to the job that calls hanzoai/ci"
+            else
+              WHY="IAM refused ${CRED:-a run with no credential} at $KMS_ENDPOINT (org=$ORG)"
+            fi
+            if required; then
+              echo "::error::no IAM token: $WHY — hanzo.yml declares build_secrets, so refusing to build an image with empty credentials"; exit 1
+            fi
+            echo "::warning::no IAM token: $WHY — cross-org private deps & deploy unavailable"; exit 0
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "::notice::IAM token from $CRED"
           # Embedded KMS (HIP-0106): org from the token, flat {"value"}. The old
           # /v1/kms/orgs/<org>/... + .secret.value pair 404s and `curl -sf` turns
           # that into "" — which every caller reads as "not in KMS". The standalone
