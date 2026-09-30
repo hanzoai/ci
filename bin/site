@@ -102,33 +102,34 @@ work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 # for an extension it does not know, so this is the fallback rather than the
 # authority — and an object stored as application/octet-stream is one a browser
 # DOWNLOADS instead of rendering.
-ctype() {
+ctype_of() {
   case "${1##*.}" in
-    html|htm) echo 'text/html; charset=utf-8' ;;
-    css)      echo 'text/css; charset=utf-8' ;;
-    js|mjs)   echo 'text/javascript; charset=utf-8' ;;
-    json)     echo 'application/json; charset=utf-8' ;;
-    xml)      echo 'application/xml; charset=utf-8' ;;
-    txt)      echo 'text/plain; charset=utf-8' ;;
-    md)       echo 'text/markdown; charset=utf-8' ;;
-    svg)      echo 'image/svg+xml' ;;
-    png)      echo 'image/png' ;;
-    jpg|jpeg) echo 'image/jpeg' ;;
-    gif)      echo 'image/gif' ;;
-    webp)     echo 'image/webp' ;;
-    avif)     echo 'image/avif' ;;
-    ico)      echo 'image/x-icon' ;;
-    woff)     echo 'font/woff' ;;
-    woff2)    echo 'font/woff2' ;;
-    ttf)      echo 'font/ttf' ;;
-    otf)      echo 'font/otf' ;;
-    wasm)     echo 'application/wasm' ;;
-    pdf)      echo 'application/pdf' ;;
-    webmanifest) echo 'application/manifest+json' ;;
-    map)      echo 'application/json' ;;
-    *)        echo 'application/octet-stream' ;;
+    html|htm) REPLY='text/html; charset=utf-8' ;;
+    css)      REPLY='text/css; charset=utf-8' ;;
+    js|mjs)   REPLY='text/javascript; charset=utf-8' ;;
+    json)     REPLY='application/json; charset=utf-8' ;;
+    xml)      REPLY='application/xml; charset=utf-8' ;;
+    txt)      REPLY='text/plain; charset=utf-8' ;;
+    md)       REPLY='text/markdown; charset=utf-8' ;;
+    svg)      REPLY='image/svg+xml' ;;
+    png)      REPLY='image/png' ;;
+    jpg|jpeg) REPLY='image/jpeg' ;;
+    gif)      REPLY='image/gif' ;;
+    webp)     REPLY='image/webp' ;;
+    avif)     REPLY='image/avif' ;;
+    ico)      REPLY='image/x-icon' ;;
+    woff)     REPLY='font/woff' ;;
+    woff2)    REPLY='font/woff2' ;;
+    ttf)      REPLY='font/ttf' ;;
+    otf)      REPLY='font/otf' ;;
+    wasm)     REPLY='application/wasm' ;;
+    pdf)      REPLY='application/pdf' ;;
+    webmanifest) REPLY='application/manifest+json' ;;
+    map)      REPLY='application/json' ;;
+    *)        REPLY='application/octet-stream' ;;
   esac
 }
+ctype() { ctype_of "$1"; printf '%s\n' "$REPLY"; }
 
 # ---- cache control is the server's -------------------------------------------
 # Nothing here computes one. The serving path composes CacheControlFor(key,
@@ -439,40 +440,52 @@ cp "$work/hashes" "$dir/$mkey"
 # answers 400 for every object. That is the whole of the first end-to-end run:
 # 8403 files, 8403 400s. Everything else in the map (bucket, policy, x-amz-*) is
 # covered by the signature and must travel untouched.
-jq -r '.upload.fields | to_entries[] | select(.key != "key") | "-F\n\(.key)=\(.value)"' "$work"/sd-enq.json > "$work"/sd-fields
-put() {
-  local rel="$1" args=() line
-  # A read loop, NOT `mapfile`: mapfile is bash 4+, and macOS ships bash 3.2, so
-  # on a dev box it fails as `command not found`, the array stays EMPTY, and every
-  # upload goes out with no policy or signature at all. S3 then rejects it for a
-  # malformed X-Amz-Credential — an error that points at the credential rather
-  # than at the array that never got built.
-  while IFS= read -r line; do args+=("$line"); done < "$work"/sd-fields
-  # RETRIED, like the API calls above and for the same reason: a single object
-  # is idempotent — the same key with the same bytes — so a second attempt can
-  # only replace it with itself. Without this one flaky connection out of eight
-  # thousand fails the whole release, and the publish is marked `error` having
-  # uploaded 99% of the site.
-  #
-  # The flake is real and it is the TLS stack, not the network. macOS curl links
-  # LibreSSL, which under enough concurrent connections drops one with
-  # `sslv3 alert bad record mac` (curl 56). Seventy-two of 7980 died that way on
-  # a laptop publish; every one of them succeeded on a second attempt.
-  local attempt
-  for attempt in 1 2 3 4 5; do
-    curl -sS --fail-with-body -m 60 -o /dev/null \
-      -X POST "$UP_URL" \
-      -F "key=$PREFIX/$rel" "${args[@]}" \
-      -F "Content-Type=$(ctype "$rel")" \
-      -F "file=@$DIR/$rel" \
-      && return 0
-    sleep "$((attempt * 2))"
+# ONE curl for a whole batch, not one per object. Each object is its own POST, and
+# a curl per object is a TCP and TLS handshake per object through the edge — that,
+# not the bytes, is what made 7621 files take a quarter of an hour. `--parallel`
+# multiplexes the transfers over a few HTTP/2 connections; the config file gives
+# each its own section, and `write-out` names every answer so a failure is read
+# from what came back rather than from an exit status a parallel run blurs.
+#
+# `file` goes LAST in each section, for the reason above.
+#
+# RETRIED, like the API calls above and for the same reason: a single object is
+# idempotent — the same key with the same bytes — so a second attempt can only
+# replace it with itself. One flaky connection out of eight thousand must not fail
+# the whole release. What did not answer 2xx, or did not answer at all, goes round
+# again.
+fields=$(jq -r '.upload.fields | to_entries[] | select(.key != "key") | "\(.key)=\(.value)"' "$work"/sd-enq.json)
+esc() { REPLY=${1//\\/\\\\}; REPLY=${REPLY//\"/\\\"}; }
+put_all() {
+  local list="$1" pass rel line sep
+  cp "$list" "$work/todo"
+  for pass in 1 2 3 4 5; do
+    [ -s "$work/todo" ] || return 0
+    {
+      sep=
+      while IFS= read -r rel; do
+        printf '%surl = "%s"\n' "$sep" "$upload_url"; sep=$'next\n'
+        esc "key=$prefix/$rel"; printf 'form = "%s"\n' "$REPLY"
+        while IFS= read -r line; do esc "$line"; printf 'form = "%s"\n' "$REPLY"; done <<< "$fields"
+        ctype_of "$rel"; esc "Content-Type=$REPLY"; printf 'form = "%s"\n' "$REPLY"
+        esc "file=@$dir/$rel"; printf 'form = "%s"\n' "$REPLY"
+        esc "${rel//%/%%}"; printf 'write-out = "%%{http_code} %s\\n"\noutput = "/dev/null"\nmax-time = 120\n' "$REPLY"
+      done < "$work/todo"
+    } > "$work/curl.cfg"
+    curl -sS --parallel --parallel-max "$jobs" -K "$work/curl.cfg" > "$work/results" 2> "$work/curl.err" || true
+    # Not done: answered outside 2xx, or missing from the answers entirely.
+    { awk '$1 !~ /^2/ { sub(/^[^ ]+ /, ""); print }' "$work/results"
+      comm -23 <(LC_ALL=C sort "$work/todo") <(awk '{ sub(/^[^ ]+ /, ""); print }' "$work/results" | LC_ALL=C sort)
+    } | LC_ALL=C sort -u > "$work/todo.next"
+    mv "$work/todo.next" "$work/todo"
+    [ -s "$work/todo" ] || return 0
+    echo "upload pass $pass: $(grep -c . "$work/todo") not accepted; again" >&2
+    sleep "$((pass * 2))"
   done
-  echo "::error::upload failed after 5 attempts: $rel"
+  while IFS= read -r rel; do echo "::error::upload failed after 5 attempts: $rel"; done < <(head -20 "$work/todo")
+  tail -3 "$work/curl.err" >&2
   return 1
 }
-export -f put ctype
-export UP_URL="$upload_url" PREFIX="$prefix" DIR="$dir" work
 
 # ASSETS BEFORE DOCUMENTS, because the bytes are live where they land. This
 # publisher writes into the prefix the edge already serves: there is no release to
@@ -494,15 +507,16 @@ n_assets=$(grep -c . "$work/manifest.assets" || true)
 n_docs=$(grep -c . "$work/manifest.docs" || true)
 echo "uploading $(grep -c . "$work/upload" || true) of $count files to s3://$(jq -r .bucket "$work"/sd-enq.json)/$prefix ($jobs parallel: $n_assets assets, then $n_docs documents)"
 if [ "$n_assets" -gt 0 ]; then
-  xargs -P "$jobs" -I{} bash -c 'put "$@"' _ {} < "$work/manifest.assets"
+  put_all "$work/manifest.assets"
 fi
 if [ "$n_docs" -gt 0 ]; then
-  xargs -P "$jobs" -I{} bash -c 'put "$@"' _ {} < "$work/manifest.docs"
+  put_all "$work/manifest.docs"
 fi
 
 # The manifest is what lets the next run skip these; it is only true once they
 # are all in the bucket, so it goes last.
-bash -c 'put "$@"' _ "$mkey"
+printf '%s\n' "$mkey" > "$work/manifest.last"
+put_all "$work/manifest.last"
 
 # ---- 3. flip it live --------------------------------------------------------
 # The body was built and measured at the top, before a single object moved, so
