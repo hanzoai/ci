@@ -154,13 +154,26 @@ runs:
         # it would swallow the rest of the list — publishing the first site and
         # reporting success for all of them.
         printf '%s\n' "$pairs" > "$RUNNER_TEMP/site-pairs"
+        # The sites publish together: they are separate prefixes with nothing
+        # shared, so serial publishing only adds their times. Each writes its own
+        # log, printed in order below so the run reads as one site at a time.
         n=0
+        pids=()
+        names=()
         while IFS= read -r pair; do
           [ -n "${pair//[[:space:]]/}" ] || continue
           case "$pair" in *=*) ;; *) echo "::error::sites: entry '$pair' is not slug=dir"; exit 1 ;; esac
-          echo "::group::publish ${pair%%=*}"
-          bash "$RUNNER_TEMP/site-ci/bin/site" "${pair%%=*}" "${pair#*=}"
-          echo "::endgroup::"
+          bash "$RUNNER_TEMP/site-ci/bin/site" "${pair%%=*}" "${pair#*=}" > "$RUNNER_TEMP/site-log-$n" 2>&1 &
+          pids+=($!)
+          names+=("${pair%%=*}")
           n=$((n + 1))
         done < "$RUNNER_TEMP/site-pairs"
         [ "$n" -gt 0 ] || { echo "::error::sites: named no site"; exit 1; }
+        rc=0
+        for i in "${!pids[@]}"; do
+          wait "${pids[$i]}" || { rc=1; echo "::error::publish ${names[$i]} failed"; }
+          echo "::group::publish ${names[$i]}"
+          cat "$RUNNER_TEMP/site-log-$i"
+          echo "::endgroup::"
+        done
+        exit $rc
