@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# narrative — flag commit messages in a public repository that label a security
+# severity or narrate an incident. One implementation, every caller.
+#
+#   narrative [--strict] <git-rev-range | -1 <sha>>
+#
+# WHY. A public commit message is published the moment it is pushed and stays in
+# history for good. The house rule is to state the engineering reason a change
+# is right — "Scope identity deletes to the caller's org" — and to keep severity
+# labels and incident accounts in the private record, where they are useful and
+# are not a map of what to try.
+#
+# WHAT IT FLAGS, two classes, case-insensitive, on word boundaries:
+#
+#   label       a severity label: RED|BLUE + CRITICAL|HIGH|MEDIUM|LOW, a
+#               "(CRITICAL)" or "[HIGH]" tag, "severity:", SEV0-4, a CVE id,
+#               CVSS.
+#   narrative   an incident account: outage, incident, post-mortem, leaked,
+#               exploit(ed), bypass(ed), account takeover, cross-tenant,
+#               privilege escalation, vulnerability, "fail(s|ed) open",
+#               "was down", "broke prod".
+#
+# The lists are short on purpose. A word that is also ordinary engineering
+# vocabulary ("secret", "token", "rotate", "harden") is not here: "Rotate the
+# signing key into KMS" is exactly the kind of message the rule asks for.
+#
+# WHAT IT DOES WITH ONE. Every hit is an annotation naming the short sha and the
+# phrase. --strict (a pull request, which can still be reworded before it lands)
+# fails on a label; everything else is a warning. On a push the commit is already
+# public and history is never rewritten, so a push only ever warns: the next
+# message is where the fix goes, and a release is never held for this.
+set -euo pipefail
+
+strict=0
+if [ "${1:-}" = "--strict" ]; then strict=1; shift; fi
+[ $# -gt 0 ] || { echo "usage: narrative [--strict] <rev-range | -1 <sha>>" >&2; exit 2; }
+
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+  echo "narrative: not a git work tree ($(pwd)) — skipping"; exit 0; }
+
+label='\b(red|blue)[[:space:]:/-]+(critical|high|medium|low)\b|[([](critical|high|medium|low)[])]|\bseverity[[:space:]]*:|\bsev[[:space:]-]?[0-4]\b|\bcve-[0-9]{4}-[0-9]+\b|\bcvss\b'
+narr='\boutages?\b|\bincidents?\b|\bpost-?mortem\b|\bleak(ed|s)?\b|\bexploit(ed|s|able)?\b|\bbypass(ed|es)?\b|\baccount[[:space:]-]takeover\b|\bcross[[:space:]-]tenant\b|\bprivilege[[:space:]-]escalation\b|\bvulnerab(le|ility|ilities)\b|\bfail(s|ed)?[[:space:]-]open\b|\bwas[[:space:]]+down\b|\bbroke[[:space:]]+prod(uction)?\b'
+
+# %x1e separates commits and %x1f the sha from the message, so a message may
+# carry any text at all without splitting wrong.
+log=$(git log --no-merges --format='%h%x1f%B%x1e' "$@" 2>/dev/null) || {
+  echo "::warning::narrative: could not read commits for '$*' — nothing checked"; exit 0; }
+
+n=0; labels=0; tales=0
+summary=""
+while IFS=$'\x1f' read -r -d $'\x1e' sha msg; do
+  sha=${sha//$'\n'/}
+  [ -n "$sha" ] || continue
+  n=$((n + 1))
+  subject=$(printf '%s\n' "$msg" | sed -n '1p')
+  hit=$(printf '%s\n' "$msg" | grep -ioE "$label" | head -1 || true)
+  if [ -n "$hit" ]; then
+    labels=$((labels + 1))
+    kind=error; [ $strict = 1 ] || kind=warning
+    echo "::${kind} title=Commit message carries a severity label::${sha} \"${hit}\" — ${subject}"
+    summary="${summary}| ${sha} | label | ${hit} | ${subject//|/\\|} |"$'\n'
+    continue
+  fi
+  hit=$(printf '%s\n' "$msg" | grep -ioE "$narr" | head -1 || true)
+  if [ -n "$hit" ]; then
+    tales=$((tales + 1))
+    echo "::warning title=Commit message narrates an incident::${sha} \"${hit}\" — ${subject}"
+    summary="${summary}| ${sha} | narrative | ${hit} | ${subject//|/\\|} |"$'\n'
+  fi
+done <<< "$log"
+
+if [ -n "$summary" ] && [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+  {
+    echo "### Commit messages in a public repository"
+    echo
+    echo "State the engineering reason; keep severity and incident detail in the private record."
+    echo
+    echo "| commit | class | phrase | subject |"
+    echo "|---|---|---|---|"
+    printf '%s' "$summary"
+  } >> "$GITHUB_STEP_SUMMARY"
+fi
+
+echo "narrative: ${n} commit(s), ${labels} with a severity label, ${tales} narrating an incident"
+if [ $strict = 1 ] && [ $labels -gt 0 ]; then
+  echo "Reword the flagged commit(s) before merging: say what the change does and why."
+  exit 1
+fi
+exit 0
