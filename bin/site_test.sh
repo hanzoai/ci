@@ -486,5 +486,29 @@ out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
       bash "$SD" a-slug "$inc" 2>&1); rc=$?
 t "SITE_FULL sends everything"               "$(wc -l < "$tmp/uploads" | tr -d ' ')"  "4"
 
+# --- copy from a sibling site ---------------------------------------------------
+# Objects identical to the peer's are named in the completion for the plane to
+# copy and are not uploaded; the page that differs is. Without the grant saying the
+# plane copies, everything is uploaded, because a plane that ignores `copy` would
+# leave those keys missing.
+peer="$tmp/peer"; cp -al "$inc" "$peer"; cp --remove-destination "$inc/index.html" "$tmp/idx" 2>/dev/null
+echo different > "$tmp/mine-index"; rm -rf "$tmp/mine"; cp -al "$inc" "$tmp/mine"; cp --remove-destination "$tmp/mine-index" "$tmp/mine/index.html"
+ENQC="${ENQ/\"upload\":{/\"upload\":{\"copy\":true,}"
+for grant in "$ENQC" "$ENQ"; do
+  rm -f "$tmp/calls" "$tmp/uploads" "$tmp/complete.body"
+  out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test SITE_COPY_FROM="peer-slug:$peer" \
+        SITE_JOBS=1 T_DIR="$tmp" T_ENQ="$grant" T_DONE="$DONE" bash "$SD" a-slug "$tmp/mine" 2>&1); rc=$?
+  if [ "$grant" = "$ENQC" ]; then
+    t "copy: the publish succeeds"            "$rc"  "0"
+    t "copy: identical objects are named"     "$(jq -r '.copy|length' "$tmp/complete.body")"  "2"
+    t "copy: from the peer"                   "$(jq -r .copyFrom "$tmp/complete.body")"  "peer-slug"
+    t "copy: the completion still names all"  "$(jq -r '.keys|length' "$tmp/complete.body")"  "4"
+    t "copy: only the differing page is sent" "$(wc -l < "$tmp/uploads" | tr -d ' ')"  "2"
+  else
+    t "no copy grant: everything is sent"     "$(wc -l < "$tmp/uploads" | tr -d ' ')"  "4"
+    t "no copy grant: no copy in the body"    "$(jq -r 'has("copy")' "$tmp/complete.body")"  "false"
+  fi
+done
+
 [ $fail -eq 0 ] && echo "PASS" || echo "FAIL"
 exit $fail

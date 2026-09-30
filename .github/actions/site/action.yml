@@ -162,29 +162,38 @@ runs:
         # it would swallow the rest of the list — publishing the first site and
         # reporting success for all of them.
         printf '%s\n' "$pairs" > "$RUNNER_TEMP/site-pairs"
-        # The sites publish together: they are separate prefixes with nothing
-        # shared, so serial publishing only adds their times. Each writes its own
-        # log, printed in order below so the run reads as one site at a time.
+        # The first site is published alone. The others share its build, differ
+        # from it by a page, and take the rest of their objects from it inside the
+        # object store (SITE_COPY_FROM), so they publish together after it.
         n=0
         pids=()
         names=()
+        first_slug=
+        first_dir=
+        rc=0
         while IFS= read -r pair; do
           [ -n "${pair//[[:space:]]/}" ] || continue
           case "$pair" in *=*) ;; *) echo "::error::sites: entry '$pair' is not slug=dir"; exit 1 ;; esac
+          slug="${pair%%=*}"
           # slug=dir[@url]: the optional url is the host that serves the prefix.
-          rest="${pair#*=}"
-          SITE_URL="" ; case "$rest" in *@*) SITE_URL="${rest#*@}"; rest="${rest%%@*}" ;; esac
-          SITE_URL="$SITE_URL" bash "$RUNNER_TEMP/site-ci/bin/site" "${pair%%=*}" "$rest" > "$RUNNER_TEMP/site-log-$n" 2>&1 &
-          pids+=($!)
-          names+=("${pair%%=*}")
+          rest="${pair#*=}"; url=""
+          case "$rest" in *@*) url="${rest#*@}"; rest="${rest%%@*}" ;; esac
+          if [ "$n" -eq 0 ]; then
+            first_slug="$slug"; first_dir="$rest"
+            echo "::group::publish $slug"
+            SITE_URL="$url" bash "$RUNNER_TEMP/site-ci/bin/site" "$slug" "$rest" || { echo "::endgroup::"; echo "::error::publish $slug failed"; exit 1; }
+            echo "::endgroup::"
+          else
+            SITE_URL="$url" SITE_COPY_FROM="$first_slug:$first_dir" bash "$RUNNER_TEMP/site-ci/bin/site" "$slug" "$rest" > "$RUNNER_TEMP/site-log-$n" 2>&1 &
+            pids+=($!); names+=("$slug")
+          fi
           n=$((n + 1))
         done < "$RUNNER_TEMP/site-pairs"
         [ "$n" -gt 0 ] || { echo "::error::sites: named no site"; exit 1; }
-        rc=0
         for i in "${!pids[@]}"; do
           wait "${pids[$i]}" || { rc=1; echo "::error::publish ${names[$i]} failed"; }
           echo "::group::publish ${names[$i]}"
-          cat "$RUNNER_TEMP/site-log-$i"
+          cat "$RUNNER_TEMP/site-log-$((i + 1))"
           echo "::endgroup::"
         done
         exit $rc
