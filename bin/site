@@ -423,7 +423,7 @@ if [ -s "$work/prev" ]; then
   sample=$(grep -vxFf "$work/changed" "$work/real" | grep '^_next/static/' | LC_ALL=C sort -R | head -20 || true)
   bad=
   for rel in $sample; do
-    c=$(curl -sS -m 20 -r 0-0 -o /dev/null -w '%{http_code}' "$base/$rel?t=$(date +%s)" 2>/dev/null || true)
+    c=$(curl -g -sS -m 20 -r 0-0 -o /dev/null -w '%{http_code}' "$base/$rel?t=$(date +%s)" 2>/dev/null || true)
     case "$c" in 200|206) ;; *) bad="$rel ($c)"; break ;; esac
   done
   if [ -n "$bad" ]; then
