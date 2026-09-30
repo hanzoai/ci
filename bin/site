@@ -148,9 +148,13 @@ ctype() {
 #
 # CNAME does not travel. It is a GitHub Pages artifact that means nothing to S3
 # and would ship a stale hostname claim into the bucket.
-manifest=$(cd "$dir" && find . -type f ! -name CNAME | sed 's|^\./||' | LC_ALL=C sort)
+# _site/manifest.txt is the release's own record of its hashes (1b below). It is
+# a key of the release like any other, so `keys` names it and reconciliation
+# keeps it; it is written last, and its bytes are not part of `bytes`.
+mkey=_site/manifest.txt
+manifest=$( { (cd "$dir" && find . -type f ! -name CNAME ! -path "./$mkey" | sed 's|^\./||'); echo "$mkey"; } | LC_ALL=C sort)
 count=$(printf '%s' "$manifest" | grep -c . || true)
-[ "$count" -gt 0 ] || { echo "::error::$dir contains no files — refusing to deploy an empty manifest"; exit 1; }
+[ "$count" -gt 1 ] || { echo "::error::$dir contains no files — refusing to deploy an empty manifest"; exit 1; }
 printf '%s\n' "$manifest" | grep . > "$work/manifest"
 
 # ---- the completion body, built BEFORE anything is sent ----------------------
@@ -163,7 +167,7 @@ printf '%s\n' "$manifest" | grep . > "$work/manifest"
 # `stat -f%z || stat -c%s` fallback does not work — on Linux the first arm fails
 # INSIDE the pipeline, awk still exits 0, and the `||` never fires, so the byte
 # count silently reports 0. wc is the one spelling both agree on.
-bytes=$(cd "$dir" && find . -type f ! -name CNAME -exec wc -c {} + | awk '$2!="total"{s+=$1} END{print s+0}')
+bytes=$(cd "$dir" && find . -type f ! -name CNAME ! -path ./_site/manifest.txt -exec wc -c {} + | awk '$2!="total"{s+=$1} END{print s+0}')
 
 # --rawfile, not --args: `jq --args ... $(cat manifest)` passes every key as an
 # ARGV entry, and execve caps the argument block (~2 MiB on Linux). A wide export
@@ -369,6 +373,62 @@ fail() {
 }
 trap 'fail' ERR
 
+# ---- 1b. what changed ---------------------------------------------------------
+# Most of a release is what the last one already put there: content-hashed chunks
+# never change under their name, and a one-page edit rewrites one document. So
+# the publisher keeps a `<hash>  <key>` manifest INSIDE the prefix it serves
+# (_site/manifest.txt), reads the previous one back over the public host, and
+# uploads only the keys whose hash differs or which it lacks. The grant authorizes
+# writes only and the server needs to know nothing: `keys` still names the whole
+# release, so reconciliation deletes exactly what it always did.
+#
+# The manifest is written LAST. A publish cut anywhere earlier leaves the old one
+# in place, so the next run re-sends whatever the cut run may not have finished —
+# an object is only ever skipped once a run that completed its uploads said so.
+#
+# It fails toward the full upload, never toward a partial site: no manifest, an
+# unreadable or malformed one, or a sampled unchanged asset that does not answer
+# 200 all mean "send everything". SITE_FULL=1 forces that.
+mkdir -p "$dir/_site"
+grep -vxF "$mkey" "$work/manifest" > "$work/real"
+(cd "$dir" && tr '\n' '\0' < "$work/real" | xargs -0 -n 512 bash -c 'if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi' _) > "$work/hashes"
+[ "$(grep -c . "$work/hashes")" = "$((count - 1))" ] || { echo "::error::hashed $(grep -c . "$work/hashes") of $((count - 1)) files"; exit 1; }
+cp "$work/real" "$work/upload"
+: > "$work/prev"
+if [ -z "${SITE_FULL:-}" ]; then
+  base=$(curl -sS -m 20 -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN" "$api/v1/projects/$slug" 2>/dev/null \
+           | jq -r '.liveUrl // empty' 2>/dev/null || true)
+  if [ -n "$base" ]; then
+    base=${base%/}
+    pcode2=$(curl -sS -m 30 -H 'Cache-Control: no-cache' -o "$work/prev.raw" -w '%{http_code}' \
+               "$base/_site/manifest.txt?t=$(date +%s)" 2>/dev/null || true)
+    if [ "$pcode2" = 200 ] && [ -s "$work/prev.raw" ] \
+       && ! grep -qvE '^[0-9a-f]{64}  [^ ]' "$work/prev.raw"; then
+      cp "$work/prev.raw" "$work/prev"
+    fi
+  fi
+fi
+if [ -s "$work/prev" ]; then
+  awk 'NR==FNR{p[substr($0,67)]=substr($0,1,64); next}
+       {f=substr($0,67); if (p[f] != substr($0,1,64)) print f}' "$work/prev" "$work/hashes" > "$work/changed"
+  # Ask the origin for a sample of what it is about to be trusted to still hold.
+  sample=$(grep -vxFf "$work/changed" "$work/real" | grep '^_next/static/' | LC_ALL=C sort -R | head -20 || true)
+  bad=
+  for rel in $sample; do
+    c=$(curl -sS -m 20 -r 0-0 -o /dev/null -w '%{http_code}' "$base/$rel?t=$(date +%s)" 2>/dev/null || true)
+    case "$c" in 200|206) ;; *) bad="$rel ($c)"; break ;; esac
+  done
+  if [ -n "$bad" ]; then
+    echo "previous manifest is not trusted: $bad does not answer; sending everything"
+  else
+    cp "$work/changed" "$work/upload"
+    echo "incremental: $(grep -c . "$work/changed" || true) of $((count - 1)) files differ from the live release"
+  fi
+else
+  echo "no previous manifest at the live host; sending everything"
+fi
+cp "$work/hashes" "$dir/$mkey"
+
 # ---- 2. the bytes -----------------------------------------------------------
 # `file` goes LAST: S3 ignores every field after the file part, so a grant field
 # trailing the body is silently dropped and the signature check fails.
@@ -428,17 +488,21 @@ export UP_URL="$upload_url" PREFIX="$prefix" DIR="$dir" work
 #
 # It is also what lets a caller cancel a superseded run safely: the run dies in
 # phase one having only added unreferenced objects, and what is live is unchanged.
-grep -v '\.html$' "$work/manifest" > "$work/manifest.assets" || true
-grep    '\.html$' "$work/manifest" > "$work/manifest.docs"   || true
+grep -v '\.html$' "$work/upload" > "$work/manifest.assets" || true
+grep    '\.html$' "$work/upload" > "$work/manifest.docs"   || true
 n_assets=$(grep -c . "$work/manifest.assets" || true)
 n_docs=$(grep -c . "$work/manifest.docs" || true)
-echo "uploading $count files to s3://$(jq -r .bucket "$work"/sd-enq.json)/$prefix ($jobs parallel: $n_assets assets, then $n_docs documents)"
+echo "uploading $(grep -c . "$work/upload" || true) of $count files to s3://$(jq -r .bucket "$work"/sd-enq.json)/$prefix ($jobs parallel: $n_assets assets, then $n_docs documents)"
 if [ "$n_assets" -gt 0 ]; then
   xargs -P "$jobs" -I{} bash -c 'put "$@"' _ {} < "$work/manifest.assets"
 fi
 if [ "$n_docs" -gt 0 ]; then
   xargs -P "$jobs" -I{} bash -c 'put "$@"' _ {} < "$work/manifest.docs"
 fi
+
+# The manifest is what lets the next run skip these; it is only true once they
+# are all in the bucket, so it goes last.
+bash -c 'put "$@"' _ "$mkey"
 
 # ---- 3. flip it live --------------------------------------------------------
 # The body was built and measured at the top, before a single object moved, so
