@@ -120,9 +120,11 @@ test:
   - name: fork-is-sandboxed
     # A pull request from a fork runs code no member wrote, so it gets a one-job
     # sandboxed runner, no credential, and no publish job. Three properties, one
-    # predicate, and the predicate is read off HANZO_CI_TRUSTED's definition so
+    # predicate, and the predicate is read off the first HANZO_CI_TRUSTED so
     # every copy must match it byte for byte — two spellings of "is this a fork"
-    # are two answers:
+    # are two answers. No copy is a YAML alias: Hanzo Git re-encodes each job as
+    # its own document and keeps `env` raw, so an alias there has no anchor and
+    # the forge creates no run at all:
     #
     #   RUNNER — every job's `runs-on` sends the fork to an `ephemeral-` label,
     #     which only the platform's one-job runners advertise.
@@ -134,8 +136,12 @@ test:
     run: |
       set -e
       f=.github/workflows/build.yml
-      def=$(grep -m1 "^      HANZO_CI_TRUSTED: &trusted " "$f") || {
-        echo "::error::HANZO_CI_TRUSTED is not defined under the anchor &trusted — the predicate has no one definition"; exit 1; }
+      def=$(grep -m1 '^      HANZO_CI_TRUSTED: ' "$f") || {
+        echo "::error::no job defines HANZO_CI_TRUSTED — the predicate has no definition"; exit 1; }
+      [ "$(grep '^      HANZO_CI_TRUSTED: ' "$f" | sort -u | wc -l)" = 1 ] || {
+        echo "::error::HANZO_CI_TRUSTED is spelled more than one way — every job must carry the same predicate"; exit 1; }
+      ! grep -nE '^ +[A-Za-z_-]+: [&*][A-Za-z]' "$f" | grep -v '^[0-9]*:    steps: [&*]steps$' || {
+        echo "::error::a YAML anchor or alias outside \`steps\` — Hanzo Git keeps env, if, runs-on and the rest as raw nodes per job, where an alias has no anchor"; exit 1; }
       p=${def#*'${{ !('}; p=${p%') }}'}
       [ -n "$p" ] && [ "$p" != "$def" ] || { echo "::error::cannot read the predicate out of: $def"; exit 1; }
       echo "predicate: $p"
