@@ -51,6 +51,8 @@
 #      GATEWAY_BODY_LIMIT  (16777216) the edge's own name for its own limit
 #      SITE_JOBS     (24)  parallel uploads
 #      SITE_COMMIT / SITE_BRANCH  recorded on the deployment
+#      SITE_URL            the public host serving the prefix; the previous release's
+#                          hash manifest is read from it (default: the project's liveUrl)
 #      SITE_PLAN=1   print the manifest and exit; no network. The test seam.
 set -euo pipefail
 
@@ -397,7 +399,10 @@ grep -vxF "$mkey" "$work/manifest" > "$work/real"
 cp "$work/real" "$work/upload"
 : > "$work/prev"
 if [ -z "${SITE_FULL:-}" ]; then
-  base=$(curl -sS -m 20 -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN" "$api/v1/projects/$slug" 2>/dev/null \
+  # SITE_URL is the host that serves this prefix to readers. The project's own
+  # liveUrl is the plane's preview host, which does not always route the prefix.
+  base="${SITE_URL:-}"
+  [ -n "$base" ] || base=$(curl -sS -m 20 -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN" "$api/v1/projects/$slug" 2>/dev/null \
            | jq -r '.liveUrl // empty' 2>/dev/null || true)
   if [ -n "$base" ]; then
     base=${base%/}
