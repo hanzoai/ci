@@ -507,10 +507,16 @@ bash -c 'put "$@"' _ "$mkey"
 # ---- 3. flip it live --------------------------------------------------------
 # The body was built and measured at the top, before a single object moved, so
 # there is nothing left to assemble here — only to send it.
-code=$(curl -sS -o "$work"/sd-resp.json -w '%{http_code}' \
-  -X POST "$api/v1/projects/$slug/deployments/$dep/complete" \
-  -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN" -H 'Content-Type: application/json' \
-  --data-binary @"$work"/sd-done.json)
+# Asked again on a 5xx: the edge answered 502 for a completion whose 7621-key
+# reconcile outlasted it, after every object was already in the bucket, and that
+# marked a deployment whose bytes were live as an error.
+for attempt in 1 2 3; do
+  code=$(curl -sS -m 300 -o "$work"/sd-resp.json -w '%{http_code}' \
+    -X POST "$api/v1/projects/$slug/deployments/$dep/complete" \
+    -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN" -H 'Content-Type: application/json' \
+    --data-binary @"$work"/sd-done.json || printf '000')
+  case "$code" in 5??|000) [ "$attempt" -lt 3 ] && sleep $((attempt * 5)) ;; *) break ;; esac
+done
 trap - ERR
 if [ "$code" != "200" ]; then
   echo "::error::complete returned HTTP $code"; head -c 600 "$work"/sd-resp.json; echo; fail; exit 1
