@@ -37,7 +37,7 @@ inputs:
     default: ''
   sites:
     description: >-
-      Several sites from one build, one `slug=dir` pair per line. A white-labelled
+      Several sites from one build, one `slug=dir` or `slug=dir@https://host` pair per line. A white-labelled
       product is one codebase and several hosts, and a site keys on its HOST — so
       a brand per host is a site per host, and one build writes an export per
       brand. bin/site stays single-site: a publish IS one site, and which
@@ -171,7 +171,10 @@ runs:
         while IFS= read -r pair; do
           [ -n "${pair//[[:space:]]/}" ] || continue
           case "$pair" in *=*) ;; *) echo "::error::sites: entry '$pair' is not slug=dir"; exit 1 ;; esac
-          bash "$RUNNER_TEMP/site-ci/bin/site" "${pair%%=*}" "${pair#*=}" > "$RUNNER_TEMP/site-log-$n" 2>&1 &
+          # slug=dir[@url]: the optional url is the host that serves the prefix.
+          rest="${pair#*=}"
+          SITE_URL="" ; case "$rest" in *@*) SITE_URL="${rest#*@}"; rest="${rest%%@*}" ;; esac
+          SITE_URL="$SITE_URL" bash "$RUNNER_TEMP/site-ci/bin/site" "${pair%%=*}" "$rest" > "$RUNNER_TEMP/site-log-$n" 2>&1 &
           pids+=($!)
           names+=("${pair%%=*}")
           n=$((n + 1))
