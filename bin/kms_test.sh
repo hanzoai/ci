@@ -53,5 +53,41 @@ ran=$((ran+1)); [ "$rc" -eq 1 ] || { echo "FAIL run: rc=$rc want 1"; fails=$((fa
 out=$(ACTIONS_ID_TOKEN_REQUEST_URL='http://127.0.0.1:1/token?x=1' ACTIONS_ID_TOKEN_REQUEST_TOKEN=t HANZO_API_TOKEN= KMS_CLIENT_ID=x KMS_CLIENT_SECRET=y KMS_ENDPOINT=https://kms.hanzo.ai bash bin/kms NAME 2>&1); rc=$?
 check "a stored client carries a run IAM would not exchange" "refused the login: HTTP 401" "$out"
 
+# STDOUT IS THE VALUE AND NOTHING ELSE. A run with an ID token goes through the
+# whole exchange against a stand-in curl, and what a caller captures must be the
+# sealed value byte for byte: no workflow command, no second line. A mask written
+# to stdout became the first line of the captured key, the caller masked only
+# that line, and printed the real key.
+fake=$(mktemp -d)
+cat > "$fake/curl" <<'CURL'
+#!/usr/bin/env bash
+out= url=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift ;;
+    -m|-w|-H|-d|--data-urlencode) shift ;;
+    http*) url=$1 ;;
+  esac
+  shift
+done
+case "$url" in
+  *audience=*) body='{"value":"id.token.value"}' ;;
+  */v1/iam/oauth/token) body='{"access_token":"iam-bearer"}' ;;
+  */v1/kms/secrets/NAME*) body='{"value":"sk-test-0123456789abcdef"}' ;;
+  *) body='{}'; printf '%s' "$body" > "$out"; printf 404; exit 0 ;;
+esac
+printf '%s' "$body" > "$out"
+printf 200
+CURL
+chmod +x "$fake/curl"
+errf=$(mktemp)
+got=$(PATH="$fake:$PATH" ACTIONS_ID_TOKEN_REQUEST_URL='https://token.invalid/?x=1' ACTIONS_ID_TOKEN_REQUEST_TOKEN=t \
+  HANZO_API_TOKEN= KMS_CLIENT_ID= KMS_CLIENT_SECRET= KMS_ENDPOINT=https://kms.invalid bash bin/kms NAME prod 2>"$errf"); rc=$?
+err=$(cat "$errf"); rm -rf "$fake" "$errf"
+ran=$((ran+1)); [ "$rc" -eq 0 ] || { echo "FAIL exchange: rc=$rc, stderr: $err"; fails=$((fails+1)); }
+ran=$((ran+1)); [ "$got" = "sk-test-0123456789abcdef" ] || { echo "FAIL captured value is not exactly the secret: $(printf '%q' "$got")"; fails=$((fails+1)); }
+ran=$((ran+1)); case "$got" in *::*) echo "FAIL a workflow command reached stdout"; fails=$((fails+1)) ;; esac
+check "the ID token is masked, on stderr" "::add-mask::id.token.value" "$err"
+
 echo "kms_test: $((ran-fails)) passed, $fails failed"
 [ "$fails" -eq 0 ]

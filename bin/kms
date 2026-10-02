@@ -3,6 +3,9 @@
 #
 #   kms <NAME> [env]                 # prints the value, or exits non-zero
 #
+# STDOUT CARRIES THE VALUE AND NOTHING ELSE, byte for byte: callers capture it
+# with $(...). Every message and workflow command goes to stderr.
+#
 # THE CREDENTIAL, in order: HANZO_API_TOKEN when a step before this one already
 # holds the IAM bearer; else, on GitHub with `id-token: write`, the run's own
 # Actions ID token, exchanged at IAM for the CI application its repository
@@ -79,7 +82,12 @@ if [ -z "$token" ] && [ -n "$run" ]; then
   id=$(ask "ID token" "$run&audience=https://hanzo.id" -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" \
     | jq -r '.value // empty' 2>/dev/null) || id=
   if [ -n "$id" ]; then
-    echo "::add-mask::$id"
+    # STDERR, like every other line this script writes that is not the value.
+    # The runner reads workflow commands from both streams, and stdout is the
+    # value the caller captures: a mask written there becomes the first line of
+    # the "secret", the caller's own add-mask then covers only that line, and the
+    # real secret is printed as the second.
+    echo "::add-mask::$id" >&2
     token=$(ask exchange "$endpoint/v1/iam/oauth/token" \
       --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer' \
       --data-urlencode "assertion=$id" | jq -r '.access_token // empty' 2>/dev/null) || token=
