@@ -3225,6 +3225,12 @@ jobs:
           K="$CI_HOME/bin/kms"
           PRIMARY=$(bash "$K" python-sdk-publish/PYPI_TOKEN prod || true)
           FALLBACK=$(bash "$K" python-sdk-publish/HANZO_AI_PYPI_TOKEN prod || true)
+          # Each capture is a token and nothing else: one line, no workflow
+          # command. Anything more is refused unprinted, because masking a value
+          # of several lines masks its first and prints the rest.
+          for v in "$PRIMARY" "$FALLBACK"; do
+            case "$v" in *$'\n'*|::*) echo "::error::bin/kms printed more than the token; refusing it unprinted"; exit 1 ;; esac
+          done
           if [ -n "$PRIMARY" ]; then echo "::add-mask::$PRIMARY"; fi
           if [ -n "$FALLBACK" ]; then echo "::add-mask::$FALLBACK"; fi
           [ -n "$PRIMARY$FALLBACK" ] || {

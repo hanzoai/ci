@@ -143,6 +143,10 @@ runs:
       run: |
         set -euo pipefail
         key=$(bash "$RUNNER_TEMP/site-ci/bin/kms" HANZO_DEPLOY_TOKEN prod)
+        # The capture is the key and nothing else: one line, no workflow command.
+        # Anything more is refused unprinted, because masking a value of several
+        # lines masks its first and prints the rest.
+        case "$key" in *$'\n'*|::*) echo "::error::bin/kms printed more than the key; refusing it unprinted"; exit 1 ;; esac
         # Masked before it is ever an output, so it cannot surface in a log.
         echo "::add-mask::$key"
         echo "token=$key" >> "$GITHUB_OUTPUT"
