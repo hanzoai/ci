@@ -117,6 +117,23 @@ test:
         echo "::error::the test gate is guarded by \`inputs.mode != 'delegate'\` — delegate would skip it"; exit 1
       fi
       echo "OK: test gate at line $t, delegate POST at line $d, gate not delegate-guarded"
+  - name: publish-waits
+    # A push during a publish must wait for it, not cancel it. Cancelling is
+    # one expression away and reads as harmless in a diff, and on a branch
+    # pushed more often than a publish takes it cancels every publish, so
+    # nothing ships until the branch goes quiet. The cancel belongs to pull
+    # requests alone.
+    run: |
+      set -e
+      f=.github/workflows/build.yml
+      job=$(sed -n '/^  cicd:$/,/^    steps: \*steps$/p' "$f")
+      [ -n "$job" ] || { echo "::error::cannot find the cicd job in $f; a rename broke this assertion, fix the assertion"; exit 1; }
+      want="cancel-in-progress: \${{ startsWith(github.ref, 'refs/pull/') }}"
+      got=$(printf '%s\n' "$job" | grep -E '^      cancel-in-progress:' | sed 's/^ *//')
+      [ "$got" = "$want" ] || { echo "::error::the publish group reads [$got], want [$want]: a branch or tag publish must wait for the one running, never cancel it"; exit 1; }
+      n=$(grep -c '^    concurrency:$' "$f")
+      [ "$n" = 1 ] || { echo "::error::$f has $n job-level concurrency blocks, want 1 (the publish job's)"; exit 1; }
+      echo "OK: the publish group waits on branches and tags, cancels on pull requests"
   - name: fork-is-sandboxed
     # A pull request from a fork runs code no member wrote, so it gets a one-job
     # sandboxed runner, no credential, and no publish job. Three properties, one

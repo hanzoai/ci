@@ -3433,34 +3433,35 @@ jobs:
     # a fork, for the reason `test-advisory` gives.
     needs: [test, test-amd64]
     if: always() && (needs.test.result == 'success' || needs.test-amd64.result == 'success') && !(startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository)
-    # One live run per ref. Every push queues a run and every queued run holds an
-    # ephemeral runner pod, so without this a burst of commits on one branch is a
-    # queue that grows rather than one that drains: on a single amd64 node those
-    # runs can never all execute, and each new push adds another pod behind them.
-    # The group is what makes a push supersede the one it replaces.
+    # One publish per ref runs and at most one waits. A push during a publish
+    # lets the running one finish; the new publish waits, and a later push
+    # replaces it while it waits. A busy branch therefore ships its newest gated
+    # commit as soon as the publish ahead of it is done, and the queue cannot
+    # grow: a waiting job holds no runner, and there is only ever one.
     #
-    # The key is (repository, workflow, ref) — the three things that decide
-    # whether two runs are the same work:
-    #   two pushes to one branch  same ref, so the older run is cancelled the
-    #                             moment the newer one is admitted
-    #   a push during a tag build refs/heads/main and refs/tags/v1.2.3 are
-    #                             different refs, so the release is untouched;
-    #                             and cancel-in-progress is false on a tag either
-    #                             way, so nothing cancels a run that is producing
+    # The waiter is the newest publish to ENTER the group, and a publish enters
+    # when its gate passes. If an older commit's gate finishes after a newer
+    # one's, the older commit is the one left waiting.
+    #
+    # The key is (repository, workflow, ref):
+    #   two pushes to one branch  same ref: wait, never cancel
+    #   a tag                     its own ref, and never cancelled: it produces
     #                             an immutable artifact
-    #   two repositories          the repository is in the key, and both planes
-    #                             scope a group to its repository regardless
-    # A pull request is refs/pull/N/merge, so a re-push supersedes that PR's own
-    # run and never touches the branch it targets.
+    #   a pull request            refs/pull/N/...: a re-push cancels that PR's
+    #                             running publish, and never touches the branch
+    #                             it targets
+    #   two repositories          the repository is in the key
+    # The name is prefixed so a caller's own group in the same repository
+    # cannot collide with it.
     #
-    # Named for this reusable, because the forge compares a job group against
-    # run-level groups in the same repository: a caller that keeps its own group
-    # (hanzoai/ci pins one to the commit so a tag and a branch push of the same
-    # commit cannot both publish it) must not collide with this one. The two are
-    # separate mechanisms and both apply.
+    # GitHub applies this group. Hanzo Git does not: it inserts a called
+    # workflow's jobs without their `concurrency:` (hanzoai/git,
+    # services/actions/reusable_workflow.go, insertCallerChildren), so there
+    # every run's publish starts when its gate passes, as many at once as there
+    # are runners.
     concurrency:
       group: hanzoai-ci-${{ github.repository }}-${{ github.workflow }}-${{ github.ref }}
-      cancel-in-progress: ${{ github.ref_type != 'tag' }}
+      cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
     runs-on: ${{ (startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) && 'ephemeral-linux-amd64' || fromJson(inputs.runner) }}
     env:
       COREPACK_NPM_REGISTRY: https://pkg.hanzo.ai
