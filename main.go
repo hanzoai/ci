@@ -8,7 +8,7 @@
 //
 // Build and deploy are one event on this fleet, and the page says so. A push
 // runs the pipeline this repo publishes; that pipeline's `image` job produces the
-// artifact and its `rollout` job writes the tag and digest into hanzoai/universe,
+// artifact and its `rollout` job writes the tag and digest into hanzo-inc/universe,
 // which cd.hanzo.ai reconciles onto the cluster. So the last jobs of a run ARE
 // the deploy, and showing a run without showing whether its pin took effect is
 // reporting on the first half of an event.

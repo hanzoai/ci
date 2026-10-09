@@ -11,7 +11,7 @@ import (
 )
 
 // git.go reads the two things Hanzo Git knows that the run list does not: what
-// hanzoai/universe declares, and which commit last produced a proved image.
+// hanzo-inc/universe declares, and which commit last produced a proved image.
 //
 // Both come from the same host over the same token this service already holds.
 // The universe repo lives on Hanzo Git, so the declared state of the fleet is a

@@ -14,7 +14,7 @@ import (
 //
 // Four values answer it, and they are one causal line rather than four opinions.
 // A push moves HEAD; the run on that commit builds and proves an image, which is
-// BUILT; the same run writes the tag and digest into hanzoai/universe, which is
+// BUILT; the same run writes the tag and digest into hanzo-inc/universe, which is
 // DECLARED; Hanzo CD reconciles that pin onto the cluster, which is RUNNING.
 //
 //	head ──build──▶ built ──pin──▶ declared ──reconcile──▶ running
@@ -218,7 +218,7 @@ func (s *Pipeline) assess() {
 
 // ───────────────────────────── assembly ─────────────────────────────
 
-// pin is one service as hanzoai/universe declares it.
+// pin is one service as hanzo-inc/universe declares it.
 type pin struct {
 	Name      string
 	Namespace string
