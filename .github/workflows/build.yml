@@ -414,7 +414,7 @@ jobs:
           # Naming the list here also makes the release order self-announcing: a
           # pipeline that has grown a tool refuses at step one, and says which ref
           # it read and what was missing from it.
-          need="certclaims conflictmarkers gocache gover ignoretracked imgplat imgtags imgver modsize narrative publishable site vendormark"
+          need="cache certclaims conflictmarkers gocache gover ignoretracked imgplat imgtags imgver modsize narrative publishable site vendormark"
           miss='<no host answered>'
           # A sha cannot be a --branch, so it arrives by fetch rather than clone:
           # the caller's pin as well as this file's own commit. Both are wrapped

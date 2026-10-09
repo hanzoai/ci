@@ -526,6 +526,15 @@ test:
     # identity is a cold build rather than a red one. Offline: a stub curl plays
     # cloud's presigning /v1/s3 and the store behind it.
     run: bash bin/gocache_test.sh
+  - name: cache
+    # bin/cache is the store under gocache and under hanzoai/dev's Rust release
+    # cache, so the protocol is pinned once, here, for every caller: who may
+    # write, that an index follows all of its parts, that a part the store
+    # refuses leaves no index behind, that a latest naming anything but one
+    # plain key is never followed, and that each directory comes back byte for
+    # byte — links included — wherever the caller names it now, merged into a
+    # target that is not empty. Offline: the same stub curl as gocache's suite.
+    run: bash bin/cache_test.sh
   - name: conflictmarkers
     # bin/conflictmarkers runs against every repo in the fleet, so a false
     # positive is as expensive as a miss: it blocks a build that would have
