@@ -53,7 +53,7 @@ EOF
 printf '#!/bin/sh\nexec cat\n' > "$T/stub/zstd"
 chmod +x "$T/stub/"*
 export PATH="$T/stub:$PATH" STORE="$T/store" HANZO_API=http://api.test HANZO_API_TOKEN=tok
-export GITHUB_REPOSITORY=hanzoai/gateway GOCACHE_PART=4096
+export GITHUB_REPOSITORY=hanzoai/gateway CACHE_PART=4096
 printf '{"repository":{"default_branch":"main"}}' > "$T/event.json"
 printf 'example.com/a v1.0.0 h1:x=\n' > "$T/repo/go.sum"
 

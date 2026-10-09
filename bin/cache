@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+# cache — directories carried between runners through this org's own store.
+#
+#   cache restore <name> <key> <label>=<dir>...   # prints hit=exact|partial|miss to $GITHUB_OUTPUT
+#   cache save    <name> <key> <label>=<dir>...   # writes on a trusted ref, on a miss, and nowhere else
+#
+# A runner is a pod that lives for one job, so a cache on its disk dies with it.
+# This is the one way a job hands a directory to the next one. bin/gocache is
+# Go's caller; hanzoai/dev's release carries its compiled Rust objects (sccache)
+# and crate downloads through it.
+#
+# WHERE IT LIVES: the org's own bucket in cloud's object store (/v1/s3), reached
+# with the IAM identity the KMS step already minted (HANZO_API_TOKEN). cloud
+# derives the bucket's physical name from that identity's org, so one org can
+# never read or write another's cache: the tenancy boundary is the server's, not
+# a prefix chosen here. CI holds no bucket credential. Every object moves over a
+# URL cloud presigns for that one key, for five minutes.
+#
+# THE KEY: <owner/repo>/<name>/<key>, and the caller names both halves. <name>
+# is what an archive is only valid for — a toolchain and an architecture
+# (gocache: go1.27.1-amd64). <key> is the hash of the inputs that decide what is
+# in it (go.sum, Cargo.lock). A key that misses restores the newest key saved
+# under that name (`latest`), so a lock bump still reuses everything that did
+# not move.
+#
+# LABELS: each directory travels under its label, and restore puts it back
+# wherever the caller names it now. A target that is empty is filled by rename,
+# one that is not by merge; a label the archive does not carry stays cold.
+# Symlinks inside a directory are kept as symlinks.
+#
+# ONLY A TRUSTED REF WRITES. A toolchain trusts what it restores without
+# re-hashing it, so a cache is code. A pull request reads and never writes; the
+# default branch and tags write, and only on a miss, so a key names one archive
+# for good.
+#
+# PARTS: the store's public name sits behind Cloudflare, which refuses a request
+# body over 100 MB, so an archive travels as 90 MiB parts listed in an index.
+# The index is written after every part, so a reader never finds a key whose
+# parts are not all there, and an archive that does not match its index is
+# never unpacked.
+#
+# BEST EFFORT: every failure is a notice and exit 0. A cache that cannot be read
+# is a cold build, never a red one.
+#
+# ENV: HANZO_API_TOKEN  the org's IAM bearer (the KMS step exports it)
+#      HANZO_API        https://api.hanzo.ai
+#      CACHE_BUCKET     ci-cache
+#      CACHE_PART       94371840 (90 MiB), the size of one uploaded part
+set -uo pipefail
+
+usage() { echo "usage: cache restore|save <name> <key> <label>=<dir>..." >&2; exit 2; }
+cmd="${1:-}"; name="${2:-}"; key="${3:-}"
+case "$cmd" in restore|save) ;; *) usage ;; esac
+[ $# -ge 4 ] || usage
+shift 3
+# Each of these is one segment of an object key or one name in the archive, so
+# none may be empty, start with a dot or a dash, or carry a slash.
+seg='^[A-Za-z0-9_][A-Za-z0-9._-]*$'
+[[ $name =~ $seg && $key =~ $seg ]] || usage
+labels=() dirs=()
+for p in "$@"; do
+  l=${p%%=*}; d=${p#*=}
+  [[ $p == *=* && $l =~ $seg && -n $d ]] || usage
+  labels+=("$l"); dirs+=("$d")
+done
+
+base="${HANZO_API:-https://api.hanzo.ai}"
+bucket="${CACHE_BUCKET:-ci-cache}"
+part="${CACHE_PART:-94371840}"
+out="${GITHUB_OUTPUT:-/dev/null}"
+
+say() { echo "cache: $*"; }
+skip() { echo "::notice::cache: $*"; [ "$cmd" = restore ] && echo "hit=miss" >> "$out"; exit 0; }
+
+[ -n "${HANZO_API_TOKEN:-}" ] || skip "no HANZO_API_TOKEN (the KMS login did not run), so there is no org store to use"
+for t in zstd tar curl jq sha256sum split xargs; do
+  command -v "$t" >/dev/null 2>&1 || skip "$t is not on this runner"
+done
+
+repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY}"
+prefix="$repo/$name"
+tmp="${RUNNER_TEMP:-$(mktemp -d)}/cache-$name"; rm -rf "$tmp"; mkdir -p "$tmp"
+# A toolchain may leave its cache read-only (Go's module cache is), so the
+# scratch is made writable before it goes, on every way out.
+trap 'chmod -R u+w "$tmp" 2>/dev/null; rm -rf "$tmp"' EXIT
+
+# api <METHOD> <path> [json] -> body on stdout when 2xx. A lost answer, a 429 or
+# a 5xx is asked again; anything else is the store answering.
+# Parts move four at a time, so each call answers into a file of its own.
+api() {
+  local code w f
+  f=$(mktemp -p "$tmp" api.XXXXXX)
+  for w in 0 2 5; do
+    [ "$w" = 0 ] || sleep "$w"
+    code=$(curl -sS -m 30 -o "$f" -w '%{http_code}' -X "$1" "$base$2" \
+      -H "Authorization: Bearer $HANZO_API_TOKEN" -H 'Content-Type: application/json' \
+      ${3:+-d "$3"}) || code=000
+    case "$code" in 2*) cat "$f"; rm -f "$f"; return 0 ;; 000|429|5*) continue ;; *) break ;; esac
+  done
+  echo "HTTP $code $(head -c 200 "$f")" >&2
+  rm -f "$f"
+  return 1
+}
+
+# get <key> <file>: the object's bytes, or non-zero when it is not there.
+get() {
+  local url
+  url=$(api GET "/v1/s3/buckets/$bucket/objects/$1" | jq -r '.url // empty') && [ -n "$url" ] || return 1
+  curl -fsS -m 600 -o "$2" "$url"
+}
+
+# put <key> <file>: presigned just before it is spent, since it lives five minutes.
+put() {
+  local url
+  url=$(api POST "/v1/s3/buckets/$bucket/objects" "$(jq -nc --arg k "$1" '{key:$k}')" | jq -r '.url // empty') \
+    && [ -n "$url" ] || return 1
+  curl -fsS -m 600 -o /dev/null -T "$2" "$url"
+}
+
+# fetch <key>: download and verify the archive an index names; leaves the parts in $tmp.
+fetch() {
+  local idx="$prefix/$1.idx" hash n i
+  get "$idx" "$tmp/idx" || return 1
+  read -r hash n < "$tmp/idx"
+  case "$n" in ''|*[!0-9]*) return 1 ;; esac
+  # shellcheck disable=SC2016 # expanded by the inner bash, one part each
+  for i in $(seq 0 $((n - 1))); do printf '%03d\n' "$i"; done \
+    | xargs -P 4 -I{} bash -c 'get "$0.{}" "$1.{}"' "$prefix/$1.tar.zst" "$tmp/part" || return 1
+  [ "$(cat "$tmp"/part.* | sha256sum | cut -d' ' -f1)" = "$hash" ] || { say "archive $1 does not match its index"; return 1; }
+}
+
+export -f get put api; export base bucket tmp HANZO_API_TOKEN
+
+if [ "$cmd" = restore ]; then
+  t0=$(date +%s)
+  hit=exact
+  if ! fetch "$key"; then
+    hit=partial
+    rm -f "$tmp"/part.*
+    last=
+    get "$prefix/latest" "$tmp/latest" && last=$(head -1 "$tmp/latest")
+    if ! [[ $last =~ $seg && $last != "$key" ]] || ! fetch "$last"; then
+      say "nothing saved for $prefix yet"; echo "hit=miss" >> "$out"; exit 0
+    fi
+  fi
+  bytes=$(wc -c "$tmp"/part.* | tail -1 | awk '{print $1}')
+  mkdir -p "$tmp/x"
+  cat "$tmp"/part.* | zstd -dq -T0 | tar -x --no-same-owner -C "$tmp/x" || skip "the archive did not unpack"
+  rm -f "$tmp"/part.*
+  for i in "${!labels[@]}"; do
+    l=${labels[$i]}; d=${dirs[$i]}
+    [ -d "$tmp/x/$l" ] || { say "the archive carries no $l, so $d starts cold"; continue; }
+    # Renamed rather than copied: the pod is fresh, so a target is usually empty
+    # and the rename is instant on one filesystem.
+    mkdir -p "$d"
+    if ! { rmdir "$d" 2>/dev/null && mv "$tmp/x/$l" "$d"; }; then
+      mkdir -p "$d"; chmod -R u+w "$tmp/x/$l"; cp -a "$tmp/x/$l/." "$d/" || say "$l did not merge whole into $d"
+    fi
+  done
+  say "$hit hit for $prefix: $((bytes / 1048576)) MiB in $(( $(date +%s) - t0 ))s"
+  echo "hit=$hit" >> "$out"
+  exit 0
+fi
+
+# save: a trusted ref, and only when the exact key is not already there.
+case "${GITHUB_EVENT_NAME:-}" in pull_request*) say "a pull request reads the cache and never writes it"; exit 0 ;; esac
+default=$(jq -r '.repository.default_branch // empty' "${GITHUB_EVENT_PATH:-/dev/null}" 2>/dev/null || true)
+if [ "${GITHUB_REF_TYPE:-}" != tag ] && { [ -z "$default" ] || [ "${GITHUB_REF_NAME:-}" != "$default" ]; }; then
+  say "${GITHUB_REF_NAME:-this ref} is not the default branch or a tag, so it does not write"; exit 0
+fi
+get "$prefix/$key.idx" "$tmp/have" 2>/dev/null && { say "$prefix/$key is already saved"; exit 0; }
+# Each label is a symlink to its directory, archived as `<label>/.`: the path
+# goes through that one link and every symlink beneath it is kept as a link.
+mkdir -p "$tmp/src"; have=()
+for i in "${!labels[@]}"; do
+  [ -d "${dirs[$i]}" ] || { say "no ${dirs[$i]}, so ${labels[$i]} is not saved"; continue; }
+  ln -s "$(cd "${dirs[$i]}" && pwd)" "$tmp/src/${labels[$i]}"; have+=("${labels[$i]}/.")
+done
+[ ${#have[@]} -gt 0 ] || { say "nothing to save"; exit 0; }
+t0=$(date +%s)
+api POST /v1/s3/buckets "{\"name\":\"$bucket\"}" >/dev/null 2>&1 || true   # 201 made, 409 already there
+tar -c -C "$tmp/src" "${have[@]}" 2>/dev/null | zstd -q -T0 | split -b "$part" -d -a 3 - "$tmp/part." \
+  || { say "could not archive the cache"; exit 0; }
+n=$(printf '%s\n' "$tmp"/part.* | wc -l)
+hash=$(cat "$tmp"/part.* | sha256sum | cut -d' ' -f1)
+bytes=$(wc -c "$tmp"/part.* | tail -1 | awk '{print $1}')
+# shellcheck disable=SC2016 # expanded by the inner bash, one part each
+printf '%s\n' "$tmp"/part.* | xargs -P 4 -I{} bash -c 'put "$0.${1##*.}" "$1"' "$prefix/$key.tar.zst" {} \
+  || { say "a part did not upload; nothing is indexed, so nothing half-written is ever read"; exit 0; }
+# The index goes last, so a reader never finds a key whose parts are not all there.
+printf '%s %s\n' "$hash" "$n" > "$tmp/idx"; printf '%s\n' "$key" > "$tmp/latest"
+if ! put "$prefix/$key.idx" "$tmp/idx" || ! put "$prefix/latest" "$tmp/latest"; then
+  say "the index did not upload"; exit 0
+fi
+say "saved $prefix/$key: $((bytes / 1048576)) MiB in $n part(s), $(( $(date +%s) - t0 ))s"
