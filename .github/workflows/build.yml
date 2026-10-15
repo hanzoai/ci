@@ -136,7 +136,8 @@ on:
           runner splits it across parallel jobs, each naming its share; hanzo.yml
           stays the one list. A name hanzo.yml does not declare is refused, so a
           renamed entry fails the job that named it instead of dropping out of
-          the gate. Each share keeps its own Go cache.
+          the gate. Each share keeps its own Go cache, and a share only gates:
+          the publish job runs for a call that gates on everything.
         required: false
         default: ''
         type: string
@@ -3502,7 +3503,9 @@ jobs:
     # no registry, no credential. Its `runs-on` still names an ephemeral label for
     # a fork, for the reason `test-advisory` gives.
     needs: [test, test-amd64]
-    if: always() && (needs.test.result == 'success' || needs.test-amd64.result == 'success') && !(startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository)
+    # A call that names a share of the gate (`gates`) only gates: what it would
+    # publish is the whole repository's, and that is the one call gating on all of it.
+    if: always() && (needs.test.result == 'success' || needs.test-amd64.result == 'success') && inputs.gates == '' && !(startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository)
     # One publish per ref runs and at most one waits. A push during a publish
     # lets the running one finish; the new publish waits, and a later push
     # replaces it while it waits. A busy branch therefore ships its newest gated
