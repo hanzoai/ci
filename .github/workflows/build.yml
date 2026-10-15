@@ -131,8 +131,10 @@ on:
         default: 'true'
       gates:
         description: >-
-          The `test:` entries this run gates on, by name, comma-separated. Empty
-          runs all of them, as before. A caller whose gate is too long for one
+          The `test:` entries this run gates on, by name, comma-separated, or
+          with a leading `!` every entry but those. Empty runs all of them, as
+          before. One share of a split gate names the others' with `!`, so an
+          entry added to hanzo.yml later is gated by default. A caller whose gate is too long for one
           runner splits it across parallel jobs, each naming its share; hanzo.yml
           stays the one list. A name hanzo.yml does not declare is refused, so a
           renamed entry fails the job that named it instead of dropping out of
@@ -1959,14 +1961,18 @@ jobs:
           gates="$(yq -o=json -I=0 '.test // []' hanzo.yml)"
           # A share of the gate, when the caller names one: those entries, in
           # hanzo.yml's order, and a refusal for any name it does not declare.
-          if [ -n "${GATES//[[:space:],]/}" ]; then
-            want=$(printf '%s' "$GATES" | jq -Rc 'split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(length > 0))')
+          # A leading `!` names what the OTHER shares run, and this one runs the
+          # rest, so an entry added to hanzo.yml later is gated by default.
+          if [ -n "${GATES//[[:space:],!]/}" ]; then
+            except=false; list=$GATES
+            case "$list" in '!'*) except=true; list=${list#!} ;; esac
+            want=$(printf '%s' "$list" | jq -Rc 'split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(length > 0))')
             missing=$(jq -nr --argjson g "$gates" --argjson w "$want" '$w - ($g | map(.name)) | join(", ")')
             if [ -n "$missing" ]; then
               echo "::error::gates names what hanzo.yml does not declare: $missing"
               exit 1
             fi
-            gates=$(jq -c --argjson w "$want" 'map(select(.name as $n | $w | index($n)))' <<<"$gates")
+            gates=$(jq -c --argjson w "$want" --argjson x "$except" 'map(select(((.name as $n | $w | index($n)) != null) != $x))' <<<"$gates")
             echo "gating on: $(jq -r 'map(.name) | join(", ")' <<<"$gates")"
           fi
           count=$(printf '%s' "$gates" | jq 'length')
