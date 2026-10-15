@@ -69,6 +69,17 @@ check "a release's version that is not x.y.z refuses before sed reads it" \
   '8.5.189/;e touch pwned;#' 'version = "8.5.156"' "" "" refuses
 [ ! -e "$tmp/pwned" ] || { echo "FAIL a release's version ran a command through sed"; fail=1; }
 
+# A crate's own entry in its Cargo.lock moves with Cargo.toml; a dependency
+# that happens to share the old number does not.
+printf '[package]\nname = "hanzo-cli"\nversion = "8.5.156"\n' > "$tmp/Cargo.toml"
+printf '[[package]]\nname = "dep"\nversion = "8.5.156"\n\n[[package]]\nname = "hanzo-cli"\nversion = "8.5.156"\n' > "$tmp/Cargo.lock"
+read="sed -n 's/^version = \"\\(.*\\)\"/\\1/p' $tmp/Cargo.toml"
+(cd "$tmp" && cut 8.5.189 8.5.156 "$tmp/Cargo.toml" "$read") >/dev/null
+want=$'[[package]]\nname = "dep"\nversion = "8.5.156"\n\n[[package]]\nname = "hanzo-cli"\nversion = "8.5.189"'
+[ "$(cat "$tmp/Cargo.lock")" = "$want" ] && echo "ok   the crate's own Cargo.lock entry moves with it" || {
+  echo "FAIL Cargo.lock: [$(cat "$tmp/Cargo.lock")]"; fail=1; }
+rm -f "$tmp/Cargo.lock"
+
 # No file: the tag is the version (a Go module), so only NEXT moves.
 NEXT=unset; cut 8.5.189 8.5.156 "" ""
 [ "$NEXT" = 8.5.189 ] && echo "ok   a tag-versioned repo takes the release's number" || {

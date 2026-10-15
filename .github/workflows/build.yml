@@ -2885,6 +2885,21 @@ jobs:
               sed -i "0,/${cur//./\\.}/s//${next}/" "$file"
               now=$(bash -c "$read")
               [ "$now" = "$next" ] || { echo "::error::version bump did not take in $file ($cur -> $now, wanted $next)"; return 1; }
+              # A crate's Cargo.lock names its own version too, and a lock that
+              # disagrees with Cargo.toml fails every `--locked` build (hanzoai/cli
+              # 8.5.729 and 8.5.730 did). Move the crate's own entry with it.
+              local lock pkg
+              lock="$(dirname "$file")/Cargo.lock"
+              if [ "$(basename "$file")" = Cargo.toml ] && [ -f "$lock" ]; then
+                pkg=$(sed -n '/^\[package\]/,/^\[/s/^name *= *"\(.*\)"/\1/p' "$file" | head -1)
+                if [ -n "$pkg" ]; then
+                  awk -v p="$pkg" -v c="$cur" -v n="$next" '
+                    $0 == "name = \"" p "\"" { own = 1; print; next }
+                    own && $0 == "version = \"" c "\"" { print "version = \"" n "\""; own = 0; next }
+                    { own = 0; print }' "$lock" > "$lock.cut" && mv "$lock.cut" "$lock"
+                  grep -qx "version = \"$next\"" "$lock" || { echo "::error::$lock names no $pkg $next after the cut"; return 1; }
+                fi
+              fi
             fi
             NEXT=$next
           }
