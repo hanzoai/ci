@@ -179,7 +179,15 @@ case "$url" in
   https://a-slug.hanzo.app/_site/manifest.txt*)
                    if [ -n "${T_PREV:-}" ]; then printf '%s\n' "$T_PREV" > "$out"; printf '200'; else : > "$out"; printf '404'; fi ;;
   https://a-slug.hanzo.app/_next/*) printf '200' ;;
-  */v1/projects/a-slug) if [ -n "$wfmt" ]; then printf '200'; else printf '{"liveUrl":"https://a-slug.hanzo.app"}'; fi ;;
+  # The deployment the run completed, as cloud records it: what the completion
+  # sent, which is what cloud stores (apps/projects/deploy.go land). T_REC
+  # replaces it to make the record disagree.
+  */v1/projects/a-slug/deployments/dep_x)
+                   if [ -n "${T_REC:-}" ]; then printf '%s' "$T_REC"
+                   else jq -c '{id:"dep_x", status, files, bytes}' "$T_DIR/complete.body"; fi ;;
+  # The project. T_CURRENT names the deployment it serves.
+  */v1/projects/a-slug) if [ -n "$wfmt" ]; then printf '200'
+                   else printf '{"liveUrl":"https://a-slug.hanzo.app","status":"live","currentDeploymentId":"%s"}' "${T_CURRENT:-dep_x}"; fi ;;
   https://s3.test/*) printf '%s\n' "$(IFS='|'; printf '%s' "${fields[*]}")" >> "$T_DIR/uploads" ;;
   # The published page, read back. bin/site downloads the live URL and compares
   # what arrived against the promised content-length, so an answer here is a body
@@ -189,16 +197,19 @@ case "$url" in
                    case "${T_BACK:-ok}" in
                      empty) : > "$out";           len=0  ;;
                      short) printf 'hi' > "$out"; len=99 ;;
-                     # A gated client preview. The plain read-back is an API
-                     # caller and gets 401; the browser-shaped probe gets the
-                     # guard's redirect, naming this host as its own callback.
-                     gated) : > "$out"
+                     # A client preview before sign-off: the edge answers its
+                     # host 404 for everyone.
+                     unpublished) printf 'Not Found' > "$out"
+                            printf 'content-length: 9\r\n' > "$hdr"
+                            printf '404'; exit 0 ;;
+                     # A host that answers with a sign-in instead of its page.
+                     signin) : > "$out"
                             printf 'content-length: 0\r\n' > "$hdr"
-                            case "$wfmt" in
-                              *redirect_url*) printf '302 https://hanzo.id/v1/iam/oauth/authorize?client_id=hanzo-guard&redirect_uri=https%%3A%%2F%%2Fa-slug.hanzo.app%%2F__guard%%2Fcallback' ;;
-                              *) printf '401' ;;
-                            esac
-                            exit 0 ;;
+                            printf '401'; exit 0 ;;
+                     # The plane failing, not withholding.
+                     unavailable) : > "$out"
+                            printf 'content-length: 0\r\n' > "$hdr"
+                            printf '503'; exit 0 ;;
                      # A redirect hop then a chunked 200: -L keeps both
                      # header blocks, and only the second one is the answer.
                      redirected) printf '<h1>hi</h1>\n' > "$out"
@@ -445,19 +456,45 @@ out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
 t "a redirect before the page publishes" "$rc"  "0"
 t "  ...not calling it unreadable"       "$(printf '%s' "$out" | grep -c 'does not serve its own bytes')"  "0"
 
-# A gated client preview answers the read-back 401 BY DESIGN -- and the same
-# workflow's "every host is gated" step refuses to publish any host that answers
-# otherwise. Demanding 200 here asked one deploy to be two contradictory things:
-# the first slug of each repo published, the read-back called it unreadable, and
-# `set -e` took the remaining 27 client sites down with it, leaving hosts that
-# resolve and gate with nothing behind them.
+# A client preview answers 404 to everyone until its client signs off, so its
+# release is read back from cloud's deployment record, with the credential that
+# published it, rather than from the host.
 rm -f "$tmp/calls"
 out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
-      SITE_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_BACK=gated \
+      SITE_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_BACK=unpublished \
       bash "$SD" a-slug "$site" 2>&1); rc=$?
-t "a gated preview publishes"          "$rc"  "0"
-t "  ...and says it was not read back" "$(printf '%s' "$out" | grep -c 'gated by hanzo.id')"  "1"
-t "  ...not calling it unreadable"     "$(printf '%s' "$out" | grep -c 'does not serve its own bytes')"  "0"
+t "an unpublished preview publishes"       "$rc"  "0"
+t "  ...read back from the deployment"     "$(grep -c '^GET https://api.test/v1/projects/a-slug/deployments/dep_x$' "$tmp/calls")"  "1"
+t "  ...and from the project it serves"    "$(grep -c '^GET https://api.test/v1/projects/a-slug$' "$tmp/calls")"  "2"
+t "  ...saying so"                         "$(printf '%s' "$out" | grep -c '^::notice::https://a-slug.hanzo.app answers 404')"  "1"
+t "  ...not calling it unreadable"         "$(printf '%s' "$out" | grep -c 'does not serve its own bytes')"  "0"
+
+# The record is the whole proof, so each way it can disagree fails the deploy:
+# the record the run just wrote, changed in one field at a time.
+rec=$(jq -c '{id:"dep_x", status, files, bytes}' "$tmp/complete.body")
+for change in '.status = "error"' '.files -= 1' '.bytes += 1' '.id = "dep_y"' '{code:"unauthorized"}'; do
+  rm -f "$tmp/calls"
+  out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
+        SITE_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_BACK=unpublished \
+        T_REC="$(jq -c "$change" <<<"$rec")" bash "$SD" a-slug "$site" 2>&1); rc=$?
+  t "a record with $change fails"  "$([ "$rc" != 0 ] && echo failed)"  "failed"
+done
+rm -f "$tmp/calls"
+out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
+      SITE_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_BACK=unpublished T_CURRENT=dep_y \
+      bash "$SD" a-slug "$site" 2>&1); rc=$?
+t "a project serving another release fails" "$([ "$rc" != 0 ] && echo failed)"  "failed"
+
+# Only a 404 is read back from cloud. A sign-in in front of the host, or the
+# plane failing, is a failure whatever the record says.
+for back in signin unavailable; do
+  rm -f "$tmp/calls"
+  out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
+        SITE_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_BACK=$back \
+        bash "$SD" a-slug "$site" 2>&1); rc=$?
+  t "a host answering $back fails"           "$([ "$rc" != 0 ] && echo failed)"  "failed"
+  t "  ...never asking cloud's record"      "$(grep -c '/deployments/dep_x$' "$tmp/calls")"  "0"
+done
 
 # --- incremental publish -----------------------------------------------------
 # The previous release's hash manifest is read back over the live host, and only
