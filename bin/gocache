@@ -40,5 +40,10 @@ if [ "$cmd" = save ]; then
   [ -d "$mod" ] || { echo "gocache: no module cache to save"; exit 0; }
   mkdir -p "$build"   # a gate that compiled nothing still leaves modules worth keeping
 fi
-exec "$(dirname "$0")/cache" "$cmd" "$(go env GOVERSION)-$(go env GOARCH)" \
+# A caller that splits its gate across parallel jobs (build.yml `gates`) keeps
+# one cache per share: each compiles its own part of the tree, and one key per
+# job means no share finds its key already taken by another's archive.
+name="$(go env GOVERSION)-$(go env GOARCH)"
+[ -n "${GOCACHE_SHARE:-}" ] && name="$name-$(printf '%s' "$GOCACHE_SHARE" | sha256sum | cut -c1-8)"
+exec "$(dirname "$0")/cache" "$cmd" "$name" \
   "$(sha256sum "$dir/go.sum" | cut -c1-32)" mod="$mod" build="$build"

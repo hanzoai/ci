@@ -129,6 +129,17 @@ on:
           "true"/"false" — keeps working unchanged.
         type: string
         default: 'true'
+      gates:
+        description: >-
+          The `test:` entries this run gates on, by name, comma-separated. Empty
+          runs all of them, as before. A caller whose gate is too long for one
+          runner splits it across parallel jobs, each naming its share; hanzo.yml
+          stays the one list. A name hanzo.yml does not declare is refused, so a
+          renamed entry fails the job that named it instead of dropping out of
+          the gate. Each share keeps its own Go cache.
+        required: false
+        default: ''
+        type: string
       go-cache:
         description: >-
           Carry GOMODCACHE and GOCACHE between runs through this org's own
@@ -1303,6 +1314,8 @@ jobs:
         # says which on the log.
         id: gocache
         if: steps.gomod.outputs.file != '' && env.HANZO_CI_ROLE == 'test' && inputs.go-cache != 'false'
+        env:
+          GOCACHE_SHARE: ${{ inputs.gates }}
         run: |
           "$CI_HOME/bin/gocache" restore "$(dirname '${{ steps.gomod.outputs.file }}')"
 
@@ -1846,6 +1859,8 @@ jobs:
         # flag can only say what was INTENDED, a count says what HAPPENED, and the
         # verdict is taken from the count.
         if: env.HANZO_CI_ROLE == 'test' && (inputs.tests != 'false')
+        env:
+          GATES: ${{ inputs.gates }}
         run: |
           set -euo pipefail
           NOTHING='\[no test files\]|\[no tests to run\]|no tests ran|collected 0 items|No tests found|no test specified|running 0 tests|Tests:[[:space:]]+0 total|(^|[^0-9])0 (passing|passed)'
@@ -1941,6 +1956,18 @@ jobs:
           # collapses the two, so ask for the tag as well.
           decl=$(yq -r '.test | tag' hanzo.yml)
           gates="$(yq -o=json -I=0 '.test // []' hanzo.yml)"
+          # A share of the gate, when the caller names one: those entries, in
+          # hanzo.yml's order, and a refusal for any name it does not declare.
+          if [ -n "${GATES//[[:space:],]/}" ]; then
+            want=$(printf '%s' "$GATES" | jq -Rc 'split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(length > 0))')
+            missing=$(jq -nr --argjson g "$gates" --argjson w "$want" '$w - ($g | map(.name)) | join(", ")')
+            if [ -n "$missing" ]; then
+              echo "::error::gates names what hanzo.yml does not declare: $missing"
+              exit 1
+            fi
+            gates=$(jq -c --argjson w "$want" 'map(select(.name as $n | $w | index($n)))' <<<"$gates")
+            echo "gating on: $(jq -r 'map(.name) | join(", ")' <<<"$gates")"
+          fi
           count=$(printf '%s' "$gates" | jq 'length')
           [ "$decl" = '!!null' ] && state=none || state=ran
           echo "${GITHUB_SHA:-} $state $count" > "$receipt"
@@ -1967,6 +1994,8 @@ jobs:
         # the store does not hold: a pull request reads this org's cache and
         # never writes it, because Go trusts a cache without re-hashing it.
         if: steps.gomod.outputs.file != '' && env.HANZO_CI_ROLE == 'test' && inputs.go-cache != 'false' && steps.gocache.outputs.hit != 'exact'
+        env:
+          GOCACHE_SHARE: ${{ inputs.gates }}
         run: |
           "$CI_HOME/bin/gocache" save "$(dirname '${{ steps.gomod.outputs.file }}')"
 

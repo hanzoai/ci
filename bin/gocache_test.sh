@@ -118,6 +118,13 @@ pod; : > "$T/out"; run push main branch restore
 pod; : > "$T/out"; HANZO_API_TOKEN= run push main branch restore
 [ $? = 0 ] && [ "$(hit)" = miss ] && ok "no identity is a cold build" || no "no identity is a cold build"
 
+# A share of a split gate keeps its own key, so parallel jobs each save theirs.
+share=$(printf '%s' "go-unit" | sha256sum | cut -c1-8)
+pod; warm; GOCACHE_SHARE=go-unit run push main branch save
+[ -f "$STORE/$key-$share/latest" ] && ok "a share of the gate saves under its own key" || no "a share of the gate saves under its own key"
+pod; : > "$T/out"; GOCACHE_SHARE=go-unit run push main branch restore
+[ "$(hit)" = exact ] && ok "a share restores its own key" || no "a share restores its own key"
+
 # The workflow wires it: restore before the gate, save after it, both reading
 # the module the Go provisioning found.
 WF=.github/workflows/build.yml
