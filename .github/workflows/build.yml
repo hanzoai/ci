@@ -489,7 +489,11 @@ jobs:
           echo "CI_HOME=$RUNNER_TEMP/ci" >> "$GITHUB_ENV"
 
       - name: Structural invariants (the repo agrees with itself)
-        if: env.HANZO_CI_ROLE == 'test'
+        # Whole-repository facts, so a split gate checks them once: in the call
+        # gating on everything, or in the share that runs "everything but" (`!`).
+        # The other shares skip them; certclaims alone took 5 minutes of every
+        # hanzo-inc/cloud share.
+        if: env.HANZO_CI_ROLE == 'test' && (inputs.gates == '' || startsWith(inputs.gates, '!'))
         # Two cheap refusals, run before anything is built or pushed, for a
         # defect class no later stage can see: a declaration and the reality it
         # describes disagreeing in silence.
