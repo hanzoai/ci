@@ -379,6 +379,17 @@ jobs:
             pin=$(sed -n 's#.*hanzoai/ci/\.[a-z]*/workflows/build\.yml@\([A-Za-z0-9._/-]\{1,\}\).*#\1#p' \
                   "${GITHUB_WORKSPACE:-.}/$wf" | head -1)
           fi
+          # Hanzo Git sets no GITHUB_WORKFLOW_REF, so the caller's file is unknown
+          # there. The pin is then the one this repository's workflows all name,
+          # when they name exactly one: a caller pinned to v1.0.N runs v1.0.N's
+          # tools instead of whatever the moving `v1` names today.
+          if [ -z "$pin" ]; then
+            pins=$(cat "${GITHUB_WORKSPACE:-.}"/.hanzo/workflows/*.y*ml "${GITHUB_WORKSPACE:-.}"/.github/workflows/*.y*ml 2>/dev/null \
+                   | sed -n 's#.*hanzoai/ci/\.[a-z]*/workflows/build\.yml@\([A-Za-z0-9._/-]\{1,\}\).*#\1#p' | sort -u || true)
+            if [ "$(printf '%s\n' "$pins" | grep -c . || true)" = 1 ]; then
+              pin=$pins; wf="${wf:-the workflows of this repository}"
+            fi
+          fi
           echo "caller ${wf:-<unknown>} pins ${pin:-<nothing this could read>}"
           # In order: the pin the caller wrote, this file's commit where a host
           # says it, and last the caller's own ref -- which is what used to be
