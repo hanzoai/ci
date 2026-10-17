@@ -5,7 +5,7 @@ set -uo pipefail
 
 REVIEW="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review.sh"
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"; kill "${STUB_PID:-0}" 2>/dev/null' EXIT
+trap 'rm -rf "$WORK"; kill "${STUB_PID:-0}" "${KMS_PID:-0}" 2>/dev/null' EXIT
 
 # one commit to review
 repo="$WORK/repo"; mkdir -p "$repo"; cd "$repo" || exit 1
@@ -122,6 +122,62 @@ else
 fi
 kill "$STUB_PID" 2>/dev/null; wait "$STUB_PID" 2>/dev/null
 cd "$repo" || exit 1
+
+# gate.sh mints the reviewer's identity from KMS. A store that refuses the CI
+# credential, or holds no review/IAM_CLIENT_ID for it, is the CI identity's fault
+# and not the change's: the gate warns and passes. A reviewer that runs and
+# refuses still blocks, through the gate as directly.
+GATE="$(dirname "$REVIEW")/gate.sh"
+kms() { # kms <login-status> <secret-status>
+  python3 - "$1" "$2" <<'PY' &
+import sys, json, http.server
+login, secret = int(sys.argv[1]), int(sys.argv[2])
+class H(http.server.BaseHTTPRequestHandler):
+    def answer(self, status, body):
+        b = json.dumps(body).encode()
+        self.send_response(status); self.send_header('content-type', 'application/json')
+        self.send_header('content-length', str(len(b))); self.end_headers(); self.wfile.write(b)
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get('content-length', 0) or 0))
+        self.answer(login, {'accessToken': 'kms'} if login == 200 else {'detail': 'forbidden'})
+    def do_GET(self):
+        self.answer(secret, {'value': 'review-client'} if secret == 200 else {'detail': 'forbidden'})
+    def log_message(self, *a): pass
+http.server.HTTPServer(('127.0.0.1', 8792), H).serve_forever()
+PY
+  KMS_PID=$!
+  sleep 1
+}
+gate() { # gate <want-exit> <want-grep> <name> -> runs gate.sh against the stub store
+  local want=$1 pat=$2 name=$3 got
+  KMS_ENDPOINT=http://127.0.0.1:8792 KMS_CLIENT_ID=ci KMS_CLIENT_SECRET=s IAM_ENDPOINT=http://127.0.0.1:8792 \
+    bash "$GATE" "$BASE" "$HEAD_SHA" > "$WORK/out" 2>&1; got=$?
+  if [ "$got" = "$want" ] && grep -q "$pat" "$WORK/out"; then
+    echo "  PASS  $name (exit $got)"
+  else
+    echo "  FAIL  $name: exit $got want $want; looking for '$pat'"
+    sed -n '1,12p' "$WORK/out" | sed 's/^/        /'
+    fail=1
+  fi
+  kill "$KMS_PID" 2>/dev/null; wait "$KMS_PID" 2>/dev/null
+}
+
+echo "the store REFUSES the CI credential (KMS 403) -> warned, release continues (~75s of retries)"
+kms 403 403; gate 0 "::warning::review: KMS login.*answered 403.*withholds no verdict" "KMS 403 does not block"
+
+echo "the store holds no review/IAM_CLIENT_ID for this org (403) -> warned, release continues (~75s of retries)"
+kms 200 403; gate 0 "::warning::review: the store answered 403 for review/IAM_CLIENT_ID" "IAM_CLIENT_ID 403 does not block"
+
+echo "a reviewer that runs and REFUSES still blocks through the gate"
+stub 500 '{"error":"boom"}'
+REVIEW_API=http://127.0.0.1:8791 REVIEW_TOKEN=stub REVIEW_MODEL=stub REVIEW_FALLBACKS="" \
+  bash "$GATE" "$BASE" "$HEAD_SHA" > "$WORK/out" 2>&1; got=$?
+if [ "$got" = 1 ] && grep -q "cannot judge this change" "$WORK/out"; then
+  echo "  PASS  a refusal through the gate blocks (exit 1)"
+else
+  echo "  FAIL  a refusal through the gate: exit $got want 1"; sed -n '1,12p' "$WORK/out" | sed 's/^/        /'; fail=1
+fi
+kill "$STUB_PID" 2>/dev/null; wait "$STUB_PID" 2>/dev/null
 
 echo "reviewer NEVER ANSWERS (503) -> recorded, release continues (~150s of retries)"
 stub 503 '{"msg":"identity is unavailable"}'; check "503 unreviewed" 0 "UNREVIEWED"

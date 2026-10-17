@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # Mint the reviewer's identity, then read the change.
 #
-# A reviewer that cannot be reached withholds no verdict and exits 0. A
-# reviewer that refuses the change exits 1. The secret is piped into the token
-# request and never assigned, exported, or placed on a command line.
+# A reviewer that cannot be reached, or cannot get its identity, withholds no
+# verdict and exits 0 with a warning: a refused credential or a store that holds
+# no review/IAM_CLIENT_ID for this org is a fact about the CI identity, not a view
+# of the change, and it held every publish on build.yml behind it (hanzoai/console
+# 8fa5c86b23 and f83eecedeb). A reviewer that runs and refuses the change exits 1
+# (review.sh). The secret is piped into the token request and never assigned,
+# exported, or placed on a command line.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -56,8 +60,8 @@ if [ -z "${REVIEW_TOKEN:-}" ]; then
     code=$(cat "$KMS_CODE" 2>/dev/null || echo 000)
     said=$(head -c 200 "$KMS_BODY" 2>/dev/null)
     if refused "$code"; then
-      echo "::error::review: KMS login at ${API_KMS} answered ${code} — ${said}. The store refused this credential, so the reviewer has no identity."
-      exit 1
+      echo "::warning::review: KMS login at ${API_KMS} answered ${code} — ${said}. The store refused this credential, so the reviewer had no identity and did not run; it withholds no verdict"
+      exit 0
     fi
     echo "::warning::review: KMS login at ${API_KMS} answered ${code} — the reviewer did not run, so it withholds no verdict"
     exit 0
@@ -78,8 +82,8 @@ if [ -z "${REVIEW_TOKEN:-}" ]; then
   if [ -z "$REVIEW_CLIENT_ID" ]; then
     code=$(cat "$KMS_CODE_F" 2>/dev/null || echo 000)
     if [ "$code" = 200 ] || refused "$code"; then
-      echo "::error::review: the store answered ${code} for review/IAM_CLIENT_ID, so ${CLIENT_NAME} has no identity."
-      exit 1
+      echo "::warning::review: the store answered ${code} for review/IAM_CLIENT_ID, so ${CLIENT_NAME} had no identity and did not run; it withholds no verdict. Grant this org's CI identity review/ in KMS."
+      exit 0
     fi
     echo "::warning::review: the store did not answer for review/IAM_CLIENT_ID — the reviewer did not run, so it withholds no verdict"
     exit 0
