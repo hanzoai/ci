@@ -75,7 +75,7 @@ ok() { printf 'ok    %s\n' "$1"; }
 no() { printf 'FAIL  %s\n' "$1"; sed 's/^/        /' "$T/log"; fail=1; }
 hit() { tail -1 "$T/out" 2>/dev/null | sed 's/^hit=//'; }
 puts() { wc -l < "$STORE.puts" 2>/dev/null || echo 0; }
-key=hanzoai/gateway/go1.27.1-amd64
+key=hanzoai/gateway/go1.27.1-amd64-used
 
 pod; : > "$T/out"; run push main branch restore
 [ $? = 0 ] && [ "$(hit)" = miss ] && ok "an empty store is a miss, and exit 0" || no "an empty store is a miss, and exit 0"
@@ -124,6 +124,31 @@ pod; warm; GOCACHE_SHARE=go-unit run push main branch save
 [ -f "$STORE/$key-$share/latest" ] && ok "a share of the gate saves under its own key" || no "a share of the gate saves under its own key"
 pod; : > "$T/out"; GOCACHE_SHARE=go-unit run push main branch restore
 [ "$(hit)" = exact ] && ok "a share restores its own key" || no "a share restores its own key"
+
+# A save keeps what its run used and what it compiled, and nothing that only came
+# along with the restore: an entry the gate reads is stamped anew by Go, and one it
+# does not is left at the age the restore gave it.
+printf 'example.com/a v1.0.2 h1:z=\n' >> "$T/repo/go.sum"
+pod; warm
+for f in used idle; do head -c 9000 /dev/urandom > "$HOME/.cache/go-build/ab/$f-d"; done
+run push main branch save
+printf 'example.com/a v1.0.3 h1:w=\n' >> "$T/repo/go.sum"
+pod; run push main branch restore
+old=$(stat -c %Y "$HOME/.cache/go-build/ab/idle-d")
+[ $(( $(date +%s) - old )) -ge 3600 ] && ok "a restored entry is stamped past the hour Go leaves a used entry alone" \
+  || no "a restored entry is stamped past the hour Go leaves a used entry alone"
+sleep 1; touch "$HOME/.cache/go-build/ab/used-d"; head -c 9000 /dev/urandom > "$HOME/.cache/go-build/ab/built-d"
+run push main branch save
+pod; run push main branch restore
+[ -f "$HOME/.cache/go-build/ab/used-d" ] && [ -f "$HOME/.cache/go-build/ab/built-d" ] && [ ! -e "$HOME/.cache/go-build/ab/idle-d" ] \
+  && ok "a save keeps what its run used or compiled, and drops what only came along" \
+  || no "a save keeps what its run used or compiled, and drops what only came along"
+
+# An archive saved before the cut, under the old name, is never restored.
+pod; mkdir -p "$STORE/hanzoai/gateway/go1.27.1-amd64"; printf 'stale\n' > "$STORE/hanzoai/gateway/go1.27.1-amd64/latest"
+printf 'example.com/a v1.0.4 h1:v=\n' >> "$T/repo/go.sum"
+run push main branch restore
+[ "$(hit)" = partial ] && ok "the old name's archives are not read" || no "the old name's archives are not read"
 
 # The workflow wires it: restore before the gate, save after it, both reading
 # the module the Go provisioning found.
