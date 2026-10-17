@@ -334,6 +334,9 @@ jobs:
           JOB_SHA: ${{ github.job_workflow_sha }}
         run: |
           set -euo pipefail
+          # A forge that wants a password must fail the attempt, not sit on a
+          # prompt until the job's own clock runs out. The next host is the answer.
+          export GIT_TERMINAL_PROMPT=0
           echo "GITHUB_WORKFLOW_REF=${GITHUB_WORKFLOW_REF:-<unset>}"
           # `:-` on the FIRST expansion. GITHUB_WORKFLOW_REF is unset on this Hanzo Git
           # (proven: the step printed `GITHUB_WORKFLOW_REF=<unset>`), and under
@@ -454,14 +457,21 @@ jobs:
           # bin/get_test.sh lifts this function out of this file and runs it.
           # get BEGIN
           get() {
-            local url=$1 want=$2 a=()
-            case "$url" in https://git.hanzo.ai/*) a=(${hdr[@]+"${hdr[@]}"}) ;; esac
+            local url=$1 want=$2 a=() cap=()
+            # A wedged git.hanzo.ai must not hold the job. Fifteen seconds with
+            # no bytes, and twenty seconds altogether, then the next host.
+            local slow=(-c http.lowSpeedLimit=1000 -c http.lowSpeedTime=15)
+            case "$url" in https://git.hanzo.ai/*)
+              a=(${hdr[@]+"${hdr[@]}"})
+              cap=(timeout 20)
+              ;;
+            esac
             if [[ $want =~ ^[0-9a-f]{40}$ ]]; then
               git init -q "$RUNNER_TEMP/ci" \
-                && git -C "$RUNNER_TEMP/ci" ${a[@]+"${a[@]}"} fetch -q --depth 1 "$url" "$want" \
+                && ${cap[@]+"${cap[@]}"} git -C "$RUNNER_TEMP/ci" "${slow[@]}" ${a[@]+"${a[@]}"} fetch -q --depth 1 "$url" "$want" \
                 && git -C "$RUNNER_TEMP/ci" checkout -q FETCH_HEAD
             else
-              git ${a[@]+"${a[@]}"} clone -q --depth 1 --branch "$want" "$url" "$RUNNER_TEMP/ci"
+              ${cap[@]+"${cap[@]}"} git "${slow[@]}" ${a[@]+"${a[@]}"} clone -q --depth 1 --branch "$want" "$url" "$RUNNER_TEMP/ci"
             fi
           }
           # get END
@@ -3527,6 +3537,100 @@ jobs:
       HANZO_CI_TRUSTED: ${{ !(startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) }}
     steps: *steps
 
+  # Reads the diff while the tests run. Its own steps, not `*steps`: those build
+  # and publish, and this job must not. Publishing needs it, so a refusal leaves
+  # no image. The tests do not need it, so a slow read does not hold the gate.
+  # A share of the gate (`gates`) and a fork publish nothing, so neither is read.
+  review:
+    if: inputs.gates == '' && !(startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository)
+    timeout-minutes: 15
+    runs-on: ${{ (startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) && 'ephemeral-linux-amd64' || 'linux-amd64' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Review the change
+        env:
+          JOB_TOKEN: ${{ github.token }}
+          JOB_SHA: ${{ github.job_workflow_sha }}
+          REVIEW_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          REVIEW_HEAD: ${{ github.sha }}
+          KMS_CLIENT_ID: ${{ secrets.KMS_CLIENT_ID }}
+          KMS_CLIENT_SECRET: ${{ secrets.KMS_CLIENT_SECRET }}
+          KMS_ENDPOINT: ${{ vars.KMS_ENDPOINT || 'https://api.hanzo.ai' }}
+          KMS_SECRET_ENV: ${{ vars.KMS_SECRET_ENV || 'prod' }}
+          REVIEW_CLIENT: ${{ vars.REVIEW_CLIENT || 'hanzo-review' }}
+          IAM_ENDPOINT: ${{ vars.IAM_ENDPOINT || 'https://iam.hanzo.ai' }}
+        run: |
+          set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0
+          raw="${GITHUB_WORKFLOW_REF:-}"
+          ref="${raw##*@}"; ref="${ref#refs/heads/}"; ref="${ref#refs/tags/}"; ref="${ref:-v1}"
+          wf="${raw%@*}"; wf="${wf#*/}"; wf="${wf#*/}"
+          pin=
+          if [ -n "$wf" ] && [ -f "${GITHUB_WORKSPACE:-.}/$wf" ]; then
+            pin=$(sed -n 's#.*hanzoai/ci/\.[a-z]*/workflows/build\.yml@\([A-Za-z0-9._/-]\{1,\}\).*#\1#p' \
+                  "${GITHUB_WORKSPACE:-.}/$wf" | head -1)
+          fi
+          if [ -z "$pin" ]; then
+            pins=$(cat "${GITHUB_WORKSPACE:-.}"/.hanzo/workflows/*.y*ml "${GITHUB_WORKSPACE:-.}"/.github/workflows/*.y*ml 2>/dev/null \
+                   | sed -n 's#.*hanzoai/ci/\.[a-z]*/workflows/build\.yml@\([A-Za-z0-9._/-]\{1,\}\).*#\1#p' | sort -u || true)
+            if [ "$(printf '%s\n' "$pins" | grep -c . || true)" = 1 ]; then pin=$pins; fi
+          fi
+          cands=()
+          [ -n "$pin" ] && cands+=("$pin")
+          [ -n "${JOB_SHA:-}" ] && cands+=("$JOB_SHA")
+          cands+=("$ref")
+          hdr=()
+          if [ -n "${JOB_TOKEN:-}" ]; then
+            b64=$(printf 'x-access-token:%s' "$JOB_TOKEN" | base64 -w0)
+            echo "::add-mask::$b64"
+            hdr=(-c "http.extraheader=Authorization: Basic $b64")
+          fi
+          dest="${RUNNER_TEMP}/hanzo-review"
+          slow=(-c http.lowSpeedLimit=1000 -c http.lowSpeedTime=15)
+          got=
+          for want in "${cands[@]}"; do
+            for url in https://git.hanzo.ai/hanzoai/ci https://github.com/hanzoai/ci; do
+              rm -rf "$dest"
+              echo "::group::review ${url}@${want}"
+              a=(); cap=()
+              case "$url" in https://git.hanzo.ai/*) a=(${hdr[@]+"${hdr[@]}"}); cap=(timeout 20);; esac
+              ok=
+              if [[ $want =~ ^[0-9a-f]{40}$ ]]; then
+                if git init -q "$dest" \
+                  && ${cap[@]+"${cap[@]}"} git -C "$dest" "${slow[@]}" ${a[@]+"${a[@]}"} fetch -q --depth 1 "$url" "$want" \
+                  && git -C "$dest" checkout -q FETCH_HEAD; then
+                  ok=1
+                fi
+              elif ${cap[@]+"${cap[@]}"} git "${slow[@]}" ${a[@]+"${a[@]}"} clone -q --depth 1 --branch "$want" "$url" "$dest"; then
+                ok=1
+              fi
+              if [ -n "$ok" ] && [ -f "$dest/.hanzo/review/gate.sh" ]; then
+                echo "cloned ${url}@${want}"; echo "::endgroup::"; got=1; break
+              fi
+              echo "failed ${url}@${want}"; echo "::endgroup::"
+            done
+            [ -n "$got" ] && break
+          done
+          if [ -z "$got" ]; then
+            echo "::warning::review: hanzoai/ci reviewer is not available — it did not run, so it withholds no verdict"
+            exit 0
+          fi
+          base="${REVIEW_BASE:-}"
+          head="${REVIEW_HEAD:-}"
+          case "$base" in
+            ""|0000000*) ;;
+            *)
+              i=0
+              while [ "$i" -lt 6 ] && ! git merge-base --is-ancestor "$base" "$head" 2>/dev/null; do
+                i=$((i + 1))
+                git fetch --deepen=64 || break
+              done
+              ;;
+          esac
+          bash "$dest/.hanzo/review/gate.sh" "$base" "$head"
+
   cicd:
     # Exactly one of the two gating jobs runs; the other is skipped by its `if`,
     # so publishing needs whichever ran to have succeeded. `always()` lets the
@@ -3535,13 +3639,17 @@ jobs:
     # function: Hanzo Git evaluates a job's `if` with no job in scope, and
     # `cancelled()` (like `success()` and `failure()` of a step) dereferences it.
     #
+    # Review runs beside those tests. Publishing needs it too: a refusal is not
+    # an image. A skipped review is not a success, and the only runs that skip
+    # it are the ones that already publish nothing (a fork, a share of the gate).
+    #
     # A fork publishes nothing, so this job does not run for one: no build door,
     # no registry, no credential. Its `runs-on` still names an ephemeral label for
     # a fork, for the reason `test-advisory` gives.
-    needs: [test, test-amd64]
+    needs: [test, test-amd64, review]
     # A call that names a share of the gate (`gates`) only gates: what it would
     # publish is the whole repository's, and that is the one call gating on all of it.
-    if: always() && (needs.test.result == 'success' || needs.test-amd64.result == 'success') && inputs.gates == '' && !(startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository)
+    if: always() && (needs.test.result == 'success' || needs.test-amd64.result == 'success') && needs.review.result == 'success' && inputs.gates == '' && !(startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository)
     # One publish per ref runs and at most one waits. A push during a publish
     # lets the running one finish; the new publish waits, and a later push
     # replaces it while it waits. A busy branch therefore ships its newest gated

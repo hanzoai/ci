@@ -268,8 +268,11 @@ test:
       # jobs: a verdict before the build steps adjudicates nothing if the build
       # job could run without the tests. Exactly one of `test` and `test-amd64`
       # runs, so the publish job needs both and requires the one that ran to
-      # have succeeded; the advisory leg is needed by nothing.
-      grep -q '^    needs: \[test, test-amd64\]$' "$f" \
+      # have succeeded; the advisory leg is needed by nothing. Review runs
+      # beside the tests and publishing needs that too, so a refused diff
+      # leaves no image.
+      grep -q '^    needs: \[test, test-amd64, review\]$' "$f" \
+        && grep -qF "needs.review.result == 'success'" "$f" \
         && grep -qF "if: always() && (needs.test.result == 'success' || needs.test-amd64.result == 'success')" "$f" \
         && grep -qF "HANZO_CI_TESTED: \${{ needs.test.result == 'success' && 'success' || needs.test-amd64.result }}" "$f" || {
         echo "::error::the publish job does not need the gating test jobs, or does not carry their answer to the verdict"; exit 1; }

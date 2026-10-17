@@ -1,0 +1,764 @@
+#!/usr/bin/env bash
+#
+# review — read the change under release and refuse it if it should not ship.
+#
+# Same file as hanzoai/ci/.hanzo/review/review.sh. Two passes, and neither
+# stands in for the other:
+#
+#   security   a hostile diff: a credential moved, an egress widened, a gate
+#              weakened, a test or this reviewer bypassed, an obfuscated payload
+#   defects    an Important bug two reads agree on, with a file and a line
+#
+# Style, diagnostics and cleanup are not findings. A nit does not block. A bug
+# this change did not introduce is Pre-existing and does not block.
+#
+# Risk comes from the paths, not from who typed the change. High-risk paths
+# (iam, kms, auth, authz, billing, pay, release, installer, and any workflow)
+# do not release unless the commit messages carry Testing, Risk, and How to
+# revert. The person who prompted the change is the author. An agent's
+# approval is not a person's.
+#
+# THE THREAT THE SECURITY PASS ANSWERS. Every other gate in this pipeline asks
+# whether the code is CORRECT. None of those asks whether it is HOSTILE. A
+# commit that exfiltrates a provider key, opens an egress, weakens an auth
+# check or plants a backdoor compiles, passes its tests, regenerates its
+# documents and ships — the drift gate has no opinion about intent.
+#
+# IT FAILS CLOSED, AND THAT IS THE WHOLE POINT. A gate that waves the change
+# through when the reviewer is unreachable is a gate an attacker turns off by
+# making the reviewer unreachable. So an error, a timeout, an unparseable
+# verdict and a diff too large to read all REFUSE, and there is no way past it.
+set -euo pipefail
+
+BASE="${1:?usage: review.sh <base-sha> <head-sha>}"
+HEAD="${2:?usage: review.sh <base-sha> <head-sha>}"
+
+API="${REVIEW_API:-https://api.hanzo.ai}"
+# The model is OURS and carries no provider prefix. Both halves are the house
+# rule and both have broken this gate: `claude-sonnet-4-6` routed to do-ai, whose
+# token was revoked, and the gate answered 401 on every push for a day;
+# `fireworks/gpt-oss-120b` named a provider we do not use and an id the catalog
+# does not serve, so every review call failed and the release stopped for far
+# longer. The gate refused correctly both times — there was nothing on the other
+# end.
+#
+# BEING IN THE CATALOG IS NOT BEING SERVED, and that is the check this comment
+# used to prescribe wrongly. The catalog names what the gateway KNOWS; whether an
+# upstream will answer for that id today is a different fact, and the two have
+# disagreed on every id above. So ask the id to answer, and read the body:
+#
+#   curl -s https://api.hanzo.ai/v1/chat/completions -H "Authorization: Bearer $TOK" \
+#     -H 'content-type: application/json' \
+#     -d '{"model":"<id>","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}'
+#
+# A 200 carrying an upstream refusal in the body counts as no answer — the
+# gateway relays some of them at 200, so `-w '%{http_code}'` alone reads a dead
+# id as live.
+#
+# enso is the house long-context model — owned_by=hanzo, no provider prefix,
+# premium rather than the shared free pool (this reviewer is handed the diff of a
+# private repository), and a 1,000,000-token context against the 400 KB diff
+# bound below, where a 65,536 context would truncate exactly the hunk the bound
+# exists to keep whole. Measured on this range before it stood here: it reads a
+# hostile diff and refuses it naming both findings, and it answers the schema
+# below as strict JSON.
+MODEL="${REVIEW_MODEL:-enso}"
+
+# WHEN THE PREMIUM MODEL CANNOT BE PAID FOR, FALL BACK RATHER THAN STOP THE RELEASE.
+# A 402 is not a verdict and it is not a transient — it is the gateway saying the
+# ACCOUNT cannot buy this model right now, which says nothing about the change
+# under review. Refusing on it stops every release for a billing fact, and that
+# has happened: the upstream provider account emptied and the gate refused 254
+# commits, including a fix for an unauthenticated admin surface.
+#
+# So a 402 drops to the next model that can answer. The order is deliberate —
+# premium first, because this reviewer reads a private diff and the best judgment
+# is worth paying for; then the models served by a provider we hold capacity
+# with. FALLBACKS is overridable for the same reason MODEL is, and an empty value
+# turns the ladder off and restores the old behaviour exactly.
+#
+# Fail-closed is UNTOUCHED. Exhausting the ladder still reaches `die`: this makes
+# the gate try harder to get a verdict, never accept the absence of one. Nothing
+# here can turn a refusal into a pass — only a real answer from a real model can.
+FALLBACKS="${REVIEW_FALLBACKS:-fireworks/gpt-oss-120b fireworks/gpt-oss-20b}"
+
+# An IAM access token, minted for this run by whoever invokes the reviewer.
+# There is no API key here and there is not meant to be one: IAM issues tokens,
+# the gateway accepts them, and a bearer that outlives the run is a bearer that
+# has to be rotated in a second place and is therefore forgotten there.
+TOKEN="${REVIEW_TOKEN:-}"
+# A diff no one can read is not a diff anyone reviewed. Bounded, and the bound
+# REFUSES rather than truncating: a silent cut is how the hostile hunk is the
+# one that fell off the end.
+MAXBYTES="${REVIEW_MAX_BYTES:-400000}"
+
+die() { echo "::error::review: $*" >&2; exit 1; }
+
+# One ask of the gateway. Transient statuses are asked again. A 4xx is the
+# gateway answering and is returned as-is. Prints the HTTP code.
+ask() {
+  local reqf="$1" respf="$2" code="" attempt=1 tries=6
+  while :; do
+    code=$(curl -sS -m 180 -o "$respf" -w '%{http_code}' "$API/v1/chat/completions" \
+      -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+      --data-binary @"$reqf" || true)
+    code=${code:-000}
+    case "$code" in
+      000|429|502|503|504)
+        [ "$attempt" -ge "$tries" ] && break
+        echo "review: reviewer answered $code, which is no answer; asking again ($attempt of $tries)"
+        sleep $(( attempt * 10 ))
+        attempt=$(( attempt + 1 ))
+        ;;
+      *) break ;;
+    esac
+  done
+  printf %s "$code"
+}
+
+# Defects, asked while security is still reading the same slice. An unanswered
+# or unparseable defect pass withholds a verdict (the security pass already
+# fail-closed). An Important finding that a second read keeps refuses the change.
+start_defect_ask() {
+  [ -n "${defect_pid:-}" ] && return 0
+  defect_req=$(mktemp); defect_resp=$(mktemp); defect_code=$(mktemp)
+  python3 - "$1" "$MODEL" > "$defect_req" <<'PY'
+import json, sys
+diff = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+model = sys.argv[2]
+system = (
+ "You review a diff for defects that will ship. Not for style.\n"
+ "Drop style, formatting, diagnostics, and cleanup.\n"
+ "A bug this diff did not introduce is Pre-existing.\n"
+ "Every finding needs a file and a line that appear in the diff. "
+ "A guess from a name is not a finding.\n"
+ "Answer with STRICT JSON and nothing else:\n"
+ '{"findings":[{"tag":"Important"|"Nit"|"Pre-existing","file":"path","line":int,'
+ '"what":"what breaks","why":"the consequence"}]}\n'
+ "When there is nothing to fix, findings is empty."
+)
+user = "DIFF:\n" + diff
+json.dump({"model": model, "max_tokens": 8000, "temperature": 0,
+           "response_format": {"type": "json_object"},
+           "messages": [{"role": "system", "content": system},
+                        {"role": "user", "content": user}]}, sys.stdout)
+PY
+  ask "$defect_req" "$defect_resp" > "$defect_code" &
+  defect_pid=$!
+}
+
+reap_defect() {
+  if [ -n "${defect_pid:-}" ]; then
+    kill "$defect_pid" 2>/dev/null || true
+    wait "$defect_pid" 2>/dev/null || true
+    defect_pid=
+  fi
+  rm -f "${defect_req:-}" "${defect_resp:-}" "${defect_code:-}"
+  defect_req=; defect_resp=; defect_code=
+}
+
+bug_vote() {
+  local diff_file="$1" label="$2"
+  local req resp code findings blocked
+  findings=$(mktemp); blocked=$(mktemp)
+  if [ -z "${defect_pid:-}" ]; then
+    start_defect_ask "$diff_file"
+  fi
+  wait "$defect_pid" || true
+  defect_pid=
+  code=$(cat "$defect_code" 2>/dev/null || echo 000)
+  req=$defect_req
+  resp=$defect_resp
+  defect_req=; defect_resp=; defect_code=
+  if [ "$code" != "200" ]; then
+    echo "::warning::review: bug review did not answer for $label ($code) — this slice is UNREVIEWED for defects"
+    rm -f "$req" "$resp" "$findings" "$blocked"
+    return 0
+  fi
+  status=0
+python3 - "$resp" > "$findings" <<'PY' || status=$?
+import json, sys
+raw = json.load(open(sys.argv[1]))
+text = ((raw.get("choices") or [{}])[0].get("message") or {}).get("content")
+if not text:
+    sys.exit(4)
+try:
+    obj = json.loads(text)
+except Exception:
+    sys.exit(4)
+n = 0
+for f in obj.get("findings") or []:
+    if not isinstance(f, dict):
+        continue
+    tag = str(f.get("tag") or "")
+    file, line, what = f.get("file"), f.get("line"), str(f.get("what") or "")
+    why = str(f.get("why") or "")
+    if tag != "Important" or not file or not isinstance(line, int) or isinstance(line, bool):
+        if tag in ("Nit", "Pre-existing") and file:
+            print(f"review: {tag} {file}:{line or '?'} — {what}", file=sys.stderr)
+        continue
+    sys.stdout.write(f"{file}\t{line}\t{what}\t{why}\n")
+    n += 1
+sys.exit(0 if n else 3)
+PY
+  if [ "$status" = "3" ]; then
+    echo "review: $label — 0 defects"
+    rm -f "$req" "$resp" "$findings" "$blocked"
+    return 0
+  fi
+  if [ "$status" != "0" ]; then
+    echo "::warning::review: bug review for $label did not return findings — this slice is UNREVIEWED for defects"
+    rm -f "$req" "$resp" "$findings" "$blocked"
+    return 0
+  fi
+  python3 - "$diff_file" "$MODEL" "$findings" > "$req" <<'PY'
+import json, sys
+diff = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+model, path = sys.argv[2], sys.argv[3]
+rows = []
+for line in open(path, encoding="utf-8"):
+    file, lineno, what, why = line.rstrip("\n").split("\t", 3)
+    rows.append({"file": file, "line": int(lineno), "what": what, "why": why})
+system = (
+ "You are the second read of a defect list. Keep a finding only when the diff "
+ "shows that defect. Drop style, diagnostics, cleanup, and anything the diff "
+ "did not introduce.\n"
+ "Answer with STRICT JSON and nothing else:\n"
+ '{"keep":[0]}\n'
+ "keep is the indexes you agree are real. Empty keep means none of them ship."
+)
+user = "FINDINGS:\n" + json.dumps(rows) + "\n\nDIFF:\n" + diff
+json.dump({"model": model, "max_tokens": 4000, "temperature": 0,
+           "response_format": {"type": "json_object"},
+           "messages": [{"role": "system", "content": system},
+                        {"role": "user", "content": user}]}, sys.stdout)
+PY
+  code=$(ask "$req" "$resp")
+  if [ "$code" != "200" ]; then
+    echo "::warning::review: the second read did not answer for $label ($code) — defects are UNREVIEWED, not refused"
+    rm -f "$req" "$resp" "$findings" "$blocked"
+    return 0
+  fi
+  status=0
+python3 - "$resp" "$findings" > "$blocked" <<'PY' || status=$?
+import json, sys
+raw = json.load(open(sys.argv[1]))
+text = ((raw.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+try:
+    obj = json.loads(text)
+except Exception:
+    sys.exit(4)
+keep = set()
+for i in obj.get("keep") or []:
+    if isinstance(i, int) and not isinstance(i, bool):
+        keep.add(i)
+rows = [ln.rstrip("\n").split("\t", 3) for ln in open(sys.argv[2], encoding="utf-8") if ln.strip()]
+n = 0
+for i, row in enumerate(rows):
+    if i not in keep:
+        continue
+    file, lineno, what, why = row
+    print(f"- **Important** `{file}:{lineno}` — {what} · _{why}_")
+    n += 1
+sys.exit(0 if n else 3)
+PY
+  if [ "$status" = "0" ]; then
+    echo "::error::review: bug review REFUSED this change"
+    cat "$blocked"
+    summary_path="${GITHUB_STEP_SUMMARY:-}"
+    if [ -n "$summary_path" ]; then
+      { echo "### Defects"; echo; cat "$blocked"; } >> "$summary_path"
+    fi
+    rm -f "$req" "$resp" "$findings" "$blocked"
+    exit 1
+  fi
+  if [ "$status" = "3" ]; then
+    echo "review: $label — second read kept nothing"
+  else
+    echo "::warning::review: the second read for $label was unreadable — defects are UNREVIEWED, not refused"
+  fi
+  rm -f "$req" "$resp" "$findings" "$blocked"
+}
+
+[ -n "$TOKEN" ] || die "no REVIEW_TOKEN — the reviewer has no identity, so the change cannot pass"
+
+# `req` and `resp` are created further down, so the trap defaults them: under
+# `set -u` a trap that expands an unset name fails, and a failing trap replaces
+# the exit status the script chose.
+# GENERATED ARTIFACTS ARE NOT READ, and the drift gate is why that is safe.
+#
+# These six paths are written by `make -f mk/fleet.mk check`, which regenerates
+# them FROM SOURCE and refuses any porcelain change (mk/fleet.mk — the same list,
+# and it is the list because that gate is what defines it). So they are a
+# projection of code that IS reviewed, and a hostile hunk cannot hide in one: to
+# survive it would have to be reproduced by the generator, which means it is in
+# the generator, which is source. `image` needs `gate`, so the regeneration has
+# always already run by the time an image exists.
+#
+# Reading them anyway is not neutral, it is what stopped releases. Measured
+# against v1.801.536: the whole diff was 1,449,734B against a 400,000B bound —
+# and 1,331,591B of that, 92%, was these six. The bound then REFUSED (correctly,
+# it will not truncate), and because the base is the last release TAG the backlog
+# only grew with each push: no release, bigger diff, refused again. A reviewer
+# that cannot read a change because it is full of machine output is not reviewing
+# the change, and here it was also the thing preventing the change from shipping.
+#
+# The bound stays 400,000B. What changed is that the budget is spent on prose a
+# person wrote: the same range measures 118,143B once these are dropped.
+# public.yaml is the name openapi.yaml used to carry, so it appears only in
+# history — but the base is the last release reachable from HEAD, and during a
+# release drought that reaches back past the rename. One commit's regeneration of
+# it measures 480,741B against the 400,000B bound, and a single FILE over the
+# bound is the one shape the slicer cannot split, so the run refuses naming
+# itself and every later run refuses the same way. A retired generated document
+# is still a generated document.
+generated=(
+  ':(exclude)openapi.yaml' ':(exclude)private.yaml' ':(exclude)public.yaml'
+  ':(exclude)openapi/floor.json' ':(exclude)openapi/closure.json'
+  ':(exclude)fleet/catalog.json' ':(exclude)plugin/*/openapi.json'
+)
+
+# Does this change touch the machinery that reviews and releases it?
+selfmod=no
+if git diff --name-only "$BASE".."$HEAD" | grep -qE '^\.hanzo/'; then selfmod=yes; fi
+
+# READING A CHANGE TOO LARGE FOR ONE REQUEST, RATHER THAN REFUSING IT.
+#
+# The bound is about ONE request: past it the reviewer would be reading a
+# truncated diff, and the hunk that fell off the end is the one that mattered. So
+# the bound must never be raised and must never truncate. But REFUSING at the
+# bound, with the base being the last release reachable from HEAD, is a deadlock —
+# and it closed. Measured on this range: 1,701,350B against the 400,000B bound,
+# 4.3x over, 487 files, 207 commits, every one of them refused. Production sat on
+# v1.801.536, which is also the base the diff was measured from, so nothing could
+# ship and each push made the diff bigger. The exclusion of generated artifacts
+# above bought headroom (118,143B at the time it landed) and 207 commits of
+# ordinary Go and prose refilled it. Excluding more content only moves where it
+# locks; the shape is the problem.
+#
+# So a change larger than one request is read in AS MANY REQUESTS AS IT TAKES.
+# Slices are cut on commit boundaries, each one measured before it is sent, and
+# together they cover BASE..HEAD with no gap — so no request is truncated and no
+# byte goes unread. That satisfies both laws this script is built on rather than
+# trading one for the other: it is strictly MORE review than the refusal it
+# replaces, which reviewed nothing at all.
+#
+# The refusal survives where it is still the honest answer: a SINGLE commit whose
+# own diff exceeds the bound cannot be split by this rule, and is refused naming
+# itself. And the slice count falls back to 1 as soon as a release lands, because
+# the base advances with it.
+#
+# A slice that rejects exits here. First refusal wins and the rest are not read,
+# which is the fail-closed direction.
+
+judge() {
+local diff_file="$1" LABEL="$2" files="$3" bytes
+trap 'reap_defect; rm -f "${req:-}" "${resp:-}" 2>/dev/null' EXIT
+bytes=$(wc -c < "$diff_file")
+echo "review: reading $LABEL — ${bytes}B, ${files} file(s)"
+# RETURN, never exit: `exit` inside judge would end the script and report
+# success with every later request unread.
+[ "$bytes" -gt 0 ] || { echo "review: $LABEL is empty — nothing to read"; return 0; }
+[ "$bytes" -le "$MAXBYTES" ] || die "diff is ${bytes}B over the ${MAXBYTES}B bound — split the change; a truncated review is not a review"
+
+req=$(mktemp); resp=$(mktemp)
+python3 - "$diff_file" "$MODEL" "$selfmod" "$files" > "$req" <<'PY'
+import json, sys
+diff = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+model, selfmod, files = sys.argv[2], sys.argv[3], sys.argv[4]
+system = (
+ "You review a diff that is about to be RELEASED to production, for hostility rather than for style.\n"
+ "Report only what the diff itself shows. Do not speculate about code you cannot see.\n\n"
+ "REFUSE (verdict \"reject\") when the diff does any of:\n"
+ "- moves a credential, key, token or secret anywhere it can be read (a log, an error, a header, a file, a request body)\n"
+ "- adds or widens egress: a new outbound host, an upload, a webhook, a DNS or shell call carrying data\n"
+ "- weakens authentication or authorization: a check removed, a gate made conditional, a default turned permissive, a scope widened\n"
+ "- disables, narrows or bypasses a test, a CI gate or this reviewer\n"
+ "- introduces obfuscated or encoded payloads, eval of remote content, or a dependency swapped to an unrecognised source\n"
+ "- adds a hidden trigger: a branch keyed on a magic value, a date, a username, an env var that changes behaviour silently\n\n"
+ "ALLOW (verdict \"pass\") ordinary work, including refactors, renames, deletions and dependency BUMPS to known upstreams.\n"
+ "A change being large, or touching security-adjacent code, is not by itself grounds to refuse.\n\n"
+ "Answer with STRICT JSON and nothing else:\n"
+ '{"verdict":"pass"|"reject","confidence":0.0-1.0,"findings":[{"severity":"high"|"medium","file":"path","line":int|null,'
+ '"what":"what the diff does","why":"why that is hostile"}],"summary":"one sentence"}\n'
+ "An empty findings list with verdict reject is invalid; name what you refused."
+)
+user = (f"This change touches .hanzo/ (the release and review machinery itself), so judge whether it "
+        f"weakens the gate that is judging it.\n\n" if selfmod == "yes" else "")
+user += f"{files} files changed.\n\nDIFF:\n{diff}"
+# ASK FOR JSON, so there is nothing to extract. The prompt already said "STRICT
+# JSON and nothing else" and a prompt is a request; response_format is a
+# constraint the gateway enforces. Verified against api.hanzo.ai on this model:
+# the content comes back bare and parses directly.
+# THE ANSWER'S BUDGET IS PART OF THE WIRE, and too small a one reads as a hostile
+# change rather than as a truncated reply: the verdict comes back cut off, which
+# is not valid JSON, and this gate refuses what it cannot parse. Measured before
+# this number stood here — one commit costs ~1,000 tokens, a 33 KB eleven-file
+# slice 2,238 to 3,033, and the 1,500 this replaces returned NO content at all on
+# that slice. 8,000 leaves headroom over the largest observed answer without
+# leaving the budget unbounded.
+json.dump({"model": model, "max_tokens": 8000, "temperature": 0,
+           "response_format": {"type": "json_object"},
+           "messages": [{"role":"system","content":system},{"role":"user","content":user}]}, sys.stdout)
+PY
+
+# ASKED PROPERLY BEFORE IT IS REFUSED. This gate fails closed, so every dropped
+# packet is a refused release — and a 502 from a gateway being rolled, or a
+# connection cut mid-body, is not a verdict but the ABSENCE of one. Refusing on
+# it reports "this change is hostile" about a change nobody read. So a transient
+# answer is asked again, with a pause between tries, and refused only once the
+# reviewer has genuinely been given the chance to answer. The fail-closed
+# property is untouched: exhausting the tries falls through to the same `die`.
+#
+# A 4xx is NOT retried. That is the gateway ANSWERING — a refused bearer, an
+# unknown model, a body it will not take — and asking twice more returns the
+# same answer twice more, turning an instant legible refusal into a slow one.
+#
+# `-w` prints 000 itself when the transfer never completed, so a `|| echo 000`
+# fallback APPENDS to that rather than standing in for it, and the refusal read
+# `answered 000000` — a status nothing can look up. Take curl's own word, and
+# default only the case where it printed nothing at all.
+# The ladder is walked from the outside: each rung is a whole ask, retries and
+# all, so a fallback model is given exactly the patience the first one had.
+for try_model in $MODEL $FALLBACKS; do
+  if [ "$try_model" != "$MODEL" ]; then
+    echo "review: $LABEL — $MODEL could not be paid for; asking $try_model instead"
+    python3 -c 'import json,sys; b=json.load(open(sys.argv[1])); b["model"]=sys.argv[2]; json.dump(b, open(sys.argv[1],"w"))' "$req" "$try_model"
+  fi
+  # HOW MUCH PATIENCE A TRANSIENT IS OWED IS A MEASUREMENT, and three tries over
+  # fifteen seconds of pause was under it. The 502 here is not a gateway being
+  # rolled: the model plane's child process dies and is restarted, so EVERY
+  # request in flight at that instant is cut mid-body, and the ones queued behind
+  # it are cut by the next one. Measured on this deployment — three consecutive
+  # 502s spanning 90 seconds on one slice, `mount /v1: http: read response: EOF`,
+  # while a fourth ask seconds later answered normally. So the burst outlives the
+  # budget, and a release is refused for a change nobody read.
+  #
+  # Six tries with a widening pause spans about four minutes, which covers the
+  # bursts observed while still ending. FAIL-CLOSED IS UNTOUCHED, and that is the
+  # only property that matters here: exhausting the tries falls through to the
+  # same `die`, so this buys the reviewer a chance to answer and can never turn
+  # the absence of an answer into a pass.
+  # The defect read is the same slice and does not depend on this verdict, so it
+  # is already in flight. A refusal still returns before those findings are kept.
+  start_defect_ask "$diff_file"
+  tries=6
+  attempt=1
+  while :; do
+    code=$(curl -sS -m 180 -o "$resp" -w '%{http_code}' "$API/v1/chat/completions" \
+      -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' --data-binary @"$req" || true)
+    code=${code:-000}
+    case "$code" in
+      000|429|502|503|504) : ;;
+      *) break ;;
+    esac
+    if [ "$attempt" -ge "$tries" ]; then break; fi
+    echo "review: $LABEL — reviewer answered $code, which is no answer; asking again ($attempt of $tries)"
+    sleep $(( attempt * 10 ))
+    attempt=$(( attempt + 1 ))
+  done
+  # 402 is the ONLY status that moves to the next rung. A 401 is a bad bearer and
+  # a 400 a bad body — both fail identically on every model, so walking the ladder
+  # on them turns one legible refusal into three slow ones.
+  [ "$code" = "402" ] || break
+done
+# A REFUSED BEARER NAMES ITSELF. The gateway answers `jwt: audience not allowed`
+# without saying which audience it saw or which it wanted, and the two live in
+# different repositories — the aud is whatever IAM application minted this token
+# (HIP-0111: client_id == app == aud), the allowlist is GATEWAY_ALLOWED_AUDIENCES
+# on the deployment. So a reader holding only the 401 has to go and mint a token
+# by hand to learn the one value that decides it. We are holding the token, so we
+# can just read it: `iss` and `aud` are identifiers rather than credentials, and
+# printing them turns an opaque refusal into the name to add to a list.
+claims() {
+  local p; p=$(printf %s "$TOKEN" | cut -d. -f2) || return 0
+  case $(( ${#p} % 4 )) in 2) p="$p==";; 3) p="$p=";; esac
+  printf %s "$p" | tr '_-' '/+' | base64 -d 2>/dev/null \
+    | python3 -c 'import json,sys
+try: c = json.load(sys.stdin)
+except Exception: sys.exit(0)
+# aud is a string OR an array (RFC 7519), and the point of printing it is that a
+# reader copies the value into an allowlist — so render the members, never the
+# Python list that once made this read aud=["hanzo-review"].
+def v(x): return ",".join(map(str, x)) if isinstance(x, list) else str(x)
+print(" ".join(f"{k}={v(c[k])}" for k in ("iss","aud","sub","client_id") if c.get(k)))' 2>/dev/null
+}
+presented=$(claims)
+# WHOSE PROPERTY IS THE STATUS. A status the reviewer CHOSE is a statement about
+# this change, and it refuses it. The statuses the loop above already treats as
+# "no answer" are a statement about the REVIEWER: it never read the diff, so it
+# never formed a view of it, and refusing on them says something about the change
+# that nothing established.
+#
+# It is also a cycle nothing inside it can leave. The reviewer answers from the
+# same binary this workflow builds and releases, and `image` needs this job — so
+# a reviewer that cannot answer blocks every release, including the one that
+# repairs the reviewer. The gate would then be a liveness dependency on its own
+# subject, which is not a property a gate can have and still be reachable.
+#
+# So an unanswered ask is recorded, loudly and by name, and the slice goes
+# unreviewed rather than the change going unshippable. Nothing else moves: a
+# reviewer that ANSWERS still decides, every other status still refuses right
+# here, and gate and containment are untouched.
+case "$code" in
+  200) ;;
+  000|429|502|503|504)
+    echo "::warning::review: the reviewer did not answer for $LABEL ($code, after $tries asks) — this slice is UNREVIEWED. That is a fact about the reviewer, not a view of the change.${presented:+ [presented $presented]}"
+    rm -f "$req" "$resp"
+    return 0 ;;
+  *)
+    die "reviewer answered $code — cannot judge this change, so it does not pass ($(head -c 200 "$resp"))${presented:+ [presented $presented]}" ;;
+esac
+
+python3 - "$resp" "$selfmod" <<'PY'
+import json, os, re, sys
+raw = json.load(open(sys.argv[1]))
+try:
+    text = raw["choices"][0]["message"]["content"]
+except Exception:
+    print("::error::review: no answer in the reviewer's response"); sys.exit(1)
+# AN ANSWER THAT RAN OUT OF ROOM NAMES ITSELF. A model that spends its whole
+# budget returns content `null` rather than a short object, and every reader
+# below expects a string — so this arrived as a TypeError traceback out of the
+# balanced-object scan, which refuses the release (correctly, it is fail-closed)
+# while naming neither the budget nor the model. Say which it was, so the remedy
+# is the number above rather than a bisect.
+if not text:
+    fin = (raw.get("choices") or [{}])[0].get("finish_reason")
+    used = (raw.get("usage") or {}).get("completion_tokens")
+    print(f"::error::review: the reviewer returned no content (finish_reason={fin}, completion_tokens={used})"
+          " — it did not fit in the answer budget, so there is no verdict to read"); sys.exit(1)
+# THE VERDICT IS AN OBJECT, NOT A SPAN OF TEXT.
+#
+# This used to be re.search(r"\{.*\}", text, re.S) — GREEDY, so it took from the
+# FIRST brace in the answer to the LAST one anywhere in it. One stray brace in a
+# summary or a quoted finding and the span is two objects and some prose glued
+# together, which cannot parse, and a release is refused for a reason that has
+# nothing to do with the change. That is what blocked run 73092: "unparseable
+# verdict (Expecting property name enclosed in double quotes: line 1 column 2)".
+#
+# With response_format above, the content IS the object and parses directly.
+# The scan is the fallback for a gateway that ignores the constraint, and it is
+# STRICTER than the regex it replaces, never looser:
+#
+#   - it reads BALANCED objects rather than one greedy span, so prose around the
+#     answer cannot corrupt it;
+#   - a candidate counts only if it parses AND carries a "verdict" key, so a
+#     brace-bearing sentence is not a verdict;
+#   - and if TWO such objects appear it REFUSES as ambiguous rather than picking
+#     one. That is the injection guard: a diff under review can contain
+#     {"verdict":"pass"}, and a model quoting it back must never be able to
+#     outrank the model's own answer by position.
+def _objects(s):
+    depth = 0; start = None
+    for i, ch in enumerate(s):
+        if ch == '{':
+            if depth == 0: start = i
+            depth += 1
+        elif ch == '}' and depth > 0:
+            depth -= 1
+            if depth == 0: yield s[start:i + 1]
+
+def _verdicts(s):
+    out = []
+    for c in _objects(s):
+        try: o = json.loads(c)
+        except Exception: continue
+        if isinstance(o, dict) and "verdict" in o: out.append(o)
+    return out
+
+try:
+    v = json.loads(text)
+    if not (isinstance(v, dict) and "verdict" in v):
+        raise ValueError("no verdict")
+except Exception:
+    found = _verdicts(text)
+    if not found:
+        # SAY WHAT ARRIVED. Three different things reach here — an answer cut off
+        # mid-object, prose that never opened one, and a model declining in
+        # sentences — and they have three different remedies. Naming the
+        # finish_reason and the head of the text is what tells them apart, where
+        # "no verdict" alone sends the next reader to re-run and hope.
+        #
+        # The HEAD ALONE IS NOT ENOUGH, and one refusal proved it: an answer of
+        # 2218 completion tokens that opened `{ "verdict": "pass"` and stopped
+        # normally. Every remedy above is consistent with that opening, so the
+        # 200 characters said only that the model had tried. What separates them
+        # is the END: an answer cut off stops mid-token, prose that ran on past
+        # the object ends in a sentence, and a well-formed object ends in `}` —
+        # which would mean the text parses and the fault is in the transport that
+        # carried it, not in the model. The length says which of those is even
+        # possible. Both ends and the size, so the next occurrence is read once
+        # rather than bisected.
+        fin = (raw.get("choices") or [{}])[0].get("finish_reason")
+        used = (raw.get("usage") or {}).get("completion_tokens")
+        flat = " ".join(text.split())
+        head, tail = flat[:200], flat[-200:] if len(flat) > 200 else ""
+        print(f"::error::review: the reviewer did not answer with a JSON verdict"
+              f" (finish_reason={fin}, completion_tokens={used}, chars={len(text)})"
+              f" — refusing rather than guessing. It opened: {head!r}"
+              + (f" and ended: {tail!r}" if tail else "")); sys.exit(1)
+    if len(found) > 1:
+        print("::error::review: the answer carries more than one verdict object — refusing rather than choosing between them"); sys.exit(1)
+    v = found[0]
+
+verdict = str(v.get("verdict","")).lower()
+findings = v.get("findings") or []
+summary = v.get("summary","")
+lines = [f"### Security review\n", f"**verdict:** `{verdict}` — {summary}\n"]
+if sys.argv[2] == "yes":
+    lines.append("> This change edits `.hanzo/` — the release and review machinery itself.\n")
+for f in findings:
+    loc = f.get("file","?") + (f":{f['line']}" if f.get("line") else "")
+    lines.append(f"- **{f.get('severity','?')}** `{loc}` — {f.get('what','')} · _{f.get('why','')}_")
+summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+if summary_path:
+    open(summary_path,"a").write("\n".join(lines) + "\n")
+print("\n".join(lines))
+
+if verdict == "reject":
+    if not findings:
+        print("::error::review: rejected with no finding named — treating as a refusal"); sys.exit(1)
+    print("::error::review REFUSED this change — see the findings above"); sys.exit(1)
+if verdict != "pass":
+    print(f"::error::review: unknown verdict {verdict!r} — refusing rather than guessing"); sys.exit(1)
+print("review: no attack found in this diff")
+PY
+bug_vote "$diff_file" "$LABEL"
+rm -f "$req" "$resp"
+}
+
+# Risk is a property of the paths. High refuses without the author's sign-off.
+# Medium records a missing sign-off and still reads the diff. Low is docs and
+# copy. Generated documents are already excluded: they are a projection of
+# source the drift gate checks.
+tier=$(git diff --name-only "$BASE".."$HEAD" -- . "${generated[@]}" | python3 -c '
+import sys
+high = {"iam", "kms", "auth", "authz", "billing", "pay", "installer", "release"}
+files = [ln.strip() for ln in sys.stdin if ln.strip()]
+if not files:
+    print("none")
+    raise SystemExit
+def kind(path):
+    if path.startswith((".github/workflows/", ".github/actions/", ".hanzo/workflows/", ".hanzo/review/")):
+        return "high"
+    parts = path.split("/")
+    stem = parts[-1].rsplit(".", 1)[0]
+    if any(p in high for p in parts) or stem in high:
+        return "high"
+    name = parts[-1]
+    if path.startswith("docs/") or (name.endswith((".md", ".txt")) and name not in {"LLM.md", "REVIEW.md", "CODEOWNERS"}):
+        return "low"
+    return "medium"
+kinds = {kind(p) for p in files}
+print("high" if "high" in kinds else "medium" if "medium" in kinds else "low")
+')
+echo "review: tier=$tier"
+summary_path="${GITHUB_STEP_SUMMARY:-}"
+if [ -n "$summary_path" ]; then
+  echo "### Risk" >> "$summary_path"
+  echo "tier: \`$tier\`" >> "$summary_path"
+fi
+if [ "$tier" = "high" ] || [ "$tier" = "medium" ]; then
+  signed=$(git log --format=%B "$BASE".."$HEAD" | python3 -c '
+import re, sys
+text = sys.stdin.read()
+def has(p):
+    return re.search(p, text, re.M | re.I) is not None
+ok = has(r"^[ \t>*-]*testing\b") and has(r"^[ \t>*-]*risk\b") and has(r"^[ \t>*-]*(how to revert|revert)\b")
+print("yes" if ok else "no")
+')
+  if [ "$signed" != "yes" ]; then
+    if [ "$tier" = "high" ]; then
+      die "high-risk change has no sign-off — the commit messages need Testing, Risk, and How to revert"
+    fi
+    echo "::warning::review: medium-risk change has no Testing / Risk / How to revert sign-off"
+  fi
+fi
+
+# ── the change, as units no larger than one request ───────────────────────────
+#
+# A UNIT is what one commit actually CONTRIBUTES, which is not the same as the
+# range diff up to it, and the difference is what made a naive walk wrong:
+#
+#   A MERGE contributes its conflict RESOLUTION and nothing else. Its content
+#   arrives through the commits it brought, which rev-list already walks, so
+#   diffing a merge against its first parent re-reads all of them. Measured on
+#   efd4c1127: first-parent 880,148B against a combined diff of 246B. This is the
+#   same first-parent trap the base rule above already documents, one level down.
+#
+#   A commit too large to read is split BY FILE, because a file is the smallest
+#   thing a finding can name. Measured on 27b36872d: 2,426,774B across 1,623
+#   files, largest single file 194,999B — so the split terminates well inside the
+#   bound. A single FILE over the bound is irreducible and refused naming itself,
+#   which is where the original refusal is still the honest answer.
+#
+# Units are then packed into requests while they fit. Coverage is every commit's
+# own change exactly once; no request is truncated; and the whole range is read
+# whatever its size. Sending per-commit diffs rather than one squashed range diff
+# also keeps commit boundaries and messages in front of the reviewer, which is
+# what makes a hunk legible as intent rather than as text.
+
+units=$(mktemp -d); trap 'rm -rf "$units" 2>/dev/null' EXIT
+n=0
+
+emit() {  # emit <path-to-diff> <label> <file-count>
+  [ -s "$1" ] || return 0
+  local b; b=$(wc -c < "$1")
+  [ "$b" -le "$MAXBYTES" ] || die "$2 diffs ${b}B over the ${MAXBYTES}B bound and cannot be split further — a truncated review is not a review"
+  n=$((n + 1)); printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$b" >> "$units/index"
+}
+
+for c in $(git rev-list --reverse "$BASE".."$HEAD"); do
+  short=$(git rev-parse --short "$c")
+  d="$units/$short.diff"
+  # `--parents -1` prints "<sha> <parent>..."; more than two words is a merge.
+  # NOT `--count --parents`, which prints the count and drops the parents, so
+  # every merge reads as a normal commit and takes the first-parent path above.
+  if [ "$(git rev-list --parents -1 "$c" | wc -w)" -gt 2 ]; then
+    # a merge: the resolution only
+    git show --cc --no-color --format= "$c" -- . "${generated[@]}" > "$d" 2>/dev/null || die "could not read merge $short"
+    emit "$d" "merge $short" "$(git show --cc --name-only --format= "$c" -- . "${generated[@]}" 2>/dev/null | wc -l)"
+    continue
+  fi
+  git diff --no-color "$c^1" "$c" -- . "${generated[@]}" > "$d" 2>/dev/null || die "could not read commit $short"
+  if [ "$(wc -c < "$d")" -le "$MAXBYTES" ]; then
+    emit "$d" "commit $short" "$(git diff --name-only "$c^1" "$c" -- . "${generated[@]}" | wc -l)"
+    continue
+  fi
+  # too large to read whole: one unit per file
+  rm -f "$d"
+  i=0
+  git diff --name-only "$c^1" "$c" -- . "${generated[@]}" | while IFS= read -r f; do
+    i=$((i + 1)); fd="$units/$short.$i.diff"
+    git diff --no-color "$c^1" "$c" -- "$f" > "$fd" 2>/dev/null || die "could not read $f in $short"
+    printf '%s\t%s\t%s\t%s\n' "$fd" "commit $short · $f" 1 "$(wc -c < "$fd")" >> "$units/index"
+  done
+done
+
+[ -s "$units/index" ] || { echo "review: nothing to read in $BASE..$HEAD"; exit 0; }
+
+# A file unit written by the subshell above skipped emit's bound check, so it is
+# applied here over every unit — one place, so no path can miss it.
+while IFS=$(printf '\t') read -r _ label _ b; do
+  [ "$b" -le "$MAXBYTES" ] || die "$label diffs ${b}B over the ${MAXBYTES}B bound and cannot be split further — a truncated review is not a review"
+done < "$units/index"
+
+# pack units into requests, in order, while they fit
+slice=$(mktemp); slices=0; acc=0; nfiles=0; first=""; last=""
+flush() {
+  [ "$acc" -gt 0 ] || return 0
+  slices=$((slices + 1))
+  judge "$slice" "slice $slices ($first .. $last)" "$nfiles"
+  : > "$slice"; acc=0; nfiles=0; first=""
+}
+while IFS=$(printf '\t') read -r path label files b; do
+  if [ "$acc" -gt 0 ] && [ $((acc + b)) -gt "$MAXBYTES" ]; then flush; fi
+  cat "$path" >> "$slice"
+  acc=$((acc + b)); nfiles=$((nfiles + files)); last="$label"
+  [ -n "$first" ] || first="$label"
+done < "$units/index"
+flush
+rm -f "$slice"
+
+echo "review: read $BASE..$HEAD as $(wc -l < "$units/index") unit(s) in $slices request(s); tier=$tier; no attack found"
