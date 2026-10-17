@@ -83,7 +83,10 @@ test:
 kms: { path: /deploy, environment: prod }
 ```
 
-Second, a ~7-line `.hanzo/workflows/cicd.yml` that just imports this:
+Second, a short caller that just imports this. The calling job grants what
+build.yml declares at its top level (`contents: write`, `packages: write`,
+`id-token: write`): a caller that grants less fails at startup, with no job, log
+or message to read.
 
 ```yaml
 name: CI/CD
@@ -93,7 +96,11 @@ on:
   workflow_dispatch:
 jobs:
   cicd:
-    uses: hanzoai/ci/.hanzo/workflows/build.yml@v1
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    uses: hanzoai/ci/.github/workflows/build.yml@v2
     secrets: inherit
 ```
 
@@ -450,7 +457,7 @@ By default the build runs on the **Hanzo `git-runner` fleet** on git.hanzo.ai
 pass their labels:
 
 ```yaml
-    uses: hanzoai/ci/.hanzo/workflows/build.yml@v1
+    uses: hanzoai/ci/.github/workflows/build.yml@v2
     with:
       runner: '["self-hosted","my-pool","linux","amd64"]'
     secrets: inherit
@@ -474,7 +481,7 @@ the fabric's build door — `POST /v1/build` on **api.hanzo.ai**, which launches
 BuildKit Job in-cluster and pushes the image — pass `mode: delegate`:
 
 ```yaml
-    uses: hanzoai/ci/.hanzo/workflows/build.yml@v1
+    uses: hanzoai/ci/.github/workflows/build.yml@v2
     with:
       mode: delegate
     secrets: inherit

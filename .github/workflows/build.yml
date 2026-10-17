@@ -2,7 +2,8 @@
 # hanzo.yml. Runs on our own self-hosted runners — evo (x86_64), spark (arm64)
 # and dbc (macOS arm64); pulls registry + kubeconfig
 # creds from KMS via Universal Auth at run time. Public so any org can import it
-# with `uses: hanzoai/ci/.github/workflows/build.yml@v2` + `secrets: inherit`.
+# with `uses: hanzoai/ci/.github/workflows/build.yml@v2` + `secrets: inherit`, on
+# a calling job that grants the `permissions:` block below (README, Use it).
 #
 # THE DEFINITION LIVES HERE, AND ONLY HERE. There is no second address and no
 # forwarder. This path is the one BOTH planes read: github.com resolves a
@@ -22,7 +23,8 @@
 # pipeline is here, it holds steps, and no workflow has reappeared under
 # `.hanzo/workflows` to become a second address.
 #
-# The caller is ~7 lines (triggers + this `uses:`); all real config is hanzo.yml.
+# The caller is ~11 lines (triggers, that permissions block and this `uses:`);
+# all real config is hanzo.yml.
 name: Hanzo CI/CD
 
 on:
