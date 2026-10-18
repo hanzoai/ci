@@ -68,6 +68,14 @@ inputs:
     description: Parallel uploads
     required: false
     default: '24'
+  copy:
+    description: >-
+      'true' (the default): the first site uploads, and each other site copies
+      the objects it shares with the first inside the store (SITE_COPY_FROM).
+      'false': every site uploads its own bytes, all at once, so hosts whose
+      plane does not complete a copy still publish whole and in parallel.
+    required: false
+    default: 'true'
 runs:
   using: composite
   steps:
@@ -187,7 +195,10 @@ runs:
           # slug=dir[@url]: the optional url is the host that serves the prefix.
           rest="${pair#*=}"; url=""
           case "$rest" in *@*) url="${rest#*@}"; rest="${rest%%@*}" ;; esac
-          if [ "$n" -eq 0 ]; then
+          if [ '${{ inputs.copy }}' = 'false' ]; then
+            SITE_URL="$url" bash "$RUNNER_TEMP/site-ci/bin/site" "$slug" "$rest" > "$RUNNER_TEMP/site-log-$((n + 1))" 2>&1 &
+            pids+=($!); names+=("$slug")
+          elif [ "$n" -eq 0 ]; then
             first_slug="$slug"; first_dir="$rest"
             echo "::group::publish $slug"
             SITE_URL="$url" bash "$RUNNER_TEMP/site-ci/bin/site" "$slug" "$rest" || { echo "::endgroup::"; echo "::error::publish $slug failed"; exit 1; }
