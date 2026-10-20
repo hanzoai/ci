@@ -804,8 +804,7 @@ jobs:
           #     modules (luxfi/dex, luxfi/precompile from a zooai build), which the
           #     repo-scoped automatic token cannot read. Handed to buildx as the
           #     `gh_token` BuildKit secret.
-          #   KUBECONFIG  — reads the registry credential out of the cluster so
-          #     an image can also reach oci.hanzo.ai.
+          #   KUBECONFIG  — the cluster credential the deploy step applies with.
           ORG="$(yq -r '.kms.org // ""' hanzo.yml 2>/dev/null || true)"
           : "${ORG:=${KMS_ORG:-}}"
           # Systemic default: when neither hanzo.yml `kms.org` nor the KMS_ORG var
@@ -1239,61 +1238,6 @@ jobs:
             echo "::notice::GHCR login upgraded to the KMS write:packages token"
           else
             echo "::notice::KMS GHCR token login failed — keeping the earlier login"
-          fi
-
-      # oci.hanzo.ai is the host for images and charts. The credential is a
-      # direct REGISTRY_USER/PASSWORD when one is set, otherwise the in-cluster
-      # registry-credentials dockerconfig read through the KMS kubeconfig.
-      - name: Native registry credential (oci.hanzo.ai)
-        if: env.HANZO_CI_ROLE == 'publish' && (inputs.mode != 'delegate' && steps.plan.outputs.images != '0')
-        env:
-          KUBECONFIG: ${{ steps.kms.outputs.kubeconfig }}
-          # KMS first (exported to GITHUB_ENV by the step above), GitHub secret
-          # second. `env:` here cannot see GITHUB_ENV from THIS step's own env
-          # block, so the KMS values are read out of the environment in `run:`.
-          GH_REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
-          GH_REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
-        run: |
-          set -uo pipefail
-          # REGISTRY_USER/PASSWORD may already be in the environment from KMS.
-          REGISTRY_USER="${REGISTRY_USER:-${GH_REGISTRY_USER:-}}"
-          REGISTRY_PASSWORD="${REGISTRY_PASSWORD:-${GH_REGISTRY_PASSWORD:-}}"
-          # Direct credential first (repo/org secret — works on private repos,
-          # where the Free plan hides org secrets... including these; private
-          # repos set them at REPO level). KMS-kubeconfig read is the fallback.
-          if [ -n "${REGISTRY_USER:-}" ] && [ -n "${REGISTRY_PASSWORD:-}" ]; then
-            # Best-effort: an oci.hanzo.ai login FAILURE (not just a missing
-            # cred) must never fail the run — the image still pushes to GHCR, the
-            # primary. Without this guard, bash -e aborts the step and SKIPS the
-            # build entirely (a registry hiccup takes the whole lane red).
-            if echo "$REGISTRY_PASSWORD" | docker login oci.hanzo.ai -u "$REGISTRY_USER" --password-stdin; then
-              echo "MIRROR_OK=1" >> "$GITHUB_ENV"
-            else
-              echo "::notice::oci.hanzo.ai login failed — mirror skipped (GHCR-only push)"
-            fi
-            exit 0
-          fi
-          [ -z "${KUBECONFIG:-}" ] && { echo "::warning::no registry credential and no kubeconfig — image will NOT reach oci.hanzo.ai (ghcr only)"; exit 0; }
-          # Bare runners ship no kubectl — same static provision the deploy
-          # step uses.
-          command -v kubectl >/dev/null 2>&1 || {
-            KVER=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
-            mkdir -p "$HOME/.local/bin"
-            curl -fsSL "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl"               -o "$HOME/.local/bin/kubectl" && chmod +x "$HOME/.local/bin/kubectl"
-            echo "$HOME/.local/bin" >> "$GITHUB_PATH"; export PATH="$HOME/.local/bin:$PATH"
-          }
-          CFG=$(kubectl -n hanzo get secret registry-credentials                   -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null | base64 -d || true)
-          if [ -z "$CFG" ]; then
-            echo "::warning::registry-credentials not readable from this kubeconfig — image will NOT reach oci.hanzo.ai (ghcr only)"; exit 0
-          fi
-          USERPASS=$(echo "$CFG" | jq -r '.auths["oci.hanzo.ai"].auth // empty' | base64 -d)
-          [ -z "$USERPASS" ] && { echo "::warning::no registry auth in dockerconfig — image will NOT reach oci.hanzo.ai (ghcr only)"; exit 0; }
-          echo "::add-mask::${USERPASS#*:}"
-          # Best-effort: login failure → skip mirror, never fail the run (see above).
-          if echo "${USERPASS#*:}" | docker login oci.hanzo.ai -u "${USERPASS%%:*}" --password-stdin; then
-            echo "MIRROR_OK=1" >> "$GITHUB_ENV"
-          else
-            echo "::notice::oci.hanzo.ai login failed — mirror skipped (GHCR-only push)"
           fi
 
       - name: Locate the Go module
@@ -2729,69 +2673,8 @@ jobs:
             # exits with `exec format error` on a tag whose name promised any
             # architecture. bin/imgplat is the same read a kubelet does.
             "$CI_HOME/bin/imgplat" "$pin" "$plats" >/dev/null
-            echo "| \`$pin\` | \`$dig\` |" >> "$RUNNER_TEMP/pins.md"
-            # Dual-host: mirror the exact tag set to oci.hanzo.ai (server-
-            # side manifest copy — no rebuild). ghcr.io/<org>/<name> →
-            # oci.hanzo.ai/<org>/<name>; public consumers keep ghcr, the fleet
-            # is migrating to pull from ours.
-            #
-            # A copy that does not land FAILS THE RUN, and the trap is where the
-            # refusal is written. A `while read` on the end of a pipeline is a
-            # CHILD SHELL: neither `set -e` nor an `exit` inside it reaches the
-            # step, so a `::warning::` there makes a failed copy and a successful
-            # one produce the same green run and the same unread line. A mirror
-            # nobody is told about is a mirror nobody fills.
-            if [ "${MIRROR_OK:-}" = "1" ]; then
-              # crane, not buildx imagetools: the IAM token realm doesn't answer
-              # buildx's multi-scope token request (spec gap, tracked).
-              command -v crane >/dev/null 2>&1 || {
-                mkdir -p "$HOME/.local/bin"
-                case "$(uname -m)" in aarch64) cranearch=arm64;; *) cranearch=x86_64;; esac
-                curl -fsSL "https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_Linux_${cranearch}.tar.gz" \
-                  | tar -xz -C "$HOME/.local/bin" crane
-                export PATH="$HOME/.local/bin:$PATH"
-              }
-              # ONE mapping, stated once. The GHCR org and the registry org are
-              # not the same word — ghcr.io/hanzoai/x mirrors to
-              # oci.hanzo.ai/hanzo/x — and a second copy of this table is
-              # how a push path and a pin drift into naming different images.
-              rorg="${repo#*/}"; rname="${rorg#*/}"; rorg="${rorg%%/*}"
-              case "$rorg" in
-                hanzoai) rorg=hanzo ;;
-                zooai)   rorg=zoo ;;
-                *)       ;;   # bootnode, lux-private, ... map to themselves
-              esac
-              mrepo="oci.hanzo.ai/$rorg/$rname"
-              # The tag set as an ARRAY, walked in THIS shell: a herestring is a
-              # redirect, not a pipeline, so `set -e` and `exit` still belong to
-              # the step. TAGS is the same `-t <ref>` list handed to buildx, so
-              # what is mirrored is by construction what was pushed.
-              read -ra tagv <<<"$TAGS"
-              for ref in "${tagv[@]}"; do
-                [ "$ref" = "-t" ] && continue
-                dst="$mrepo:${ref##*:}"
-                # The digest the SOURCE serves, read before the copy. Refuse an
-                # empty one: `[ "$a" = "$b" ]` on two blanks is true, and a
-                # comparison that cannot fail is the bug being fixed here.
-                want=$(crane digest "$ref")
-                [ -n "$want" ] || { echo "::error::cannot read the digest of $ref"; exit 1; }
-                crane copy "$ref" "$dst"
-                # Read the DESTINATION back. `crane copy` exiting 0 is the
-                # copier's account of a write; the digest the registry answers
-                # with is the fact, and the two disagree whenever a copy is
-                # partial or the tag already names other bytes. Same shape as
-                # the `helm show chart` re-read charts.yml does after a push.
-                got=""
-                for i in 1 2 3 4 5 6; do
-                  got=$(crane digest "$dst" 2>/dev/null || true)
-                  [ "$got" = "$want" ] && break
-                  sleep 5
-                done
-                [ "$got" = "$want" ] \
-                  || { echo "::error::$dst serves ${got:-nothing}, not $want — the copy did not land"; exit 1; }
-                echo "mirrored $ref -> $dst @ $want"
-              done
-            fi
+            # The fleet names it at oci.hanzo.ai, which pulls through to ghcr.io.
+            echo "| \`${pin/#ghcr.io\//oci.hanzo.ai/}\` | \`$dig\` |" >> "$RUNNER_TEMP/pins.md"
             echo "::endgroup::"
           done
           # The pins this run earned, ready to paste into universe. Tag and
