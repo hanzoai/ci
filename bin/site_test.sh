@@ -178,7 +178,9 @@ case "$url" in
   # its body; unset answers 404, which is a first publish.
   https://a-slug.hanzo.app/_site/manifest.txt*)
                    if [ -n "${T_PREV:-}" ]; then printf '%s\n' "$T_PREV" > "$out"; printf '200'; else : > "$out"; printf '404'; fi ;;
-  https://a-slug.hanzo.app/_next/*) printf '200' ;;
+  # A sampled unchanged asset. T_PROBE=gone answers 404, which is an origin that
+  # no longer holds what the previous manifest says it does.
+  https://a-slug.hanzo.app/_next/*) if [ "${T_PROBE:-}" = gone ]; then printf '404'; else printf '200'; fi ;;
   # The deployment the run completed, as cloud records it: what the completion
   # sent, which is what cloud stores (apps/projects/deploy.go land). T_REC
   # replaces it to make the record disagree.
@@ -512,6 +514,20 @@ t "an incremental publish succeeds"          "$rc"  "0"
 t "  ...uploads the changed page and the manifest" "$(wc -l < "$tmp/uploads" | tr -d ' ')"  "2"
 t "  ...not the unchanged ones"              "$(grep -c 'key=acme/a-slug/index.html\|a.js' "$tmp/uploads")"  "0"
 t "  ...but the completion names every key"  "$(jq -r '.keys|length' "$tmp/complete.body")"  "4"
+t "  ...asked the origin for the unchanged asset" "$(grep -c '^GET https://a-slug.hanzo.app/_next/static/a.js' "$tmp/calls")"  "1"
+# Hashed on every core, then sorted, so the record is the same bytes whichever
+# hasher finished first.
+t "  ...its record is sorted by key"         "$(awk '{print substr($0, 67)}' "$inc/_site/manifest.txt" | LC_ALL=C sort -c 2>&1 && echo sorted)"  "sorted"
+t "  ...and says where its time went"        "$(printf '%s\n' "$out" | grep -c '^timing: scan [0-9.]*s, enqueue [0-9.]*s, hash [0-9.]*s, diff [0-9.]*s, upload [0-9.]*s, complete [0-9.]*s, readback [0-9.]*s$')"  "1"
+# The sample is asked all at once, and one asset the origin no longer answers is
+# enough to distrust the record: everything goes.
+rm -f "$tmp/calls" "$tmp/uploads"
+out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
+      SITE_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_PREV="$prev" T_PROBE=gone \
+      bash "$SD" a-slug "$inc" 2>&1); rc=$?
+t "an unchanged asset gone: the publish succeeds" "$rc"  "0"
+t "  ...distrusts the record"                "$(printf '%s\n' "$out" | grep -c 'previous manifest is not trusted: _next/static/a.js (404)')"  "1"
+t "  ...and sends everything"                "$(wc -l < "$tmp/uploads" | tr -d ' ')"  "4"
 rm -f "$tmp/calls" "$tmp/uploads"
 out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
       SITE_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_PREV="not a manifest" \

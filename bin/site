@@ -98,6 +98,21 @@ human() { LC_ALL=C awk -v b="$1" 'BEGIN{ split("B KiB MiB GiB", u, " "); i = 1
 # second grant would send the first site's files into the other's prefix.
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 
+# ---- where the time goes ------------------------------------------------------
+# One line at the end names each phase's seconds, so a slow publish says which
+# leg was slow on the run that was slow, rather than after a second run with a
+# stopwatch. EPOCHREALTIME is bash 5's; an older bash counts whole seconds.
+lap() {
+  local t=${EPOCHREALTIME:-$SECONDS}
+  printf '%s %s\n' "$1" "${t/,/.}" >> "$work/laps"
+}
+laps() {
+  [ -s "$work/laps" ] || return 0
+  LC_ALL=C awk 'NR > 1 { printf "%s%s %.1fs", sep, $1, $2 - prev; sep = ", " }
+                { prev = $2 } END { if (NR > 1) print "" }' "$work/laps" | sed 's/^/timing: /'
+}
+lap start
+
 [ -d "$dir" ] || { echo "::error::$dir is not a directory — the build produced no export"; exit 1; }
 
 # ---- content type -----------------------------------------------------------
@@ -192,6 +207,7 @@ body=$(wc -c < "$work/sd-done.json" | tr -d ' ')   # BSD wc pads its count, GNU 
   echo "::error::publish aborted: the completion manifest is $(human "$body") ($body bytes) for $count files, over the $(human "$max_body") ($max_body bytes) edge limit (GATEWAY_BODY_LIMIT, cloud internal/edge/edge.go:38). The bytes stream per file and are not the problem — the manifest cloud reconciles the prefix against is one body, and fasthttp refuses an oversized POST before any handler runs, answering only 'Error when parsing request', which names neither size nor cause. Reduce the object count: a full prerender is what makes an export this wide."
   exit 1; }
 
+lap scan
 if [ -n "${SITE_PLAN:-}" ]; then
   printf 'slug=%s dir=%s files=%s\n' "$slug" "$dir" "$count"
   while IFS= read -r k; do [ -n "$k" ] && printf '%s\t%s\n' "$k" "$(ctype "$k")"; done <<< "$manifest"
@@ -367,6 +383,7 @@ if [ -z "$upload_url" ]; then
 fi
 jq -c '{id,version,status,bucket,prefix}' "$work"/sd-enq.json
 
+lap enqueue
 # A build that dies after this point would leave the deployment "queued" and the
 # project stuck "building" forever. Report the failure so cloud records an honest
 # terminal state instead of a lie by omission.
@@ -396,7 +413,16 @@ trap 'fail' ERR
 # 200 all mean "send everything". SITE_FULL=1 forces that.
 mkdir -p "$dir/_site"
 grep -vxF "$mkey" "$work/manifest" > "$work/real"
-(cd "$dir" && tr '\n' '\0' < "$work/real" | xargs -0 -n 512 bash -c 'if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi' _) > "$work/hashes"
+# Every core at once. Each batch writes a file of its own: hashers sharing one
+# pipe flush in blocks that can end mid-line, and two of them interleaving there
+# would corrupt a line. Sorted after, so the record reads the same whatever order
+# they finished in; -k3 is the key, since two spaces follow the hash.
+cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+mkdir -p "$work/h"
+(cd "$dir" && tr '\n' '\0' < "$work/real" | H="$work/h" xargs -0 -n 256 -P "$cores" bash -c \
+  'if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi > "$(mktemp "$H/b.XXXXXX")"' _)
+cat "$work"/h/b.* | LC_ALL=C sort -t ' ' -k3 > "$work/hashes"
+lap hash
 [ "$(grep -c . "$work/hashes")" = "$((count - 1))" ] || { echo "::error::hashed $(grep -c . "$work/hashes") of $((count - 1)) files"; exit 1; }
 cp "$work/real" "$work/upload"
 : > "$work/prev"
@@ -421,9 +447,18 @@ if [ -s "$work/prev" ]; then
        {f=substr($0,67); if (p[f] != substr($0,1,64)) print f}' "$work/prev" "$work/hashes" > "$work/changed"
   # Ask the origin for a sample of what it is about to be trusted to still hold.
   sample=$(grep -vxFf "$work/changed" "$work/real" | grep '^_next/static/' | LC_ALL=C sort -R | head -20 || true)
-  bad=
+  # All at once: each is a round trip through the edge to the origin, and twenty
+  # of them one after another were seconds of every publish.
+  bad= i=0
   for rel in $sample; do
-    c=$(curl -g -sS -m 20 -r 0-0 -o /dev/null -w '%{http_code}' "$base/$rel?t=$(date +%s)" 2>/dev/null || true)
+    i=$((i + 1))
+    ( c=$(curl -g -sS -m 20 -r 0-0 -o /dev/null -w '%{http_code}' "$base/$rel?t=$(date +%s)" 2>/dev/null || true)
+      printf '%s %s\n' "${c:-000}" "$rel" > "$work/probe.$i" ) &
+  done
+  wait
+  for f in "$work"/probe.*; do
+    [ -e "$f" ] || continue
+    read -r c rel < "$f"
     case "$c" in 200|206) ;; *) bad="$rel ($c)"; break ;; esac
   done
   if [ -n "$bad" ]; then
@@ -435,6 +470,7 @@ if [ -s "$work/prev" ]; then
 else
   echo "no previous manifest at the live host; sending everything"
 fi
+lap diff
 # ---- 1c. what the plane can copy ----------------------------------------------
 # A host that shares its build with a site published a moment ago (SITE_COPY_FROM
 # = "<slug>:<dir>") differs from it by a page or two. The objects of this upload
@@ -545,6 +581,7 @@ fi
 # are all in the bucket, so it goes last.
 printf '%s\n' "$mkey" > "$work/manifest.last"
 put_all "$work/manifest.last"
+lap upload
 
 # ---- 3. flip it live --------------------------------------------------------
 # The body was built and measured at the top, before a single object moved, so
@@ -564,6 +601,7 @@ if [ "$code" != "200" ]; then
   echo "::error::complete returned HTTP $code"; head -c 600 "$work"/sd-resp.json; echo; fail; exit 1
 fi
 jq -c '{status,liveUrl,version,files,bytes}' "$work"/sd-resp.json
+lap complete
 
 # ---- 4. read back what we just published ------------------------------------
 # A publish that uploads and flips live has still proved nothing about whether
@@ -653,3 +691,5 @@ else
     exit 1
   fi
 fi
+lap readback
+laps
