@@ -87,13 +87,17 @@ hedge='in.?progress|in.?audit|assessment planned|\bplanned\b|readiness|\bready\b
 # the framework, so each half looked incomplete on its own.
 audited='(audited|certified|accredited) by [^.]{0,40}(independent|third.?party|external|auditor)'
 
-fail=0
+# ONE grep per rule over every file, not two per file. A process per file was
+# 30 s on a 1,286-file repo here and 80 s on a runner, where every fork crosses
+# the sandbox (hanzo-inc/platform, forge run 16634); the lines a rule matches
+# are few, and only those are read one at a time.
+files=()
 while IFS= read -r file; do
   # Dated records are history; see above.
   # A dated filename IS the exemption -- 2020-03-18-hanzo-cloud.mdx is a record
   # of what was said in 2020, wherever it happens to be filed. Keying on the
   # containing directory missed posts/ and _offbrand/ holding the same file.
-  case "$(basename "$file")" in
+  case "${file##*/}" in
     CHANGELOG*|changelog*|20[0-9][0-9]-[01][0-9]-[0-3][0-9]-*) continue ;;
     # Where the policy is DEFINED it has to quote what it forbids, or it cannot
     # say what it forbids. An agent-instruction file and a copy gate are the two
@@ -105,31 +109,42 @@ while IFS= read -r file; do
     */CHANGELOG*|*/changelog*) continue ;;
     e2e/gates/*|*/e2e/gates/*|ci/bin/*|*/ci/bin/*) continue ;;
   esac
-
-  while IFS=: read -r lineno line; do
-    [ -n "${line:-}" ] || continue
-    printf '%s' "$line" | grep -qiE "$frameworks" || continue
-    # A hedge beside a framework name fails whatever else the line says.
-    if printf '%s' "$line" | grep -qiE "$hedge"; then
-      printf '%s:%s: %s\n' "$file" "$lineno" "$(printf '%s' "$line" | sed 's/^[[:space:]]*//' | cut -c1-120)"
-      fail=1
-      continue
-    fi
-    # Otherwise only a claim to the certificate itself fails, and only where the
-    # line does not put it in one of the shapes that are true.
-    printf '%s' "$line" | grep -qiE "$claim"   || continue
-    printf '%s' "$line" | grep -qiE "$allowed" && continue
-    printf '%s:%s: %s\n' "$file" "$lineno" "$(printf '%s' "$line" | sed 's/^[[:space:]]*//' | cut -c1-120)"
-    fail=1
-  done < <(grep -nE "$frameworks" "$file" 2>/dev/null || true)
-
-  while IFS=: read -r lineno line; do
-    [ -n "${line:-}" ] || continue
-    printf '%s' "$line" | grep -qiE "$allowed" && continue
-    printf '%s:%s: %s\n' "$file" "$lineno" "$(printf '%s' "$line" | sed 's/^[[:space:]]*//' | cut -c1-120)"
-    fail=1
-  done < <(grep -niE "$audited" "$file" 2>/dev/null || true)
+  files+=("$file")
 done < <(git -C "$root" ls-files -- '*.ts' '*.tsx' '*.js' '*.jsx' '*.md' '*.mdx' '*.html' '*.vue' '*.svelte' 2>/dev/null || true)
+
+# matches <grep flags> <pattern>: `file NUL lineno:line` per matching line.
+# --null and not -Z, which BSD grep reads as --decompress.
+matches() {
+  [ ${#files[@]} -gt 0 ] || return 0
+  (cd "$root" && printf '%s\0' "${files[@]}" | xargs -0 grep -H --null -n "$@" -- 2>/dev/null) || true
+}
+
+fail=0
+while IFS= read -r -d '' file && IFS= read -r rest; do
+  lineno=${rest%%:*}; line=${rest#*:}
+  [ -n "${line:-}" ] || continue
+  printf '%s' "$line" | grep -qiE "$frameworks" || continue
+  # A hedge beside a framework name fails whatever else the line says.
+  if printf '%s' "$line" | grep -qiE "$hedge"; then
+    printf '%s:%s: %s\n' "$file" "$lineno" "$(printf '%s' "$line" | sed 's/^[[:space:]]*//' | cut -c1-120)"
+    fail=1
+    continue
+  fi
+  # Otherwise only a claim to the certificate itself fails, and only where the
+  # line does not put it in one of the shapes that are true.
+  printf '%s' "$line" | grep -qiE "$claim"   || continue
+  printf '%s' "$line" | grep -qiE "$allowed" && continue
+  printf '%s:%s: %s\n' "$file" "$lineno" "$(printf '%s' "$line" | sed 's/^[[:space:]]*//' | cut -c1-120)"
+  fail=1
+done < <(matches -E "$frameworks")
+
+while IFS= read -r -d '' file && IFS= read -r rest; do
+  lineno=${rest%%:*}; line=${rest#*:}
+  [ -n "${line:-}" ] || continue
+  printf '%s' "$line" | grep -qiE "$allowed" && continue
+  printf '%s:%s: %s\n' "$file" "$lineno" "$(printf '%s' "$line" | sed 's/^[[:space:]]*//' | cut -c1-120)"
+  fail=1
+done < <(matches -iE "$audited")
 
 if [ "$fail" -ne 0 ]; then
   echo ""
