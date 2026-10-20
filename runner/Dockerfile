@@ -200,4 +200,26 @@ RUN useradd -m -u 1001 -s /bin/bash runner \
 USER runner
 WORKDIR /data
 RUN chown -R runner:runner /opt/actions-runner
+
+# The actions build.yml declares, already cloned where the act runner looks for
+# them: ~/.cache/act/<sha256 of the `uses:` string>, every ref the remote
+# advertises included. A runner lives one job, so it began each one with an
+# empty cache, and its clone is go-git's, full history and pure Go: forge run
+# 16634 spent 156 s of each job's 161 s before the first step cloning these
+# five (setup-node 72 s, setup-go 42 s, setup-bun 20 s, checkout 17 s), the
+# three it would skip included, because a job prepares every action it names.
+# With the clone here the runner opens it and fetches what moved since the
+# image was built. Measured with act's own clone executor: 0.2 to 1.1 s each,
+# against 2 to 90 s cold. A clone of the branches and tags alone is not
+# enough: act fetches refs/*, so it then downloads every pull request's
+# objects, 10 to 40 s each. hanzo.yml's `runner-preseeds` holds this list to
+# build.yml's steps.
+ARG ACTIONS="actions/checkout@v4 actions/setup-go@v5 actions/setup-node@v4 oven-sh/setup-bun@v2 dtolnay/rust-toolchain@stable"
+RUN set -eux; \
+    for a in $ACTIONS; do \
+      d="/home/runner/.cache/act/$(printf %s "$a" | sha256sum | cut -c1-64)"; \
+      git clone -q "https://github.com/${a%@*}" "$d"; \
+      git -C "$d" fetch -q --update-head-ok origin '+refs/*:refs/*' '+HEAD:refs/heads/HEAD'; \
+      git -C "$d" rev-parse -q --verify "${a#*@}^{commit}" >/dev/null; \
+    done
 ENTRYPOINT ["/usr/bin/tini","--","/usr/local/bin/runner"]

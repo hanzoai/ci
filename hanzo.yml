@@ -117,6 +117,20 @@ test:
         echo "::error::the test gate is guarded by \`inputs.mode != 'delegate'\` — delegate would skip it"; exit 1
       fi
       echo "OK: test gate at line $t, delegate POST at line $d, gate not delegate-guarded"
+  - name: runner-preseeds
+    # The runner image clones every action build.yml's steps name, so a job
+    # does not spend its first two and a half minutes doing it (runner/Dockerfile,
+    # ACTIONS). An action added to build.yml and not to that list costs every
+    # job its clone again with nothing failing, so this says so.
+    run: |
+      set -e
+      want=$(grep -E '^ +(- )?uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@' .github/workflows/build.yml \
+        | sed -E 's/^ +(- )?uses: //; s/ .*//' | sort -u)
+      have=$(sed -n 's/^ARG ACTIONS="\(.*\)"$/\1/p' runner/Dockerfile | tr ' ' '\n' | sort -u)
+      [ -n "$have" ] || { echo "::error::runner/Dockerfile has no ARG ACTIONS; a rename broke this assertion, fix the assertion"; exit 1; }
+      miss=$(comm -23 <(printf '%s\n' "$want") <(printf '%s\n' "$have"))
+      [ -z "$miss" ] || { echo "::error::build.yml uses actions runner/Dockerfile does not preseed: $miss"; exit 1; }
+      echo "OK: the runner image preseeds all $(printf '%s\n' "$want" | grep -c .) actions build.yml's steps name"
   - name: publish-waits
     # A push during a publish must wait for it, not cancel it. Cancelling is
     # one expression away and reads as harmless in a diff, and on a branch
