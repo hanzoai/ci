@@ -21,11 +21,15 @@ out=$(bash bin/kms 2>&1); rc=$?
 check "no name is a usage error" "usage: kms <NAME>" "$out"
 ran=$((ran+1)); [ "$rc" -eq 2 ] || { echo "FAIL usage: rc=$rc want 2"; fails=$((fails+1)); }
 
-# A REFUSAL is taken on the first try. An endpoint that answers 401 immediately
+# A REFUSAL is taken on the first try. The run's own ID token is blanked: in a
+# GitHub job that grants id-token: write, bin/kms spends it before any stored
+# client, IAM exchanges it for a real token, and the case met a 403 on the
+# secret instead of the 401 on the login it is about. Every run of this
+# repository on GitHub failed on that from 2026-10-15. An endpoint that answers 401 immediately
 # must not be retried — four waits would add a minute to a build that is already
 # going to fail, and the old copies could not tell this from an outage.
 start=$SECONDS
-out=$(KMS_CLIENT_ID=x KMS_CLIENT_SECRET=y KMS_ENDPOINT=https://kms.hanzo.ai bash bin/kms NAME 2>&1); rc=$?
+out=$(ACTIONS_ID_TOKEN_REQUEST_URL= HANZO_API_TOKEN= KMS_CLIENT_ID=x KMS_CLIENT_SECRET=y KMS_ENDPOINT=https://kms.hanzo.ai bash bin/kms NAME 2>&1); rc=$?
 took=$((SECONDS - start))
 check "a refusal names the code" "refused the login: HTTP 401" "$out"
 ran=$((ran+1)); [ "$rc" -eq 1 ] || { echo "FAIL refusal: rc=$rc want 1"; fails=$((fails+1)); }
@@ -36,7 +40,7 @@ ran=$((ran+1)); [ "$took" -lt 20 ] || { echo "FAIL refusal took ${took}s — 401
 # four connect timeouts on top of it. The message must not read as a missing
 # secret, which is the sentence that sent a day of publishes looking for a token
 # that was sealed the whole time.
-out=$(KMS_CLIENT_ID=x KMS_CLIENT_SECRET=y KMS_ENDPOINT=http://127.0.0.1:1 bash bin/kms NAME 2>&1); rc=$?
+out=$(ACTIONS_ID_TOKEN_REQUEST_URL= HANZO_API_TOKEN= KMS_CLIENT_ID=x KMS_CLIENT_SECRET=y KMS_ENDPOINT=http://127.0.0.1:1 bash bin/kms NAME 2>&1); rc=$?
 check "an outage says it is one" "An outage, not a missing secret" "$out"
 check "an outage names the tries" "over four tries" "$out"
 ran=$((ran+1)); [ "$rc" -eq 1 ] || { echo "FAIL outage: rc=$rc want 1"; fails=$((fails+1)); }
