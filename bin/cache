@@ -86,7 +86,7 @@ trap 'chmod -R u+w "$tmp" 2>/dev/null; rm -rf "$tmp"' EXIT
 
 # api <METHOD> <path> [json] -> body on stdout when 2xx. A lost answer, a 429 or
 # a 5xx is asked again; anything else is the store answering.
-# Parts move four at a time, so each call answers into a file of its own.
+# Parts move eight at a time, so each call answers into a file of its own.
 api() {
   local code w f
   f=$(mktemp -p "$tmp" api.XXXXXX)
@@ -125,8 +125,20 @@ fetch() {
   case "$n" in ''|*[!0-9]*) return 1 ;; esac
   # shellcheck disable=SC2016 # expanded by the inner bash, one part each
   for i in $(seq 0 $((n - 1))); do printf '%03d\n' "$i"; done \
-    | xargs -P 4 -I{} bash -c 'get "$0.{}" "$1.{}"' "$prefix/$1.tar.zst" "$tmp/part" || return 1
+    | xargs -P 8 -I{} bash -c 'get "$0.{}" "$1.{}"' "$prefix/$1.tar.zst" "$tmp/part" || return 1
+  lap fetch
   [ "$(cat "$tmp"/part.* | sha256sum | cut -d' ' -f1)" = "$hash" ] || { say "archive $1 does not match its index"; return 1; }
+  lap verify
+}
+
+# lap <phase>: the seconds since the last lap, kept for the line that reports the
+# restore, so a slow one says whether the network, the hash or the unpack was.
+# EPOCHREALTIME is bash 5's; an older bash counts whole seconds.
+lapped=${EPOCHREALTIME:-$SECONDS}; lapped=${lapped/,/.}; laps=
+lap() {
+  local t=${EPOCHREALTIME:-$SECONDS}; t=${t/,/.}
+  laps="$laps${laps:+, }$1 $(LC_ALL=C awk -v a="$lapped" -v b="$t" 'BEGIN { printf "%.1fs", b - a }')"
+  lapped=$t
 }
 
 export -f get put api; export base bucket tmp HANZO_API_TOKEN
@@ -147,6 +159,7 @@ if [ "$cmd" = restore ]; then
   mkdir -p "$tmp/x"
   cat "$tmp"/part.* | zstd -dq -T0 | tar -x --no-same-owner -C "$tmp/x" || skip "the archive did not unpack"
   rm -f "$tmp"/part.*
+  lap unpack
   for i in "${!labels[@]}"; do
     l=${labels[$i]}; d=${dirs[$i]}
     [ -d "$tmp/x/$l" ] || { say "the archive carries no $l, so $d starts cold"; continue; }
@@ -157,7 +170,8 @@ if [ "$cmd" = restore ]; then
       mkdir -p "$d"; chmod -R u+w "$tmp/x/$l"; cp -a "$tmp/x/$l/." "$d/" || say "$l did not merge whole into $d"
     fi
   done
-  say "$hit hit for $prefix: $((bytes / 1048576)) MiB in $(( $(date +%s) - t0 ))s"
+  lap place
+  say "$hit hit for $prefix: $((bytes / 1048576)) MiB in $(( $(date +%s) - t0 ))s ($laps)"
   echo "hit=$hit" >> "$out"
   exit 0
 fi
@@ -185,7 +199,7 @@ n=$(printf '%s\n' "$tmp"/part.* | wc -l)
 hash=$(cat "$tmp"/part.* | sha256sum | cut -d' ' -f1)
 bytes=$(wc -c "$tmp"/part.* | tail -1 | awk '{print $1}')
 # shellcheck disable=SC2016 # expanded by the inner bash, one part each
-printf '%s\n' "$tmp"/part.* | xargs -P 4 -I{} bash -c 'put "$0.${1##*.}" "$1"' "$prefix/$key.tar.zst" {} \
+printf '%s\n' "$tmp"/part.* | xargs -P 8 -I{} bash -c 'put "$0.${1##*.}" "$1"' "$prefix/$key.tar.zst" {} \
   || { say "a part did not upload; nothing is indexed, so nothing half-written is ever read"; exit 0; }
 # The index goes last, so a reader never finds a key whose parts are not all there.
 printf '%s %s\n' "$hash" "$n" > "$tmp/idx"; printf '%s\n' "$key" > "$tmp/latest"
