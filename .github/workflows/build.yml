@@ -692,7 +692,7 @@ jobs:
           KMS_ENDPOINT: ${{ vars.KMS_ENDPOINT || 'https://api.hanzo.ai' }}
           KMS_SECRET_ENV: ${{ vars.KMS_SECRET_ENV || 'prod' }}
           REVIEW_CLIENT: ${{ vars.REVIEW_CLIENT || 'hanzo-review' }}
-          IAM_ENDPOINT: ${{ vars.IAM_ENDPOINT || 'https://iam.hanzo.ai' }}
+          IAM_ENDPOINT: ${{ vars.IAM_ENDPOINT || 'https://api.hanzo.ai' }}
         run: |
           set -euo pipefail
           export GIT_TERMINAL_PROMPT=0
@@ -2085,7 +2085,7 @@ jobs:
         # A red suite publishes again, for each site this run made live, the
         # release it replaced (kept by the publish step), unless a newer publish
         # has replaced this run's since, and tells hanzo.yml's `page:` addresses
-        # and the commit's author.
+        # and the commit's author by email (POST /v1/notify/send).
         if: failure() && steps.verify.outcome == 'failure'
         env:
           API: ${{ vars.API_ENDPOINT || 'https://api.hanzo.ai' }}
@@ -2119,8 +2119,10 @@ jobs:
           [ "$to" != '[]' ] || { echo "::warning::no page: in hanzo.yml and no commit author, so nobody is told"; exit 1; }
           body=$(jq -nc --argjson to "$to" --arg s "${GITHUB_REPOSITORY}: verify failed on ${GITHUB_SHA:0:7}" \
             --arg b "$(printf 'verify failed against the live site, run %s/%s/actions/runs/%s\n\n%s' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$said")" \
-            '{to: $to, subject: $s, body: $b}')
-          code=$(curl -sS -m 30 -o /dev/null -w '%{http_code}' -X POST "$API/v1/notify/send/email" \
+            '{channel: "email", to: $to, subject: $s, body: $b}')
+          # sync=true: the send is made inside the request, which is the one
+          # delivery the cloud's notify answers for.
+          code=$(curl -sS -m 30 -o /dev/null -w '%{http_code}' -X POST "$API/v1/notify/send?sync=true" \
             -H "Authorization: Bearer $HANZO_API_TOKEN" -H 'Content-Type: application/json' -d "$body") || code=000
           case "$code" in 2*) echo "paged: $to" ;; *) echo "::warning::the page to $to answered HTTP $code" ;; esac
           exit 1
@@ -2216,25 +2218,6 @@ jobs:
             say "**Tests: $n executed across $gates gate(s).**"
           fi
           awk -F'\t' 'NR>1{printf "  %8s results  %s%s\n", $1, ($2=="1" ? "[runs tests] " : ""), $3}' "$r"
-
-      - name: Review verdict
-        # What the reviewer answered, waited for here: after the gate, and before
-        # this job or the publish job builds or ships anything. A refusal fails
-        # this job, so nothing publishes; a reviewer that could not run withholds
-        # no verdict (.hanzo/review/gate.sh). Fifteen minutes from the gate's end
-        # is the bound the review job had.
-        if: env.HANZO_CI_REVIEW == 'true' && env.HANZO_CI_TRUSTED == 'true' && inputs.gates == ''
-        timeout-minutes: 15
-        run: |
-          set -uo pipefail
-          r="$RUNNER_TEMP/review"
-          [ -f "$r/started" ] || { echo "review: not started on this pin, so there is no verdict to wait for"; exit 0; }
-          # A reviewer that is gone without an answer was stopped, not refused.
-          while [ ! -f "$r/status" ] && kill -0 "$(cat "$r/started")" 2>/dev/null; do sleep 2; done
-          echo "::group::review"; cat "$r/log"; echo "::endgroup::"
-          [ -f "$r/status" ] || { echo "::warning::review: the reviewer stopped without an answer, so it withholds no verdict"; exit 0; }
-          [ ! -f "$r/summary" ] || cat "$r/summary" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-          exit "$(cat "$r/status")"
 
       - name: Delegate build to the runner (mode=delegate)
         # Delegate moves WHERE the image is built. It does not move whether the
@@ -3614,6 +3597,26 @@ jobs:
         if: (success() || failure()) && steps.gomod.outputs.file != '' && env.HANZO_CI_ROLE == 'test' && inputs.go-cache != 'false'
         run: |
           "$CI_HOME/bin/gocache" save "$(dirname '${{ steps.gomod.outputs.file }}')"
+
+      - name: Review verdict
+        # What the reviewer answered, waited for last, so a site this job
+        # publishes never waits on it. A refusal fails this job: the publish job
+        # needs it, so a refused change ships no image, binary or client, and
+        # the page of a site already live says why. A reviewer that could not
+        # run withholds no verdict (.hanzo/review/gate.sh). Fifteen minutes is
+        # the bound the review job had.
+        if: env.HANZO_CI_REVIEW == 'true' && env.HANZO_CI_TRUSTED == 'true' && inputs.gates == ''
+        timeout-minutes: 15
+        run: |
+          set -uo pipefail
+          r="$RUNNER_TEMP/review"
+          [ -f "$r/started" ] || { echo "review: not started on this pin, so there is no verdict to wait for"; exit 0; }
+          # A reviewer that is gone without an answer was stopped, not refused.
+          while [ ! -f "$r/status" ] && kill -0 "$(cat "$r/started")" 2>/dev/null; do sleep 2; done
+          echo "::group::review"; cat "$r/log"; echo "::endgroup::"
+          [ -f "$r/status" ] || { echo "::warning::review: the reviewer stopped without an answer, so it withholds no verdict"; exit 0; }
+          [ ! -f "$r/summary" ] || cat "$r/summary" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          exit "$(cat "$r/status")"
 
   # The same test, gating on linux-amd64 alone, for a caller whose
   # `test-runners` names only that architecture. It is a job rather than a matrix

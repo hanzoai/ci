@@ -23,7 +23,7 @@ esac
 
 API_KMS="${KMS_ENDPOINT:-https://api.hanzo.ai}"
 KMS_ENV="${KMS_SECRET_ENV:-prod}"
-IAM="${IAM_ENDPOINT:-https://iam.hanzo.ai}"
+IAM="${IAM_ENDPOINT:-https://api.hanzo.ai}"
 CLIENT_NAME="${REVIEW_CLIENT:-hanzo-review}"
 
 if [ -z "${REVIEW_TOKEN:-}" ]; then

@@ -296,9 +296,13 @@ test:
         echo "::error::Test verdict (line $v) runs before the steps that write the receipt it reads ($t, $o)"; exit 1; }
       [ "$v" -lt "$d" ] && [ "$v" -lt "$b" ] || {
         echo "::error::Test verdict (line $v) runs after a build step ($d, $b) — an image would exist before its commit was adjudicated"; exit 1; }
+      # The review's verdict runs in the gating jobs (HANZO_CI_REVIEW), last, so
+      # a site they publish never waits on it, and the publish job needs them,
+      # so a refusal still leaves no image.
       rv=$(line 'Review verdict'); ps=$(line 'Publish site (per hanzo.yml)')
-      [ -n "$rv" ] && [ -n "$ps" ] && [ "$rv" -gt "$v" ] && [ "$rv" -lt "$d" ] && [ "$rv" -lt "$b" ] && [ "$rv" -lt "$ps" ] || {
-        echo "::error::Review verdict (line ${rv:-none}) is not between the test verdict ($v) and the first build or publish step ($d, $b, ${ps:-none}) — a refused diff could ship"; exit 1; }
+      [ -n "$rv" ] && [ -n "$ps" ] && [ "$rv" -gt "$ps" ] \
+        && awk -v s="$rv" 'NR>s && /^        if: /{print; exit}' "$f" | grep -qF "env.HANZO_CI_REVIEW == 'true'" || {
+        echo "::error::Review verdict (line ${rv:-none}) is not the gating jobs' last word after the site publish (${ps:-none})"; exit 1; }
       echo "OK: verdict at line $v is unguarded, follows the gate ($t) and its opt-out ($o), and precedes both build lanes ($d, $b)"
   - name: kind-is-read-once
     # `kind:` says what a repository IS (HIP-0138), and this asserts the pipeline
