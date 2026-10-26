@@ -3557,25 +3557,28 @@ jobs:
           # One publish per site, from the one implementation. A file, not a
           # pipe: site runs curl, and curl inherits stdin — it would eat
           # the rest of the list and report success for sites it never sent.
+          # When hanzo.yml lists `verify:`, what each site served before this
+          # publish and serves after it (bin/rollback), for the verify job to
+          # roll back to: slug:now:before:url.
+          verify=$(yq '.verify // [] | length' hanzo.yml)
+          released=
           printf '%s\n' "$PAIRS" > "$RUNNER_TEMP/site-pairs"
           while IFS= read -r pair; do
             [ -n "${pair//[[:space:]]/}" ] || continue
-            echo "::group::publish ${pair%%=*}"
+            slug=${pair%%=*}
+            [ "$verify" = 0 ] || { before=$(HANZO_API="$API" "$CI_HOME/bin/rollback" mark "$slug" 2>/dev/null) || before="$slug - - -"; }
+            echo "::group::publish $slug"
             HANZO_API="$API" SITE_COMMIT="${{ github.sha }}" SITE_BRANCH="$REF" \
-              "$CI_HOME/bin/site" "${pair%%=*}" "${pair#*=}"
+              "$CI_HOME/bin/site" "$slug" "${pair#*=}"
             echo "::endgroup::"
+            if [ "$verify" != 0 ]; then
+              read -r _ now _ url < <(HANZO_API="$API" "$CI_HOME/bin/rollback" mark "$slug") || exit 1
+              read -r _ was _ _ <<<"$before"
+              released="$released $slug:$now:$was:$url"
+            fi
           done < "$RUNNER_TEMP/site-pairs"
           [ "$HANZO_CI_ROLE" = publish ] || echo "shipped=true" >> "$GITHUB_OUTPUT"
-          # What each site serves now and served before, for the verify job to
-          # roll back to, when hanzo.yml lists `verify:`.
-          if [ "$(yq '.verify // [] | length' hanzo.yml)" != 0 ]; then
-            released=
-            while IFS= read -r pair; do
-              m=$(HANZO_API="$API" "$CI_HOME/bin/rollback" mark "${pair%%=*}") || exit 1
-              released="$released ${m// /:}"
-            done <<<"$PAIRS"
-            echo "released=${released# }" >> "$GITHUB_OUTPUT"
-          fi
+          [ -z "$released" ] || echo "released=${released# }" >> "$GITHUB_OUTPUT"
 
       - name: Save the JS caches (this org's store)
         # After the gate and any site build, red or green, like the Go cache, and

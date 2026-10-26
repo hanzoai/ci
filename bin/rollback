@@ -2,15 +2,16 @@
 # rollback — which release a site serves, and the flip back to the one before.
 #
 #   rollback mark <slug>                 # "<slug> <active> <previous> <url>": what serves now
-#   rollback undo <slug> <active> <prev> # serve <prev> again, if <active> still serves
+#   rollback undo <slug> <now> <before>  # serve <before> again, if <now> still serves
 #
 # The Sites plane keeps a site's releases, newest first, and serves exactly one
 # (GET /v1/project/<slug>/releases); pointing the site at an older one is the
 # rollback (POST .../releases/<id>/activate), with nothing rebuilt or copied.
-# The publish step marks each site right after it goes live; the verify job
-# undoes the mark when a suite fails. Undo flips only while the release this run
-# made live is still the one serving, so a newer publish is never rolled back by
-# an older run's verdict.
+# The publish step marks each site before and after it publishes; the verify job
+# undoes the publish when a suite fails. A publish of identical content leaves
+# the same release serving, and undoing it changes nothing. Undo flips only
+# while the release this run made live is still the one serving, so a newer
+# publish is never rolled back by an older run's verdict.
 #
 # ENV: HANZO_API (https://api.hanzo.ai), HANZO_DEPLOY_TOKEN (the org's sk- key).
 set -uo pipefail
@@ -41,7 +42,8 @@ if [ "$cmd" = mark ]; then
 fi
 
 now=$3 prev=$4
-[ "$prev" != - ] || { echo "::error::rollback: $slug has no release before $now to serve again"; exit 1; }
+[ "$now" != "$prev" ] || { echo "rollback: $slug serves what it served before this run ($now), so there is nothing to undo"; exit 0; }
+[ "$prev" != - ] || { echo "::error::rollback: $slug served nothing before $now, so there is no release to serve again"; exit 1; }
 [ "$active" = "$now" ] || { echo "::notice::rollback: $slug now serves ${active:-nothing}, not $now — a newer publish stands"; exit 0; }
 code=$(curl -sS -m 30 -o /dev/null -w '%{http_code}' -X POST "$api/v1/project/$slug/releases/$prev/activate" \
   -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN") || code=000

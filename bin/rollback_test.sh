@@ -39,5 +39,9 @@ got=$(bash "$BIN" mark site)
 [ "$got" = "site r1 - -" ] && ok "a first release has nothing before it" || no "a first release has nothing before it" "$got"
 bash "$BIN" undo site r1 - > /dev/null 2>&1; [ $? = 1 ] && ok "undo with nothing before it fails" || no "undo with nothing before it fails" "$?"
 
+echo '[{"releaseId":"r3","active":true},{"releaseId":"r2","active":false}]' > "$LIST"
+: > "$CALLS"; out=$(bash "$BIN" undo site r3 r3)
+[ ! -s "$CALLS" ] && grep -q 'nothing to undo' <<<"$out" && ok "a publish that changed nothing is not undone" || no "a publish that changed nothing is not undone" "$out"
+
 bash "$BIN" mark 'Bad/slug' > /dev/null 2>&1; [ $? = 2 ] && ok "a slug that is not one is refused" || no "a slug that is not one is refused" "$?"
 exit $fail
