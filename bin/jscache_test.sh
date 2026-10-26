@@ -39,7 +39,7 @@ grep -q "^save node_modules-v22.23.3-$arch .* m_root=node_modules$" "$CALLS" && 
 ! grep -q "^save node_modules-" "$CALLS" && grep -q "^save next-" "$CALLS" \
   && ok "an exact node_modules hit is not saved again; Next's cache still is" || no "an exact node_modules hit is not saved again; Next's cache still is"
 
-mkdir -p apps/docs && printf '{"name":"docs","dependencies":{"next":"16"}}' > apps/docs/package.json
+mkdir -p apps/docs .next && printf '{"name":"docs","dependencies":{"next":"16"}}' > apps/docs/package.json && printf '{"type":"commonjs"}' > .next/package.json
 : > "$CALLS"; bash "$T/bin/jscache" restore > /dev/null 2>&1
 grep -q "^restore next-v22.23.3-$arch $GITHUB_SHA n_root=.next/cache n_apps_docs=apps/docs/.next/cache$" "$CALLS" \
   && ok "every package that depends on next carries its own .next/cache, by directory" \
@@ -47,7 +47,7 @@ grep -q "^restore next-v22.23.3-$arch $GITHUB_SHA n_root=.next/cache n_apps_docs
 grep -q "^restore node_modules-v22.23.3-$arch [0-9a-f]\{32\} m_root=node_modules m_apps_docs=apps/docs/node_modules$" "$CALLS" \
   && ok "every package in a workspace carries its own node_modules, so an install that finds the root current has nothing to link" \
   || no "every package in a workspace carries its own node_modules, so an install that finds the root current has nothing to link"
-rm -rf apps
+rm -rf apps .next
 
 printf '{"name":"x"}' > package.json; git -c user.email=t@t -c user.name=t commit -qam y
 : > "$CALLS"; bash "$T/bin/jscache" restore > /dev/null 2>&1

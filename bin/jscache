@@ -57,7 +57,7 @@ while IFS= read -r pj; do
   jq -e '(.dependencies // {}) + (.devDependencies // {}) | has("next")' "$pj" >/dev/null 2>&1 || continue
   d=$(dirname "$pj"); d=${d#./}
   if [ "$d" = . ]; then apps+=("n_root=.next/cache"); else apps+=("n_$(printf '%s' "$d" | tr -c 'A-Za-z0-9._-' '_')=$d/.next/cache"); fi
-done < <(find . -maxdepth 3 -name package.json -not -path '*/node_modules/*' 2>/dev/null | awk '{print (($0 == "./package.json") ? 0 : 1) "\t" $0}' | sort | cut -f2)
+done < <(find . -maxdepth 3 -name package.json -not -path '*/node_modules/*' -not -path './.*/*' 2>/dev/null | awk '{print (($0 == "./package.json") ? 0 : 1) "\t" $0}' | sort | cut -f2)
 sha=${GITHUB_SHA:-$(git rev-parse HEAD)}
 # Each package's node_modules, three levels down at most, labelled by directory
 # as the Next caches are.
@@ -65,7 +65,7 @@ mods=()
 while IFS= read -r pj; do
   d=$(dirname "$pj"); d=${d#./}
   if [ "$d" = . ]; then mods+=("m_root=node_modules"); else mods+=("m_$(printf '%s' "$d" | tr -c 'A-Za-z0-9._-' '_')=$d/node_modules"); fi
-done < <(find . -maxdepth 3 -name package.json -not -path '*/node_modules/*' 2>/dev/null | awk '{print (($0 == "./package.json") ? 0 : 1) "\t" $0}' | sort | cut -f2)
+done < <(find . -maxdepth 3 -name package.json -not -path '*/node_modules/*' -not -path './.*/*' 2>/dev/null | awk '{print (($0 == "./package.json") ? 0 : 1) "\t" $0}' | sort | cut -f2)
 
 # one <name> <key> <label>=<dir>: a restore whose hit= is read back rather than
 # left in GITHUB_OUTPUT, where two restores would answer as one.
