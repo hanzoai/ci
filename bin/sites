@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# sites — the static exports this run publishes, read from hanzo.yml once for
+# both jobs that need them.
+#
+#   sites pairs   # slug=dir per line when this ref publishes, nothing when it does not
+#   sites build   # the command that builds them (site.build, or site-build for sites:)
+#
+# `site:` is one export, `sites:` is several: a white-labelled product builds once
+# and ships an export per brand, and a site keys on its HOST, so a brand per host
+# is a site per host. Both spellings land on the same slug=dir lines.
+#
+# A tag always publishes; a branch publishes only when `on:` names it, and the
+# list's gate is the first entry's, so every brand of one product goes live
+# together. A pull request publishes nothing.
+#
+# The publish job publishes these pairs. The test job reads them too: when
+# hanzo.yml names no build, the gate is what built each export, and the test job
+# carries it to the publish job (bin/cache, keyed by the commit) instead of the
+# publish job building it a second time.
+#
+# Exit 1, with an ::error::, when hanzo.yml declares both spellings or a pair
+# lacks its slug or its dir.
+set -euo pipefail
+cmd=${1:-}
+case "$cmd" in pairs|build) ;; *) echo "usage: sites pairs|build" >&2; exit 2 ;; esac
+f=${HANZO_YML:-hanzo.yml}
+[ -f "$f" ] || exit 0
+
+one=$(yq -r '.site | type' "$f" 2>/dev/null || echo '!!null')
+many=$(yq -r '.sites | type' "$f" 2>/dev/null || echo '!!null')
+[ "$one" = '!!map' ] || [ "$many" = '!!seq' ] || exit 0
+if [ "$one" = '!!map' ] && [ "$many" = '!!seq' ]; then
+  echo "::error::hanzo.yml declares BOTH site: and sites:. One list, one spelling." >&2; exit 1
+fi
+
+if [ "$cmd" = build ]; then
+  if [ "$many" = '!!seq' ]; then yq -r '.["site-build"] // ""' "$f"; else yq -r '.site.build // ""' "$f"; fi
+  exit 0
+fi
+
+case "${GITHUB_EVENT_NAME:-}" in pull_request*) exit 0 ;; esac
+if [ "${GITHUB_REF_TYPE:-}" != tag ]; then
+  if [ "$many" = '!!seq' ]; then on=$(yq -o=json -I=0 '.sites[0].on // []' "$f"); else on=$(yq -o=json -I=0 '.site.on // []' "$f"); fi
+  echo "$on" | jq -e --arg b "${GITHUB_REF_NAME:-}" 'index($b)' >/dev/null || exit 0
+fi
+if [ "$many" = '!!seq' ]; then
+  pairs=$(yq -r '.sites[] | (.slug // "") + "=" + (.dir // "")' "$f")
+else
+  pairs=$(yq -r '(.site.slug // "") + "=" + (.site.dir // "")' "$f")
+fi
+if printf '%s\n' "$pairs" | grep -qE '^=|=$'; then
+  echo "::error::every site needs both slug: (the /v1/sites project) and dir: (the built export)" >&2; exit 1
+fi
+printf '%s\n' "$pairs"

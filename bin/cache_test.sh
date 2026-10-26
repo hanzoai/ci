@@ -40,12 +40,19 @@ case "$url" in
   http://api.test/v1/s3/buckets)
     [ "$auth" = "Authorization: Bearer tok" ] || { code 401; exit 0; }
     code 201; exit 0 ;;
+  http://api.test/v1/s3/buckets/ci-cache/objects\?*)
+    # A listing: the keys under ?prefix=, relative to it, as cloud answers.
+    [ "$auth" = "Authorization: Bearer tok" ] || { code 401; exit 0; }
+    q=${url#*\?prefix=}; q=${q%%&*}; p=$(printf '%b' "${q//%/\\x}")
+    (cd "$STORE" && find . -type f -path "./$p*" | sed "s|^\./$p||") | jq -R . | jq -sc '{objects: map({key: .})}' > "$o"
+    code 200; exit 0 ;;
   http://api.test/v1/s3/buckets/ci-cache/objects)
     [ "$auth" = "Authorization: Bearer tok" ] || { code 401; exit 0; }
     k=$(printf '%s' "$d" | jq -r .key)
     printf '{"url":"store://%s","method":"PUT"}' "$k" > "$o"; code 200; exit 0 ;;
   http://api.test/v1/s3/buckets/ci-cache/objects/*)
     [ "$auth" = "Authorization: Bearer tok" ] || { code 401; exit 0; }
+    if [ "$m" = DELETE ]; then rm -f "$STORE/${url#http://api.test/v1/s3/buckets/ci-cache/objects/}"; code 200; exit 0; fi
     printf '{"url":"store://%s","method":"GET"}' "${url#http://api.test/v1/s3/buckets/ci-cache/objects/}" > "$o"; code 200; exit 0 ;;
 esac
 code 404
@@ -69,7 +76,7 @@ warm() {
 tree() { (cd "$HOME" && find objs dl -exec sh -c 'for f; do if [ -L "$f" ]; then echo "L $f $(readlink "$f")"; elif [ -f "$f" ]; then sha256sum "$f"; fi; done' _ {} + 2>/dev/null | sort); }
 run() { # run <event> <ref> <reftype> <cmd> [key]
   GITHUB_EVENT_NAME=$1 GITHUB_REF_NAME=$2 GITHUB_REF_TYPE=$3 GITHUB_EVENT_PATH="$T/event.json" \
-    GITHUB_OUTPUT="$T/out" bash "$CACHE_BIN" "$4" rust-abc-x86_64 "${5:-k1}" objs="$HOME/objs" dl="$HOME/dl" > "$T/log" 2>&1
+    GITHUB_OUTPUT="$T/out" bash "$CACHE_BIN" "$4" rust-abc-x86_64 "${5:-k1}" $([ "$4" = drop ] || echo objs="$HOME/objs" dl="$HOME/dl") > "$T/log" 2>&1
 }
 ok() { printf 'ok    %s\n' "$1"; }
 no() { printf 'FAIL  %s\n' "$1"; sed 's/^/        /' "$T/log"; fail=1; }
@@ -152,5 +159,19 @@ pod; warm; run push v1.2.3 tag save k2
 
 before=$(puts); pod; run push main branch save k3
 [ "$(puts)" = "$before" ] && ok "no directory to save writes nothing" || no "no directory to save writes nothing"
+
+# Two keys a name: a save keeps the key it wrote and the one latest named
+# before it, and deletes the rest, parts and all.
+pod; warm; run push main branch save k4
+[ -f "$STORE/$pre/k4.idx" ] && [ -f "$STORE/$pre/k2.idx" ] && [ ! -e "$STORE/$pre/k1.idx" ] \
+  && [ -z "$(ls "$STORE/$pre" | grep '^k1\.')" ] \
+  && ok "a save keeps its key and the previous latest, and deletes the rest" \
+  || no "a save keeps its key and the previous latest, and deletes the rest"
+
+run pull_request main branch drop k4
+[ -f "$STORE/$pre/k4.idx" ] && ok "a pull request never drops" || no "a pull request never drops"
+run push main branch drop k4
+[ ! -e "$STORE/$pre/k4.idx" ] && [ -z "$(ls "$STORE/$pre" | grep '^k4\.')" ] \
+  && ok "drop deletes one key, index and parts" || no "drop deletes one key, index and parts"
 
 exit $fail

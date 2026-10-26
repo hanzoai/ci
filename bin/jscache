@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# jscache — a JS repo's node_modules and Next's build cache, carried between
+# runners through the org's store (bin/cache).
+#
+#   jscache restore   # before the first gate; records what it found for save
+#   jscache save      # after the gate: writes on a trusted ref, through bin/cache
+#
+# node_modules, not the package manager's store. Restored as the install that
+# saved it left it, node_modules needs no install at all; a store still has to be
+# linked from (hanzo-inc/app measured the pnpm store at 49 s to restore and 16 s
+# to install from, against 33 s from the registry). The name is what the archive
+# is valid for — the Node version and the architecture, because native modules
+# are built for both — and the key is what decides its contents: the lockfile,
+# package.json, .npmrc and the workspace file. A key that misses restores the
+# newest one saved, and the gate's own install brings it to the lockfile; the
+# save then writes the new key once.
+#
+# .next/cache, keyed by commit, for a repo that depends on next: the compile
+# store is valid across commits (Next checks what it reads), so every trusted
+# run writes its own and restores the newest, and bin/cache keeps two.
+#
+# Root lockfile only. Best effort, like bin/cache: nothing here fails a gate.
+set -uo pipefail
+cmd=${1:-}
+case "$cmd" in restore|save) ;; *) echo "usage: jscache restore|save" >&2; exit 2 ;; esac
+skip() { echo "::notice::jscache: $*"; exit 0; }
+CACHE="$(dirname "$0")/cache"
+state="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/jscache.state"
+
+lock=
+for f in pnpm-lock.yaml package-lock.json yarn.lock bun.lock bun.lockb; do [ -f "$f" ] && { lock=$f; break; }; done
+[ -n "$lock" ] || skip "no lockfile at the root, so there is no node_modules to carry"
+v=$(node -p process.version 2>/dev/null) || skip "node is not on this runner"
+arch=$(uname -m)
+modules="node-$v-$arch"
+key=$(git ls-tree HEAD -- "$lock" package.json .npmrc pnpm-workspace.yaml 2>/dev/null | sha256sum | cut -c1-32)
+next=
+jq -e '(.dependencies // {}) + (.devDependencies // {}) | has("next")' package.json >/dev/null 2>&1 && next="next-$v-$arch"
+sha=${GITHUB_SHA:-$(git rev-parse HEAD)}
+
+# one <name> <key> <label>=<dir>: a restore whose hit= is read back rather than
+# left in GITHUB_OUTPUT, where two restores would answer as one.
+one() {
+  local out; out=$(mktemp)
+  GITHUB_OUTPUT=$out "$CACHE" restore "$@" >&2
+  sed -n 's/^hit=//p' "$out" | tail -1
+  rm -f "$out"
+}
+
+if [ "$cmd" = restore ]; then
+  m=$(one "$modules" "$key" modules=node_modules)
+  printf 'modules=%s\n' "${m:-miss}" > "$state"
+  [ -z "$next" ] || one "$next" "$(printf '%s' "$sha" | cut -c1-40)" next=.next/cache >/dev/null
+  exit 0
+fi
+
+[ -f "$state" ] || skip "no restore ran in this job"
+if [ "$(sed -n 's/^modules=//p' "$state")" != exact ] && [ -d node_modules ]; then
+  "$CACHE" save "$modules" "$key" modules=node_modules
+fi
+if [ -n "$next" ] && [ -d .next/cache ]; then
+  # What no later build reads: the fetch cache holds responses, not compiles.
+  rm -rf .next/cache/fetch-cache
+  "$CACHE" save "$next" "$(printf '%s' "$sha" | cut -c1-40)" next=.next/cache
+fi

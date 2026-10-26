@@ -548,6 +548,17 @@ test:
       set -e
       (cd gocache && GOWORK=off GOTOOLCHAIN=local go vet ./... && GOWORK=off GOTOOLCHAIN=local go test -count=1 ./...)
       bash bin/gocache_test.sh
+  - name: jscache
+    # bin/jscache carries a JS repo's node_modules (by lockfile) and Next's
+    # build cache (by commit) through bin/cache. Pinned against a stub store:
+    # the names and keys it asks for, that an exact hit is not written again,
+    # that the fetch cache never travels, and that no lockfile is a notice.
+    run: bash bin/jscache_test.sh
+  - name: sites
+    # bin/sites is the one reading of site:/sites: that both the test job (which
+    # carries a gate-built export) and the publish job (which ships it) use, so
+    # the two can never disagree about what a ref publishes.
+    run: bash bin/sites_test.sh
   - name: cache
     # bin/cache is the store under gocache and under hanzoai/dev's Rust release
     # cache, so the protocol is pinned once, here, for every caller: who may

@@ -145,6 +145,16 @@ on:
         required: false
         default: ''
         type: string
+      scope:
+        description: >-
+          What this call's gates cover, handed to every `test:` entry as
+          $HANZO_CI_SCOPE: the one app a per-app job tests, or the packages a
+          change touched. Empty by default; an entry reads it or ignores it.
+          It lets a caller fan one hanzo.yml entry out over many parallel
+          jobs, each told its share, with the entry still the one definition.
+        required: false
+        default: ''
+        type: string
       go-cache:
         description: >-
           Carry Go's build cache and module downloads between runs through this
@@ -446,7 +456,7 @@ jobs:
           # Naming the list here also makes the release order self-announcing: a
           # pipeline that has grown a tool refuses at step one, and says which ref
           # it read and what was missing from it.
-          need="cache certclaims conflictmarkers gocache gover ignoretracked imgplat imgtags imgver modsize narrative publishable site vendormark"
+          need="cache certclaims conflictmarkers gocache gover ignoretracked imgplat imgtags imgver jscache modsize narrative publishable site sites vendormark"
           miss='<no host answered>'
           # A sha cannot be a --branch, so it arrives by fetch rather than clone:
           # the caller's pin as well as this file's own commit. Both are wrapped
@@ -1346,6 +1356,15 @@ jobs:
           esac
           corepack enable
 
+      - name: Restore the JS caches (this org's store)
+        # node_modules for the root lockfile, and Next's build cache, before the
+        # gate installs or builds anything: measured on hanzoai/blog, the gate's
+        # `pnpm install` reused 0 of 1015 packages (73 s) and the publish job
+        # installed them all again (27 s). bin/jscache says what each restore
+        # found; a miss or an outage installs from the registry as before.
+        if: hashFiles('package.json') != '' && env.HANZO_CI_TRUSTED == 'true'
+        run: '"$CI_HOME/bin/jscache" restore'
+
       - name: Provision bun (bun test gates)
         # Same guarded provision as the Go, Node and Rust steps: only for callers
         # that declare it, harmless once a runner image bakes bun in. Keyed on the
@@ -1836,6 +1855,7 @@ jobs:
         env:
           GATES: ${{ inputs.gates }}
           GOMOD: ${{ steps.gomod.outputs.file }}
+          HANZO_CI_SCOPE: ${{ inputs.scope }}
         run: |
           set -euo pipefail
           # ONE PATH FOR THE SOURCE ON EVERY RUNNER. Without -trimpath the go
@@ -1979,6 +1999,32 @@ jobs:
             fi
             printf '%s\t%s\t%s\n' "$n" "$claims" "$name" >> "$receipt"
           done
+
+      - name: Carry the site export to the publish job
+        # When hanzo.yml names no site build, the gate is what built the export,
+        # so the bytes the tests read are the bytes that ship: the publish job
+        # restores this, keyed by the commit, instead of building it a second
+        # time (hanzoai/blog: 27 s of install and 128 s of `next build`, again).
+        # Only the run that will publish carries it (bin/sites), only from the
+        # call that gates on everything, and one architecture's leg.
+        if: success() && env.HANZO_CI_ROLE == 'test' && env.HANZO_CI_TRUSTED == 'true' && inputs.gates == '' && inputs.tests != 'false' && matrix.runner != 'linux-arm64'
+        run: |
+          set -euo pipefail
+          [ -z "$("$CI_HOME/bin/sites" build)" ] || exit 0
+          "$CI_HOME/bin/sites" pairs > "$RUNNER_TEMP/carry-pairs"
+          while IFS= read -r pair; do
+            [ -n "$pair" ] || continue
+            slug=${pair%%=*}; dir=${pair#*=}
+            [ -d "$dir" ] || {
+              echo "::error::hanzo.yml names no site build, so the gate must leave the export at $dir for $slug, and it did not"; exit 1; }
+            "$CI_HOME/bin/cache" save "site-$slug" "$GITHUB_SHA" export="$dir"
+          done < "$RUNNER_TEMP/carry-pairs"
+
+      - name: Save the JS caches (this org's store)
+        # After the gate, red or green, like the Go cache, and only from a trusted
+        # ref (bin/cache): node_modules when its key missed, Next's cache always.
+        if: (success() || failure()) && hashFiles('package.json') != '' && env.HANZO_CI_ROLE == 'test' && env.HANZO_CI_TRUSTED == 'true'
+        run: '"$CI_HOME/bin/jscache" save'
 
       - name: Save the Go cache (this org's store)
         # After the gate, red or green: an output is valid for the inputs that
@@ -3338,50 +3384,32 @@ jobs:
         run: |
           set -euo pipefail
           REF="${{ github.ref_name }}"
-          # A caller with no `site:` ships no static export, and reading
-          # .site.slug off null would abort the step instead of skipping it.
-          #
-          # `site:` is one, `sites:` is several. A white-labelled product builds
-          # once and ships an export per brand, and a site keys on its HOST, so a
-          # brand per host is a site per host. Both spellings land on the same
-          # slug=dir lines, so everything after this is one path.
-          SITE_T=$(yq -r '.site | type' hanzo.yml 2>/dev/null || echo '!!null')
-          SITES_T=$(yq -r '.sites | type' hanzo.yml 2>/dev/null || echo '!!null')
-          if [ "$SITE_T" != '!!map' ] && [ "$SITES_T" != '!!seq' ]; then
-            echo "::notice::no site:/sites: in hanzo.yml — nothing to publish"; exit 0
-          fi
-          if [ "$SITE_T" = '!!map' ] && [ "$SITES_T" = '!!seq' ]; then
-            echo "::error::hanzo.yml declares BOTH site: and sites:. One list, one spelling."; exit 1
-          fi
-          # Same branch gate as deploy.on, including the tag case: a tagged release
-          # publishes, a branch publishes only if it is named. The gate is the
-          # LIST's, so every brand of one product goes live together — a rollout
-          # that reached one brand and not another is the drift this lane removes.
-          if [ "$SITES_T" = '!!seq' ]; then
-            ON=$(yq -o=json -I=0 '.sites[0].on // []' hanzo.yml)
-          else
-            ON=$(yq -o=json -I=0 '.site.on // []' hanzo.yml)
-          fi
-          IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo 1 || echo 0)
-          if [ "$IS_TAG" != 1 ] && ! echo "$ON" | jq -e --arg b "$REF" 'index($b)' >/dev/null; then
-            echo "branch $REF not in site.on — skipping publish"; exit 0
-          fi
-          if [ "$SITES_T" = '!!seq' ]; then
-            PAIRS=$(yq -r '.sites[] | "\(.slug)=\(.dir)"' hanzo.yml)
-            BUILD=$(yq -r '.["site-build"] // ""' hanzo.yml)
-          else
-            SLUG=$(yq -r '.site.slug // ""' hanzo.yml)
-            DIR=$(yq -r '.site.dir // ""' hanzo.yml)
-            BUILD=$(yq -r '.site.build // ""' hanzo.yml)
-            PAIRS="$SLUG=$DIR"
-          fi
-          if printf '%s\n' "$PAIRS" | grep -qE '^=|=$'; then
-            echo "::error::every site needs both slug: (the /v1/sites project) and dir: (the built export)"; exit 1
+          # Which exports this ref publishes, and the build that makes them: one
+          # reading of `site:`/`sites:` (bin/sites), the one the test job reads
+          # too. A caller with no `site:` ships no static export; a branch
+          # publishes only when `on:` names it, and every brand of one product
+          # goes live together, so a rollout never reaches one brand and not
+          # another.
+          PAIRS=$("$CI_HOME/bin/sites" pairs)
+          BUILD=$("$CI_HOME/bin/sites" build)
+          if [ -z "$PAIRS" ]; then
+            echo "::notice::no site:/sites: in hanzo.yml publishes from $REF — nothing to publish"; exit 0
           fi
           if [ -n "$BUILD" ]; then
             echo "::group::build ($BUILD)"
             sh -c "$BUILD"
             echo "::endgroup::"
+          else
+            # No build named: the gate built each export and the test job
+            # carried it here, keyed by this commit.
+            while IFS= read -r pair; do
+              slug=${pair%%=*}; dir=${pair#*=}
+              out=$(mktemp)
+              GITHUB_OUTPUT=$out "$CI_HOME/bin/cache" restore "site-$slug" "${{ github.sha }}" export="$dir"
+              hit=$(sed -n 's/^hit=//p' "$out" | tail -1)
+              [ "$hit" = exact ] || [ -d "$dir" ] || {
+                echo "::error::the gate's export of $slug ($dir) was not carried from the test job, and hanzo.yml names no build to make it here"; exit 1; }
+            done <<<"$PAIRS"
           fi
           # Fail closed on the ONE thing that can be missing, and say which one.
           # An empty token here means the KMS login did not happen — not that a
@@ -3409,6 +3437,10 @@ jobs:
               "$CI_HOME/bin/site" "${pair%%=*}" "${pair#*=}"
             echo "::endgroup::"
           done < "$RUNNER_TEMP/site-pairs"
+          # A carried export is spent once it is live.
+          if [ -z "$BUILD" ]; then
+            while IFS= read -r pair; do "$CI_HOME/bin/cache" drop "site-${pair%%=*}" "${{ github.sha }}"; done <<<"$PAIRS"
+          fi
 
   # The same test, gating on linux-amd64 alone, for a caller whose
   # `test-runners` names only that architecture. It is a job rather than a matrix

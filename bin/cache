@@ -3,7 +3,8 @@
 #
 #   cache restore <name> <key> <label>=<dir>...   # prints hit=exact|partial|miss to $GITHUB_OUTPUT
 #   cache save    <name> <key> <label>=<dir>...   # writes on a trusted ref, on a miss, and nowhere else
-#   cache trusted                                 # exit 0 when this run may write (bin/gocache asks)
+#   cache drop    <name> <key>                    # deletes one key, on a trusted ref
+#   cache trusted                                 # exit 0 when this run may write
 #
 # A runner is a pod that lives for one job, so a cache on its disk dies with it.
 # This is the one way a job hands a directory to the next one: hanzoai/dev's
@@ -40,6 +41,11 @@
 # parts are not all there, and an archive that does not match its index is
 # never unpacked.
 #
+# TWO KEYS A NAME. A save deletes every key under its name but the one it wrote
+# and the one `latest` named before it, so a name keyed by commit (a build cache
+# that every trusted run refreshes) holds two archives rather than one per push.
+# A carried export (bin/sites) is dropped by the job that consumed it.
+#
 # BEST EFFORT: every failure is a notice and exit 0. A cache that cannot be read
 # is a cold build, never a red one.
 #
@@ -49,7 +55,7 @@
 #      CACHE_PART       94371840 (90 MiB), the size of one uploaded part
 set -uo pipefail
 
-usage() { echo "usage: cache restore|save <name> <key> <label>=<dir>... | cache trusted" >&2; exit 2; }
+usage() { echo "usage: cache restore|save <name> <key> <label>=<dir>... | cache drop <name> <key> | cache trusted" >&2; exit 2; }
 
 # trusted: a pull request never writes; the default branch and tags do. why says
 # which, for the line a refusal prints.
@@ -64,8 +70,7 @@ trusted() {
 if [ "${1:-}" = trusted ]; then trusted; exit; fi
 
 cmd="${1:-}"; name="${2:-}"; key="${3:-}"
-case "$cmd" in restore|save) ;; *) usage ;; esac
-[ $# -ge 4 ] || usage
+case "$cmd" in restore|save) [ $# -ge 4 ] || usage ;; drop) [ $# -eq 3 ] || usage ;; *) usage ;; esac
 shift 3
 # Each of these is one segment of an object key or one name in the archive, so
 # none may be empty, start with a dot or a dash, or carry a slash.
@@ -157,6 +162,27 @@ lap() {
 
 export -f get put api; export base bucket tmp HANZO_API_TOKEN
 
+# keys: every key saved under this name, from its objects (<key>.idx, <key>.tar.zst.NNN).
+keys() {
+  api GET "/v1/s3/buckets/$bucket/objects?prefix=$(jq -rn --arg p "$prefix/" '$p|@uri')&recursive=true" \
+    | jq -r '.objects[]?.key' | sed -n 's/^\([^/]*\)\.\(idx\|tar\.zst\.[0-9]*\)$/\1/p' | sort -u
+}
+# remove <key>: its index first, so a reader never finds one whose parts are going.
+remove() {
+  local k=$1 o
+  api DELETE "/v1/s3/buckets/$bucket/objects/$prefix/$k.idx" >/dev/null || return 1
+  api GET "/v1/s3/buckets/$bucket/objects?prefix=$(jq -rn --arg p "$prefix/$k.tar.zst." '$p|@uri')&recursive=true" \
+    | jq -r '.objects[]?.key' | while read -r o; do
+      [ -n "$o" ] && api DELETE "/v1/s3/buckets/$bucket/objects/$prefix/$k.tar.zst.$o" >/dev/null
+    done
+}
+
+if [ "$cmd" = drop ]; then
+  trusted || { say "$why"; exit 0; }
+  remove "$key" && say "dropped $prefix/$key" || say "could not drop $prefix/$key"
+  exit 0
+fi
+
 if [ "$cmd" = restore ]; then
   t0=$(date +%s)
   hit=exact
@@ -212,8 +238,14 @@ bytes=$(wc -c "$tmp"/part.* | tail -1 | awk '{print $1}')
 printf '%s\n' "$tmp"/part.* | xargs -P 8 -I{} bash -c 'put "$0.${1##*.}" "$1"' "$prefix/$key.tar.zst" {} \
   || { say "a part did not upload; nothing is indexed, so nothing half-written is ever read"; exit 0; }
 # The index goes last, so a reader never finds a key whose parts are not all there.
+prev=; get "$prefix/latest" "$tmp/prev" 2>/dev/null && prev=$(head -1 "$tmp/prev")
 printf '%s %s\n' "$hash" "$n" > "$tmp/idx"; printf '%s\n' "$key" > "$tmp/latest"
 if ! put "$prefix/$key.idx" "$tmp/idx" || ! put "$prefix/latest" "$tmp/latest"; then
   say "the index did not upload"; exit 0
 fi
 say "saved $prefix/$key: $((bytes / 1048576)) MiB in $n part(s), $(( $(date +%s) - t0 ))s"
+gone=0
+for k in $(keys); do
+  [ "$k" = "$key" ] || [ "$k" = "$prev" ] || { remove "$k" && gone=$((gone + 1)); }
+done
+[ "$gone" = 0 ] || say "deleted $gone older key(s) under $prefix"
