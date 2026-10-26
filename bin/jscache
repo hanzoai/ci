@@ -5,15 +5,20 @@
 #   jscache restore   # before the first gate; records what it found for save
 #   jscache save      # after the gate: writes on a trusted ref, through bin/cache
 #
-# node_modules, not the package manager's store. Restored as the install that
-# saved it left it, node_modules needs no install at all; a store still has to be
-# linked from (hanzo-inc/app measured the pnpm store at 49 s to restore and 16 s
-# to install from, against 33 s from the registry). The name is what the archive
-# is valid for — the Node version and the architecture, because native modules
-# are built for both — and the key is what decides its contents: the lockfile,
-# package.json, .npmrc and the workspace file. A key that misses restores the
-# newest one saved, and the gate's own install brings it to the lockfile; the
-# save then writes the new key once.
+# Every package's node_modules, not the package manager's store. Restored as
+# the install that saved it left it, node_modules needs no install at all, where
+# a store still has to be linked from (hanzo-inc/app measured the pnpm store at
+# 49 s to restore and 16 s to install from, against 33 s from the registry). In a
+# workspace that means each package's own node_modules as well as the root's:
+# pnpm reads the root's state, answers "Already up to date" and links nothing,
+# so a package whose node_modules did not come back resolves its imports from
+# the root's and builds against other versions (hanzoai/ui's @hanzo/ui failed to
+# typecheck that way). The name is what the archive is valid for — the Node
+# version and the architecture, because native modules are built for both — and
+# the key is what decides its contents: the lockfile, package.json, .npmrc and
+# the workspace file. A key that misses restores the newest one saved, and the
+# gate's own install brings it to the lockfile; the save then writes the new key
+# once.
 #
 # .next/cache, keyed by commit, for every package in the repo that depends on
 # next — the root, or apps/docs in a workspace — in one archive, each under a
@@ -40,7 +45,8 @@ if [ "$cmd" = restore ] && [ "${HANZO_CI_ROLE:-}" = publish ] && [ -z "$("$(dirn
 fi
 v=$(node -p process.version 2>/dev/null) || skip "node is not on this runner"
 arch=$(uname -m)
-modules="node-$v-$arch"
+# A new name when what an archive holds changes, so none written before is read.
+modules="node_modules-$v-$arch"
 key=$(git ls-tree HEAD -- "$lock" package.json .npmrc pnpm-workspace.yaml 2>/dev/null | sha256sum | cut -c1-32)
 next="next-$v-$arch"
 # Each package that depends on next, three levels down at most, as
@@ -53,6 +59,13 @@ while IFS= read -r pj; do
   if [ "$d" = . ]; then apps+=("n_root=.next/cache"); else apps+=("n_$(printf '%s' "$d" | tr -c 'A-Za-z0-9._-' '_')=$d/.next/cache"); fi
 done < <(find . -maxdepth 3 -name package.json -not -path '*/node_modules/*' 2>/dev/null | awk '{print (($0 == "./package.json") ? 0 : 1) "\t" $0}' | sort | cut -f2)
 sha=${GITHUB_SHA:-$(git rev-parse HEAD)}
+# Each package's node_modules, three levels down at most, labelled by directory
+# as the Next caches are.
+mods=()
+while IFS= read -r pj; do
+  d=$(dirname "$pj"); d=${d#./}
+  if [ "$d" = . ]; then mods+=("m_root=node_modules"); else mods+=("m_$(printf '%s' "$d" | tr -c 'A-Za-z0-9._-' '_')=$d/node_modules"); fi
+done < <(find . -maxdepth 3 -name package.json -not -path '*/node_modules/*' 2>/dev/null | awk '{print (($0 == "./package.json") ? 0 : 1) "\t" $0}' | sort | cut -f2)
 
 # one <name> <key> <label>=<dir>: a restore whose hit= is read back rather than
 # left in GITHUB_OUTPUT, where two restores would answer as one.
@@ -64,7 +77,7 @@ one() {
 }
 
 if [ "$cmd" = restore ]; then
-  m=$(one "$modules" "$key" modules=node_modules)
+  m=$(one "$modules" "$key" "${mods[@]}")
   printf 'modules=%s\n' "${m:-miss}" > "$state"
   [ ${#apps[@]} = 0 ] || one "$next" "$(printf '%s' "$sha" | cut -c1-40)" "${apps[@]}" >/dev/null
   exit 0
@@ -72,7 +85,7 @@ fi
 
 [ -f "$state" ] || skip "no restore ran in this job"
 if [ "$(sed -n 's/^modules=//p' "$state")" != exact ] && [ -d node_modules ]; then
-  "$CACHE" save "$modules" "$key" modules=node_modules
+  "$CACHE" save "$modules" "$key" "${mods[@]}"
 fi
 have=()
 for a in "${apps[@]}"; do
