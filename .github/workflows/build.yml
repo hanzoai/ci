@@ -3455,6 +3455,13 @@ jobs:
             while IFS= read -r pair; do "$CI_HOME/bin/cache" drop "site-${pair%%=*}" "${{ github.sha }}"; done <<<"$PAIRS"
           fi
 
+      - name: Save the JS caches after the site build (this org's store)
+        # When the publish job is the one that builds the site (hanzo.yml names a
+        # build), its Next cache is the one the next build reads: hanzo-docs/docs
+        # compiles 6,282 pages there, 13.6 minutes cold (run 16350).
+        if: (success() || failure()) && hashFiles('package.json') != '' && env.HANZO_CI_ROLE == 'publish' && env.HANZO_CI_TRUSTED == 'true' && github.event_name != 'pull_request'
+        run: '"$CI_HOME/bin/jscache" save'
+
   # The same test, gating on linux-amd64 alone, for a caller whose
   # `test-runners` names only that architecture. It is a job rather than a matrix
   # leg for the reason `test` gives: an input cannot choose a matrix here.

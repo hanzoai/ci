@@ -15,9 +15,12 @@
 # newest one saved, and the gate's own install brings it to the lockfile; the
 # save then writes the new key once.
 #
-# .next/cache, keyed by commit, for a repo that depends on next: the compile
-# store is valid across commits (Next checks what it reads), so every trusted
-# run writes its own and restores the newest, and bin/cache keeps two.
+# .next/cache, keyed by commit, for every package in the repo that depends on
+# next — the root, or apps/docs in a workspace — in one archive, each under a
+# label named for its directory: the compile store is valid across commits (Next
+# checks what it reads), so every trusted run writes its own and restores the
+# newest, and bin/cache keeps two. The publish job saves it too, when it is the
+# one that builds the site.
 #
 # Root lockfile only. Best effort, like bin/cache: nothing here fails a gate.
 set -uo pipefail
@@ -39,8 +42,16 @@ v=$(node -p process.version 2>/dev/null) || skip "node is not on this runner"
 arch=$(uname -m)
 modules="node-$v-$arch"
 key=$(git ls-tree HEAD -- "$lock" package.json .npmrc pnpm-workspace.yaml 2>/dev/null | sha256sum | cut -c1-32)
-next=
-jq -e '(.dependencies // {}) + (.devDependencies // {}) | has("next")' package.json >/dev/null 2>&1 && next="next-$v-$arch"
+next="next-$v-$arch"
+# Each package that depends on next, three levels down at most, as
+# <label>=<dir>/.next/cache; the label is the directory, which bin/cache
+# requires to be one plain name.
+apps=()
+while IFS= read -r pj; do
+  jq -e '(.dependencies // {}) + (.devDependencies // {}) | has("next")' "$pj" >/dev/null 2>&1 || continue
+  d=$(dirname "$pj"); d=${d#./}
+  if [ "$d" = . ]; then apps+=("n_root=.next/cache"); else apps+=("n_$(printf '%s' "$d" | tr -c 'A-Za-z0-9._-' '_')=$d/.next/cache"); fi
+done < <(find . -maxdepth 3 -name package.json -not -path '*/node_modules/*' 2>/dev/null | awk '{print (($0 == "./package.json") ? 0 : 1) "\t" $0}' | sort | cut -f2)
 sha=${GITHUB_SHA:-$(git rev-parse HEAD)}
 
 # one <name> <key> <label>=<dir>: a restore whose hit= is read back rather than
@@ -55,7 +66,7 @@ one() {
 if [ "$cmd" = restore ]; then
   m=$(one "$modules" "$key" modules=node_modules)
   printf 'modules=%s\n' "${m:-miss}" > "$state"
-  [ -z "$next" ] || one "$next" "$(printf '%s' "$sha" | cut -c1-40)" next=.next/cache >/dev/null
+  [ ${#apps[@]} = 0 ] || one "$next" "$(printf '%s' "$sha" | cut -c1-40)" "${apps[@]}" >/dev/null
   exit 0
 fi
 
@@ -63,8 +74,12 @@ fi
 if [ "$(sed -n 's/^modules=//p' "$state")" != exact ] && [ -d node_modules ]; then
   "$CACHE" save "$modules" "$key" modules=node_modules
 fi
-if [ -n "$next" ] && [ -d .next/cache ]; then
+have=()
+for a in "${apps[@]}"; do
+  d=${a#*=}
+  [ -d "$d" ] || continue
   # What no later build reads: the fetch cache holds responses, not compiles.
-  rm -rf .next/cache/fetch-cache
-  "$CACHE" save "$next" "$(printf '%s' "$sha" | cut -c1-40)" next=.next/cache
-fi
+  rm -rf "$d/fetch-cache"
+  have+=("$a")
+done
+[ ${#have[@]} = 0 ] || "$CACHE" save "$next" "$(printf '%s' "$sha" | cut -c1-40)" "${have[@]}"

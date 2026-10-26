@@ -51,8 +51,8 @@ grep -q '^GOCACHEPROG=.*/gocache connect .*/sock .*/dir$' "$T/env" && grep -q '^
   && ok "restore wires GOCACHEPROG, GOPROXY and both cache directories into later steps" \
   || no "restore wires GOCACHEPROG, GOPROXY and both cache directories into later steps"
 up=$(go env GOPROXY)
-[ "$(sed -n 's/^GOPROXY=http:\/\/127\.0\.0\.1:[0-9]*|//p' "$T/env")" = "$up" ] \
-  && ok "GOPROXY keeps what it named behind the cache" || no "GOPROXY keeps what it named behind the cache"
+[ "$(sed -n 's/^GOPROXY=http:\/\/127\.0\.0\.1:[0-9]*|//p' "$T/env")" = "${up//,/|}" ] \
+  && ok "GOPROXY keeps what it named behind the cache, each falling through to the next" || no "GOPROXY keeps what it named behind the cache, each falling through to the next"
 grep -q 'writing what this job builds' "$T/log" && ok "the default branch may write" || no "the default branch may write"
 
 ( set -a; . "$T/env"; set +a; cd "$T/m" && GOWORK=off GOFLAGS= go build -o "$T/m.out" . ) > "$T/log" 2>&1 && "$T/m.out" | grep -qx m \

@@ -26,18 +26,25 @@ arch=$(uname -m)
 
 : > "$CALLS"; bash "$T/bin/jscache" restore > /dev/null 2>&1
 grep -q "^restore node-v22.23.3-$arch [0-9a-f]\{32\} modules=node_modules$" "$CALLS" \
-  && grep -q "^restore next-v22.23.3-$arch $GITHUB_SHA next=.next/cache$" "$CALLS" \
+  && grep -q "^restore next-v22.23.3-$arch $GITHUB_SHA n_root=.next/cache$" "$CALLS" \
   && ok "restore asks for node_modules by lockfile and Next's cache by commit" || no "restore asks for node_modules by lockfile and Next's cache by commit"
 
 mkdir -p node_modules/a .next/cache/fetch-cache .next/cache/webpack
 : > "$CALLS"; bash "$T/bin/jscache" save > /dev/null 2>&1
-grep -q "^save node-v22.23.3-$arch .* modules=node_modules$" "$CALLS" && grep -q "^save next-v22.23.3-$arch $GITHUB_SHA next=.next/cache$" "$CALLS" \
+grep -q "^save node-v22.23.3-$arch .* modules=node_modules$" "$CALLS" && grep -q "^save next-v22.23.3-$arch $GITHUB_SHA n_root=.next/cache$" "$CALLS" \
   && [ ! -e .next/cache/fetch-cache ] && [ -d .next/cache/webpack ] \
   && ok "save writes both after a miss, without the fetch cache" || no "save writes both after a miss, without the fetch cache"
 
 : > "$CALLS"; HIT=exact bash "$T/bin/jscache" restore > /dev/null 2>&1; : > "$CALLS"; bash "$T/bin/jscache" save > /dev/null 2>&1
 ! grep -q "^save node-" "$CALLS" && grep -q "^save next-" "$CALLS" \
   && ok "an exact node_modules hit is not saved again; Next's cache still is" || no "an exact node_modules hit is not saved again; Next's cache still is"
+
+mkdir -p apps/docs && printf '{"name":"docs","dependencies":{"next":"16"}}' > apps/docs/package.json
+: > "$CALLS"; bash "$T/bin/jscache" restore > /dev/null 2>&1
+grep -q "^restore next-v22.23.3-$arch $GITHUB_SHA n_root=.next/cache n_apps_docs=apps/docs/.next/cache$" "$CALLS" \
+  && ok "every package that depends on next carries its own .next/cache, by directory" \
+  || no "every package that depends on next carries its own .next/cache, by directory"
+rm -rf apps
 
 printf '{"name":"x"}' > package.json; git -c user.email=t@t -c user.name=t commit -qam y
 : > "$CALLS"; bash "$T/bin/jscache" restore > /dev/null 2>&1

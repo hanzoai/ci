@@ -93,13 +93,14 @@ for _ in $(seq 1 1300); do [ -s "$state/ready" ] && break; sleep 0.1; done
 [ -s "$state/ready" ] || { sed 's/^/  /' "$state/log"; skip "the cache did not start, so this job builds cold"; }
 addr=$(cat "$state/ready")
 
-# First in GOPROXY, with `|` after it: a miss or a fault there sends the go
-# command on to whatever GOPROXY already named. A GOPROXY that forbids
-# downloading (`off`) is left as it is.
+# First in GOPROXY, then what GOPROXY already named, every entry joined with
+# `|`: a miss or a fault at one sends the go command on to the next, where `,`
+# would stop it at a dropped stream (hanzo-inc/cloud's vet died on one from
+# proxy.golang.org). A GOPROXY that forbids downloading (`off`) is left as it is.
 up=$(go env GOPROXY)
 case ",${up//|/,}," in
   *,off,*) proxy=$up ;;
-  *) proxy="http://$addr|$up" ;;
+  *) proxy="http://$addr|${up//,/|}" ;;
 esac
 {
   echo "GOCACHEPROG=$state/gocache connect $state/sock $state/dir"
