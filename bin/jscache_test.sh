@@ -43,6 +43,13 @@ printf '{"name":"x"}' > package.json; git -c user.email=t@t -c user.name=t commi
 : > "$CALLS"; bash "$T/bin/jscache" restore > /dev/null 2>&1
 ! grep -q "next-" "$CALLS" && ok "a repo without next carries no Next cache" || no "a repo without next carries no Next cache"
 
+cp "$OLDPWD/bin/sites" "$T/bin/sites"; printf 'site:\n  slug: s\n  dir: out\n' > hanzo.yml
+: > "$CALLS"; HANZO_CI_ROLE=publish bash "$T/bin/jscache" restore > /dev/null 2>&1
+[ ! -s "$CALLS" ] && ok "a publish job that builds no site restores nothing" || no "a publish job that builds no site restores nothing"
+printf 'site:\n  slug: s\n  dir: out\n  build: pnpm build\n' > hanzo.yml
+: > "$CALLS"; HANZO_CI_ROLE=publish bash "$T/bin/jscache" restore > /dev/null 2>&1
+grep -q '^restore node-' "$CALLS" && ok "a publish job that builds its site restores node_modules" || no "a publish job that builds its site restores node_modules"
+
 rm pnpm-lock.yaml; : > "$CALLS"; out=$(bash "$T/bin/jscache" restore 2>&1)
 [ ! -s "$CALLS" ] && printf '%s' "$out" | grep -q 'no lockfile' && ok "no root lockfile is a notice" || no "no root lockfile is a notice"
 exit $fail

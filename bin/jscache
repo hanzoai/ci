@@ -30,6 +30,11 @@ state="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/jscache.state"
 lock=
 for f in pnpm-lock.yaml package-lock.json yarn.lock bun.lock bun.lockb; do [ -f "$f" ] && { lock=$f; break; }; done
 [ -n "$lock" ] || skip "no lockfile at the root, so there is no node_modules to carry"
+# The publish job installs nothing unless it builds a site; the export the gate
+# built arrives already built (bin/sites).
+if [ "$cmd" = restore ] && [ "${HANZO_CI_ROLE:-}" = publish ] && [ -z "$("$(dirname "$0")/sites" build 2>/dev/null)" ]; then
+  skip "the publish job builds nothing here, so it needs no node_modules"
+fi
 v=$(node -p process.version 2>/dev/null) || skip "node is not on this runner"
 arch=$(uname -m)
 modules="node-$v-$arch"
