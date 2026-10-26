@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests for bin/sites: which exports a ref publishes, read once for the test job
-# (which carries a gate-built export) and the publish job (which ships it).
+# Tests for bin/sites: which exports a ref publishes, and whether a run ships
+# nothing else, read once for the gating job and the publish job.
 # Run: bash bin/sites_test.sh
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
@@ -36,12 +36,13 @@ run push v1 tag pairs; [ $? = 1 ] && grep -q 'BOTH site: and sites:' "$T/out" &&
 printf 'site:\n  slug: a\n' > "$T/hanzo.yml"
 run push v1 tag pairs; [ $? = 1 ] && grep -q 'both slug: .* and dir:' "$T/out" && ok "a site without its dir is refused" || no "a site without its dir is refused"
 
-mkdir -p "$T/e/a" && printf 'x' > "$T/e/a/1" && printf 'y' > "$T/e/2"
-one=$(bash "$BIN" digest "$T/e"); cp -a "$T/e" "$T/f"
-[ "$(bash "$BIN" digest "$T/f")" = "$one" ] && ok "an export's digest is its paths and bytes, wherever it sits" || no "an export's digest is its paths and bytes, wherever it sits"
-printf 'z' > "$T/f/2"
-[ "$(bash "$BIN" digest "$T/f")" != "$one" ] && ok "a byte that moved moves the digest" || no "a byte that moved moves the digest"
-mv "$T/f/2" "$T/f/3"; printf 'y' > "$T/f/3"
-[ "$(bash "$BIN" digest "$T/f")" != "$one" ] && ok "a file that moved moves the digest" || no "a file that moved moves the digest"
+printf 'site:\n  slug: a\n  dir: out\ntest: []\n' > "$T/hanzo.yml"
+run push main branch alone; [ $? = 0 ] && ok "a run of sites alone ships from its gating job" || no "a run of sites alone ships from its gating job"
+for more in 'images: [{name: a}]' 'binaries: [{name: a}]' 'pypi: [py]' 'client: {spec: {repo: a}}' 'bucket: b'; do
+  printf 'site:\n  slug: a\n  dir: out\n%s\n' "$more" > "$T/hanzo.yml"
+  run push main branch alone; [ $? = 1 ] && ok "a run that also ships ${more%%:*} is not alone" || no "a run that also ships ${more%%:*} is not alone"
+done
+printf 'images: []\nsites:\n  - {slug: a, dir: out}\n' > "$T/hanzo.yml"
+run push main branch alone; [ $? = 0 ] && ok "an empty images: list ships nothing" || no "an empty images: list ships nothing"
 
 exit $fail

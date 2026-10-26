@@ -290,10 +290,9 @@ jobs:
       matrix:
         runner: [linux-amd64, linux-arm64]
     runs-on: ${{ (startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) && format('ephemeral-{0}', matrix.runner) || matrix.runner }}
-    # The amd64 leg carries the site export; its digest is the publish job's to check.
-    outputs:
-      export: ${{ steps.carry.outputs.export }}
     env:
+      # The amd64 leg reads the change; the review is one per run, not per leg.
+      HANZO_CI_REVIEW: ${{ matrix.runner == 'linux-amd64' }}
       # 'true' only when this run's code came from this repository. Every step
       # that reads a credential requires it, so an empty or unevaluated value
       # withholds the credential rather than handing it out. Spelled out in each
@@ -470,7 +469,7 @@ jobs:
           # Naming the list here also makes the release order self-announcing: a
           # pipeline that has grown a tool refuses at step one, and says which ref
           # it read and what was missing from it.
-          need="cache certclaims conflictmarkers gocache gover ignoretracked imgplat imgtags imgver jscache modsize narrative publishable site sites vendormark"
+          need="cache certclaims conflictmarkers gocache gover ignoretracked imgplat imgtags imgver jscache kms modsize narrative publishable site sites vendormark"
           miss='<no host answered>'
           # A sha cannot be a --branch, so it arrives by fetch rather than clone:
           # the caller's pin as well as this file's own commit. Both are wrapped
@@ -671,6 +670,53 @@ jobs:
           jq --version
           yq --version
 
+      - name: Start the review (beside the gate)
+        # The change is read on this runner while the gate runs, and `Review
+        # verdict` waits for the answer before anything ships: the job that
+        # publishes needs it, and a job of its own was one more runner to queue
+        # for on every run (hanzoai/community: 185 s before it started). One
+        # job per run reads it — the amd64 leg, or the single gating job — and
+        # never a share of the gate (`gates`) or a fork, which publish nothing.
+        #
+        # The reviewer reads every commit from the base to this one with its
+        # parent, so the shallow checkout is deepened until the base is an
+        # ancestor before the gate starts; afterwards the reviewer only reads.
+        # It runs in a session of its own with its output in a file, so the
+        # step's end neither waits on it nor hangs it up, on either plane.
+        if: env.HANZO_CI_REVIEW == 'true' && env.HANZO_CI_TRUSTED == 'true' && inputs.gates == ''
+        env:
+          REVIEW_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          REVIEW_HEAD: ${{ github.sha }}
+          KMS_CLIENT_ID: ${{ secrets.KMS_CLIENT_ID }}
+          KMS_CLIENT_SECRET: ${{ secrets.KMS_CLIENT_SECRET }}
+          KMS_ENDPOINT: ${{ vars.KMS_ENDPOINT || 'https://api.hanzo.ai' }}
+          KMS_SECRET_ENV: ${{ vars.KMS_SECRET_ENV || 'prod' }}
+          REVIEW_CLIENT: ${{ vars.REVIEW_CLIENT || 'hanzo-review' }}
+          IAM_ENDPOINT: ${{ vars.IAM_ENDPOINT || 'https://iam.hanzo.ai' }}
+        run: |
+          set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0
+          r="$RUNNER_TEMP/review"; rm -rf "$r"; mkdir -p "$r"
+          gate="$CI_HOME/.hanzo/review/gate.sh"
+          [ -f "$gate" ] || {
+            echo "::warning::review: hanzoai/ci at this pin carries no .hanzo/review/gate.sh — the reviewer did not run, so it withholds no verdict"; exit 0; }
+          base="${REVIEW_BASE:-}"
+          case "$base" in
+            ""|0000000*) git fetch -q --deepen=1 2>/dev/null || true ;;
+            *)
+              i=0
+              while [ "$i" -lt 6 ] && ! git merge-base --is-ancestor "$base" "$REVIEW_HEAD" 2>/dev/null; do
+                i=$((i + 1))
+                git fetch -q --deepen=64 || break
+              done
+              ;;
+          esac
+          s=; command -v setsid >/dev/null 2>&1 && s=setsid
+          GITHUB_STEP_SUMMARY="$r/summary" $s nohup bash -c 'bash "$0" "$1" "$2"; echo $? > "$3/status"' \
+            "$gate" "$base" "$REVIEW_HEAD" "$r" > "$r/log" 2>&1 < /dev/null &
+          date +%s > "$r/started"
+          echo "review: reading ${base:-the last commit}..$REVIEW_HEAD beside the gate"
+
       - name: Read hanzo.yml (what this caller ships)
         id: plan
         # Every docker-facing step below keys off this: a caller with no images:
@@ -862,6 +908,8 @@ jobs:
           fi
           ENV="$(yq -r '.kms.environment // "prod"' hanzo.yml 2>/dev/null || echo prod)"
           PATHQ="$(yq -r '.kms.path // "/deploy"' hanzo.yml | sed 's#^/##; s#/$##' 2>/dev/null || echo deploy)"
+          # Where this org's deploy credentials live, for the site step's token.
+          { echo "path=$PATHQ"; echo "env=$ENV"; } >> "$GITHUB_OUTPUT"
           # A repo that DECLARES `build_secrets` has asserted its image is not
           # valid without them, so for that repo KMS is REQUIRED, not best-effort.
           # Read the declaration BEFORE the two short-circuits below: otherwise an
@@ -1068,7 +1116,6 @@ jobs:
           # this fetch could only ever export nothing — and the lanes gated on it
           # failed closed, which is what killed `site:` for every caller that declared
           # one. A credential nothing reads is a rotation nobody does.
-          SITE_DECL="$(yq -r '.site | type' hanzo.yml 2>/dev/null || echo '!!null')"
           # `site:` needs exactly ONE thing from this step, and it is a thing this
           # step already has — there is one KMS login in this workflow and the
           # site lane does not add a second.
@@ -1103,23 +1150,6 @@ jobs:
           echo "::add-mask::$TOKEN"
           echo "HANZO_API_TOKEN=$TOKEN" >> "$GITHUB_ENV"
 
-          # The deploy token is read only where the site lane runs: the publish role,
-          # off a pull request. The test role runs the repo's own code before any
-          # gate has passed, and a branch pushed for a pull request is code no one
-          # has reviewed, so neither is handed a token that can publish this org's
-          # sites.
-          if { [ "$SITE_DECL" = '!!map' ] || [ "$(yq -r '.sites | type' hanzo.yml 2>/dev/null || echo '!!null')" = '!!seq' ]; } \
-            && [ "$HANZO_CI_ROLE" = publish ] && [ "$EVENT" != pull_request ]; then
-            # The Sites plane issues its presigned upload grant to the org of an
-            # `sk-` key, so the JWT above cannot stand in for it. Sealed once per
-            # org at deploy/HANZO_DEPLOY_TOKEN and read here like every other one.
-            dt=$(get HANZO_DEPLOY_TOKEN)
-            if [ -z "$dt" ]; then
-              echo "::error::hanzo.yml declares a site but KMS holds no HANZO_DEPLOY_TOKEN at $ORG/$PATHQ env=$ENV — refusing to publish. Seal it, then rebuild."; exit 1
-            fi
-            echo "::add-mask::$dt"
-            echo "HANZO_DEPLOY_TOKEN=$dt" >> "$GITHUB_ENV"
-          fi
           # Build-time secrets → --build-arg. A repo declares per-image
           # `build_secrets: [NAME, ...]` in hanzo.yml; each NAME is fetched from
           # the SAME org/path/env and exported (masked) so the build step bakes
@@ -2022,52 +2052,6 @@ jobs:
             printf '%s\t%s\t%s\n' "$n" "$claims" "$name" >> "$receipt"
           done
 
-      - name: Carry the site export to the publish job
-        id: carry
-        # When hanzo.yml names no site build, the gate is what built the export,
-        # so the bytes the tests read are the bytes that ship: the publish job
-        # restores this, keyed by the commit, instead of building it a second
-        # time (hanzoai/blog: 27 s of install and 128 s of `next build`, again).
-        # Only the run that will publish carries it (bin/sites), only from the
-        # call that gates on everything, and one architecture's leg.
-        if: success() && env.HANZO_CI_ROLE == 'test' && env.HANZO_CI_TRUSTED == 'true' && inputs.gates == '' && inputs.tests != 'false' && matrix.runner != 'linux-arm64'
-        # The digest of each export leaves as this job's output, which the store
-        # cannot touch: the publish job ships a carried export only if it hashes
-        # to what this gate built. A key already in the store is replaced, never
-        # trusted — any org identity may write the store.
-        run: |
-          set -euo pipefail
-          [ -z "$("$CI_HOME/bin/sites" build)" ] || exit 0
-          "$CI_HOME/bin/sites" pairs > "$RUNNER_TEMP/carry-pairs"
-          export=
-          while IFS= read -r pair; do
-            [ -n "$pair" ] || continue
-            slug=${pair%%=*}; dir=${pair#*=}
-            [ -d "$dir" ] || {
-              echo "::error::hanzo.yml names no site build, so the gate must leave the export at $dir for $slug, and it did not"; exit 1; }
-            export="$export $slug=$("$CI_HOME/bin/sites" digest "$dir")"
-            "$CI_HOME/bin/cache" drop "site-$slug" "$GITHUB_SHA"
-            "$CI_HOME/bin/cache" save "site-$slug" "$GITHUB_SHA" export="$dir"
-          done < "$RUNNER_TEMP/carry-pairs"
-          echo "export=${export# }" >> "$GITHUB_OUTPUT"
-
-      - name: Save the JS caches (this org's store)
-        # After the gate, red or green, like the Go cache, and only from a trusted
-        # ref (bin/cache).
-        if: (success() || failure()) && hashFiles('package.json') != '' && env.HANZO_CI_ROLE == 'test' && env.HANZO_CI_TRUSTED == 'true'
-        run: '"$CI_HOME/bin/jscache" save'
-
-      - name: Save the Go cache (this org's store)
-        # After the gate, red or green: an output is valid for the inputs that
-        # produced it whatever the tests then said, so a failing push still warms
-        # the push that fixes it. bin/gocache writes only from the default branch
-        # or a tag, and only what the store lacks: a pull request reads this
-        # org's cache and never writes it, because Go trusts a cached output it
-        # did not build. A cancelled job leaves it.
-        if: (success() || failure()) && steps.gomod.outputs.file != '' && env.HANZO_CI_ROLE == 'test' && inputs.go-cache != 'false'
-        run: |
-          "$CI_HOME/bin/gocache" save "$(dirname '${{ steps.gomod.outputs.file }}')"
-
       - name: Tests not run (declared by caller)
         # The complement of the step above, and the reason opting out cannot be
         # quiet. `tests: 'false'` asserts THIS EXACT COMMIT was gated before this
@@ -2155,6 +2139,23 @@ jobs:
             say "**Tests: $n executed across $gates gate(s).**"
           fi
           awk -F'\t' 'NR>1{printf "  %8s results  %s%s\n", $1, ($2=="1" ? "[runs tests] " : ""), $3}' "$r"
+
+      - name: Review verdict
+        # What the reviewer answered, waited for here: after the gate, and before
+        # this job or the publish job builds or ships anything. A refusal fails
+        # this job, so nothing publishes; a reviewer that could not run withholds
+        # no verdict (.hanzo/review/gate.sh). Fifteen minutes from the gate's end
+        # is the bound the review job had.
+        if: env.HANZO_CI_REVIEW == 'true' && env.HANZO_CI_TRUSTED == 'true' && inputs.gates == ''
+        timeout-minutes: 15
+        run: |
+          set -uo pipefail
+          r="$RUNNER_TEMP/review"
+          [ -f "$r/started" ] || { echo "review: not started on this pin, so there is no verdict to wait for"; exit 0; }
+          while [ ! -f "$r/status" ]; do sleep 2; done
+          echo "::group::review"; cat "$r/log"; echo "::endgroup::"
+          [ ! -f "$r/summary" ] || cat "$r/summary" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          exit "$(cat "$r/status")"
 
       - name: Delegate build to the runner (mode=delegate)
         # Delegate moves WHERE the image is built. It does not move whether the
@@ -3369,6 +3370,7 @@ jobs:
           exit $rc
 
       - name: Publish site (per hanzo.yml)
+        id: site
         # The site lane. `images:` ships an OCI image a CLUSTER runs; `binaries:`
         # ships an executable a HOST installs; neither describes a static export
         # that an EDGE serves, which is why this is a third verb and not a flag on
@@ -3404,59 +3406,76 @@ jobs:
         # reports success when it verified nothing is worse than one that never
         # verified, because it is indistinguishable from a working one until a
         # site quietly stops updating.
+        # WHICH JOB PUBLISHES. A run whose hanzo.yml ships nothing but sites
+        # (bin/sites alone) and gates on one architecture publishes from its
+        # gating job, after the gate and the review verdict: the export the gate
+        # built, or site.build run beside it, ships from the runner that tested
+        # it, with no second runner, install or build (hanzoai/community: the
+        # publish job queued 19 to 378 s). Any other run publishes from the
+        # publish job, after its images and binaries, building the site there
+        # with site.build — a matrix leg cannot wait for its sibling. The two
+        # jobs read the same predicate, so exactly one of them publishes.
+        #
+        # THE DEPLOY TOKEN is read here, after the build and before the upload,
+        # through bin/kms with the org identity the KMS step minted — the one
+        # every step of this job already holds, which can read it as well.
+        #
         # NOT gated on mode. How the IMAGE is built — buildx here, or delegated
         # to the in-cluster builder — says nothing about whether a static export
         # should reach the edge. Tying them meant a delegated build shipped the
         # image and left the site on its previous release, which is the half-roll
         # this lane exists to avoid.
-        if: env.HANZO_CI_ROLE == 'publish' && (github.event_name != 'pull_request')
+        if: env.HANZO_CI_TRUSTED == 'true' && (env.HANZO_CI_ROLE == 'publish' || (env.HANZO_CI_SHIP == 'true' && inputs.gates == ''))
         env:
           API: ${{ vars.API_ENDPOINT || 'https://api.hanzo.ai' }}
-          HANZO_CI_EXPORT: ${{ needs.test-amd64.outputs.export || needs.test.outputs.export }}
+          KMS_ENDPOINT: ${{ vars.KMS_ENDPOINT || 'https://api.hanzo.ai' }}
+          KMS_PATH: ${{ steps.kms.outputs.path }}
+          KMS_ENV: ${{ steps.kms.outputs.env }}
+          TESTS: ${{ inputs.tests }}
         run: |
           set -euo pipefail
           REF="${{ github.ref_name }}"
+          SITES="$CI_HOME/bin/sites"
+          # Which job ships the sites: the gating job when they are all this run
+          # ships and it gated on linux-amd64 alone, else the publish job.
+          if [ "$HANZO_CI_ROLE" = test ]; then
+            "$SITES" alone || { echo "::notice::this run ships more than its sites, so the publish job ships them after the rest"; exit 0; }
+          elif [ "$(jq -c . <<<"${HANZO_CI_GATED:-[]}")" = '["linux-amd64"]' ] && "$SITES" alone; then
+            echo "::notice::the gating job shipped this run's sites"; exit 0
+          fi
           # Which exports this ref publishes, and the build that makes them: one
-          # reading of `site:`/`sites:` (bin/sites), the one the test job reads
-          # too. A caller with no `site:` ships no static export; a branch
-          # publishes only when `on:` names it, and every brand of one product
-          # goes live together, so a rollout never reaches one brand and not
-          # another.
-          PAIRS=$("$CI_HOME/bin/sites" pairs)
-          BUILD=$("$CI_HOME/bin/sites" build)
+          # reading of `site:`/`sites:` (bin/sites). A branch publishes only when
+          # `on:` names it, a pull request publishes nothing, and every brand of
+          # one product goes live together.
+          PAIRS=$("$SITES" pairs)
+          BUILD=$("$SITES" build)
           if [ -z "$PAIRS" ]; then
-            echo "::notice::no site:/sites: in hanzo.yml publishes from $REF — nothing to publish"; exit 0
+            echo "::notice::no site:/sites: in hanzo.yml publishes from $REF — nothing to publish"
+            [ "$HANZO_CI_ROLE" = publish ] || echo "shipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           if [ -n "$BUILD" ]; then
             echo "::group::build ($BUILD)"
             sh -c "$BUILD"
             echo "::endgroup::"
-          else
-            # No build named: the gate built each export and the test job
-            # carried it here, keyed by this commit.
-            # Shipped only when it hashes to what the gate built, the digest the
-            # test job handed this one as a job output.
-            while IFS= read -r pair; do
-              slug=${pair%%=*}; dir=${pair#*=}
-              want=$(printf '%s\n' $HANZO_CI_EXPORT | sed -n "s/^$slug=//p")
-              [ -n "$want" ] || {
-                echo "::error::the test job handed no digest for $slug's export, and hanzo.yml names no build to make it here"; exit 1; }
-              rm -rf "$dir"
-              out=$(mktemp)
-              GITHUB_OUTPUT=$out "$CI_HOME/bin/cache" restore "site-$slug" "${{ github.sha }}" export="$dir"
-              [ "$(sed -n 's/^hit=//p' "$out" | tail -1)" = exact ] && [ -d "$dir" ] || {
-                echo "::error::the gate's export of $slug ($dir) was not carried from the test job, and hanzo.yml names no build to make it here"; exit 1; }
-              [ "$("$CI_HOME/bin/sites" digest "$dir")" = "$want" ] || {
-                echo "::error::the carried export of $slug is not the one the gate built (its digest differs), so it is not published"; exit 1; }
-            done <<<"$PAIRS"
+          elif [ "$HANZO_CI_ROLE" = publish ]; then
+            echo "::error::hanzo.yml names no site build. A run that ships more than its sites, or gates on two architectures, builds its site in the publish job: name site.build (site-build for sites:)."; exit 1
+          elif [ "$TESTS" = false ]; then
+            echo "::error::hanzo.yml names no site build and this run skipped the gate (tests: 'false'), so nothing built the export"; exit 1
           fi
-          # Fail closed on the ONE thing that can be missing, and say which one.
-          # An empty token here means the KMS login did not happen — not that a
-          # site credential was never provisioned, which is what the old message
-          # said and what sent people looking for a secret that does not exist.
-          if [ -z "${HANZO_DEPLOY_TOKEN:-}" ]; then
-            echo "::error::hanzo.yml declares a site but the KMS step read no HANZO_DEPLOY_TOKEN for $API — refusing to publish. That is a KMS_CLIENT_ID/KMS_CLIENT_SECRET problem on this repo, not a missing site credential."; exit 1
-          fi
+          # No build named: the gate built each export, on this runner.
+          while IFS= read -r pair; do
+            [ -d "${pair#*=}" ] || {
+              echo "::error::${pair#*=} is not there to publish as ${pair%%=*}: the build left no export at the dir hanzo.yml names"; exit 1; }
+          done <<<"$PAIRS"
+          # The Sites plane issues its presigned upload grant to the org of an
+          # `sk-` key, which the IAM bearer cannot stand in for. Sealed once per
+          # org at <kms.path>/HANZO_DEPLOY_TOKEN.
+          HANZO_DEPLOY_TOKEN=$(bash "$CI_HOME/bin/kms" "${KMS_PATH:-deploy}/HANZO_DEPLOY_TOKEN" "${KMS_ENV:-prod}") || {
+            echo "::error::hanzo.yml declares a site and no HANZO_DEPLOY_TOKEN could be read at ${KMS_PATH:-deploy} env=${KMS_ENV:-prod} — refusing to publish. Seal it there, then rebuild."; exit 1; }
+          case "$HANZO_DEPLOY_TOKEN" in *$'\n'*|::*) echo "::error::bin/kms printed more than the token; refusing it unprinted"; exit 1 ;; esac
+          echo "::add-mask::$HANZO_DEPLOY_TOKEN"
+          export HANZO_DEPLOY_TOKEN
           # site, not sitepublish: the export goes up FILE BY FILE against a
           # presigned, prefix-scoped grant, so the bytes never traverse the API and
           # no body limit applies. sitepublish POSTs the whole zip, which fasthttp
@@ -3476,17 +3495,25 @@ jobs:
               "$CI_HOME/bin/site" "${pair%%=*}" "${pair#*=}"
             echo "::endgroup::"
           done < "$RUNNER_TEMP/site-pairs"
-          # A carried export is spent once it is live.
-          if [ -z "$BUILD" ]; then
-            while IFS= read -r pair; do "$CI_HOME/bin/cache" drop "site-${pair%%=*}" "${{ github.sha }}"; done <<<"$PAIRS"
-          fi
+          [ "$HANZO_CI_ROLE" = publish ] || echo "shipped=true" >> "$GITHUB_OUTPUT"
 
-      - name: Save the JS caches after the site build (this org's store)
-        # When the publish job is the one that builds the site (hanzo.yml names a
-        # build), its Next cache is the one the next build reads: hanzo-docs/docs
-        # compiles 6,282 pages there, 13.6 minutes cold (run 16350).
-        if: (success() || failure()) && hashFiles('package.json') != '' && env.HANZO_CI_ROLE == 'publish' && env.HANZO_CI_TRUSTED == 'true' && github.event_name != 'pull_request'
+      - name: Save the JS caches (this org's store)
+        # After the gate and any site build, red or green, like the Go cache, and
+        # only from a trusted ref (bin/cache). After the publish, so a site is
+        # live before its build cache is written.
+        if: (success() || failure()) && hashFiles('package.json') != '' && env.HANZO_CI_TRUSTED == 'true'
         run: '"$CI_HOME/bin/jscache" save'
+
+      - name: Save the Go cache (this org's store)
+        # After the gate, red or green: an output is valid for the inputs that
+        # produced it whatever the tests then said, so a failing push still warms
+        # the push that fixes it. bin/gocache writes only from the default branch
+        # or a tag, and only what the store lacks: a pull request reads this
+        # org's cache and never writes it, because Go trusts a cached output it
+        # did not build. A cancelled job leaves it.
+        if: (success() || failure()) && steps.gomod.outputs.file != '' && env.HANZO_CI_ROLE == 'test' && inputs.go-cache != 'false'
+        run: |
+          "$CI_HOME/bin/gocache" save "$(dirname '${{ steps.gomod.outputs.file }}')"
 
   # The same test, gating on linux-amd64 alone, for a caller whose
   # `test-runners` names only that architecture. It is a job rather than a matrix
@@ -3496,12 +3523,18 @@ jobs:
     # A class the platform does not have runs on an ordinary runner rather than
     # queueing for one that never comes.
     runs-on: ${{ (startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) && 'ephemeral-linux-amd64' || ((inputs.class == 'heavy' || inputs.class == 'xl') && format('{0}-linux-amd64', inputs.class) || 'linux-amd64') }}
+    # 'true' when this job published everything the run ships (bin/sites
+    # alone), so the publish job has nothing left to do.
     outputs:
-      export: ${{ steps.carry.outputs.export }}
+      shipped: ${{ steps.site.outputs.shipped }}
     env:
       COREPACK_NPM_REGISTRY: https://pkg.hanzo.ai
       HANZO_CI_ROLE: test
       HANZO_CI_TRUSTED: ${{ !(startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) }}
+      # The one gating job: it reads the change, and it ships a run that ships
+      # nothing but sites.
+      HANZO_CI_REVIEW: 'true'
+      HANZO_CI_SHIP: 'true'
     steps: *steps
 
   # The advisory leg: the same test on `advisory-runners`, reported and never
@@ -3518,105 +3551,6 @@ jobs:
       HANZO_CI_TRUSTED: ${{ !(startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) }}
     steps: *steps
 
-  # Reads the diff while the tests run. Its own steps, not `*steps`: those build
-  # and publish, and this job must not. Publishing needs it, so a refusal leaves
-  # no image. The tests do not need it, so a slow read does not hold the gate.
-  # A share of the gate (`gates`) and a fork publish nothing, so neither is read.
-  review:
-    if: inputs.gates == '' && !(startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository)
-    timeout-minutes: 15
-    runs-on: ${{ (startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) && 'ephemeral-linux-amd64' || 'linux-amd64' }}
-    # The job already skips a fork; the step that names the KMS pair says so
-    # itself as well, the one guard every credentialed step carries.
-    env:
-      HANZO_CI_TRUSTED: ${{ !(startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-      - name: Review the change
-        if: env.HANZO_CI_TRUSTED == 'true'
-        env:
-          JOB_TOKEN: ${{ github.token }}
-          JOB_SHA: ${{ github.job_workflow_sha }}
-          REVIEW_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-          REVIEW_HEAD: ${{ github.sha }}
-          KMS_CLIENT_ID: ${{ secrets.KMS_CLIENT_ID }}
-          KMS_CLIENT_SECRET: ${{ secrets.KMS_CLIENT_SECRET }}
-          KMS_ENDPOINT: ${{ vars.KMS_ENDPOINT || 'https://api.hanzo.ai' }}
-          KMS_SECRET_ENV: ${{ vars.KMS_SECRET_ENV || 'prod' }}
-          REVIEW_CLIENT: ${{ vars.REVIEW_CLIENT || 'hanzo-review' }}
-          IAM_ENDPOINT: ${{ vars.IAM_ENDPOINT || 'https://iam.hanzo.ai' }}
-        run: |
-          set -euo pipefail
-          export GIT_TERMINAL_PROMPT=0
-          raw="${GITHUB_WORKFLOW_REF:-}"
-          ref="${raw##*@}"; ref="${ref#refs/heads/}"; ref="${ref#refs/tags/}"; ref="${ref:-v1}"
-          wf="${raw%@*}"; wf="${wf#*/}"; wf="${wf#*/}"
-          pin=
-          if [ -n "$wf" ] && [ -f "${GITHUB_WORKSPACE:-.}/$wf" ]; then
-            pin=$(sed -n 's#.*hanzoai/ci/\.[a-z]*/workflows/build\.yml@\([A-Za-z0-9._/-]\{1,\}\).*#\1#p' \
-                  "${GITHUB_WORKSPACE:-.}/$wf" | head -1)
-          fi
-          if [ -z "$pin" ]; then
-            pins=$(cat "${GITHUB_WORKSPACE:-.}"/.hanzo/workflows/*.y*ml "${GITHUB_WORKSPACE:-.}"/.github/workflows/*.y*ml 2>/dev/null \
-                   | sed -n 's#.*hanzoai/ci/\.[a-z]*/workflows/build\.yml@\([A-Za-z0-9._/-]\{1,\}\).*#\1#p' | sort -u || true)
-            if [ "$(printf '%s\n' "$pins" | grep -c . || true)" = 1 ]; then pin=$pins; fi
-          fi
-          cands=()
-          [ -n "$pin" ] && cands+=("$pin")
-          [ -n "${JOB_SHA:-}" ] && cands+=("$JOB_SHA")
-          cands+=("$ref")
-          hdr=()
-          if [ -n "${JOB_TOKEN:-}" ]; then
-            b64=$(printf 'x-access-token:%s' "$JOB_TOKEN" | base64 -w0)
-            echo "::add-mask::$b64"
-            hdr=(-c "http.extraheader=Authorization: Basic $b64")
-          fi
-          dest="${RUNNER_TEMP}/hanzo-review"
-          slow=(-c http.lowSpeedLimit=1000 -c http.lowSpeedTime=15)
-          got=
-          for want in "${cands[@]}"; do
-            for url in https://git.hanzo.ai/hanzoai/ci https://github.com/hanzoai/ci; do
-              rm -rf "$dest"
-              echo "::group::review ${url}@${want}"
-              a=(); cap=()
-              case "$url" in https://git.hanzo.ai/*) a=(${hdr[@]+"${hdr[@]}"}); cap=(timeout 20);; esac
-              ok=
-              if [[ $want =~ ^[0-9a-f]{40}$ ]]; then
-                if git init -q "$dest" \
-                  && ${cap[@]+"${cap[@]}"} git -C "$dest" "${slow[@]}" ${a[@]+"${a[@]}"} fetch -q --depth 1 "$url" "$want" \
-                  && git -C "$dest" checkout -q FETCH_HEAD; then
-                  ok=1
-                fi
-              elif ${cap[@]+"${cap[@]}"} git "${slow[@]}" ${a[@]+"${a[@]}"} clone -q --depth 1 --branch "$want" "$url" "$dest"; then
-                ok=1
-              fi
-              if [ -n "$ok" ] && [ -f "$dest/.hanzo/review/gate.sh" ]; then
-                echo "cloned ${url}@${want}"; echo "::endgroup::"; got=1; break
-              fi
-              echo "failed ${url}@${want}"; echo "::endgroup::"
-            done
-            [ -n "$got" ] && break
-          done
-          if [ -z "$got" ]; then
-            echo "::warning::review: hanzoai/ci reviewer is not available — it did not run, so it withholds no verdict"
-            exit 0
-          fi
-          base="${REVIEW_BASE:-}"
-          head="${REVIEW_HEAD:-}"
-          case "$base" in
-            ""|0000000*) ;;
-            *)
-              i=0
-              while [ "$i" -lt 6 ] && ! git merge-base --is-ancestor "$base" "$head" 2>/dev/null; do
-                i=$((i + 1))
-                git fetch --deepen=64 || break
-              done
-              ;;
-          esac
-          bash "$dest/.hanzo/review/gate.sh" "$base" "$head"
-
   cicd:
     # Exactly one of the two gating jobs runs; the other is skipped by its `if`,
     # so publishing needs whichever ran to have succeeded. `always()` lets the
@@ -3625,17 +3559,18 @@ jobs:
     # function: Hanzo Git evaluates a job's `if` with no job in scope, and
     # `cancelled()` (like `success()` and `failure()` of a step) dereferences it.
     #
-    # Review runs beside those tests. Publishing needs it too: a refusal is not
-    # an image. A skipped review is not a success, and the only runs that skip
-    # it are the ones that already publish nothing (a fork, a share of the gate).
+    # The review runs inside the gating job, whose `Review verdict` fails it on
+    # a refusal, so a refused diff leaves no image here either. When the gating
+    # job shipped everything the run ships (a run of sites alone), this job has
+    # nothing left and does not start.
     #
     # A fork publishes nothing, so this job does not run for one: no build door,
     # no registry, no credential. Its `runs-on` still names an ephemeral label for
     # a fork, for the reason `test-advisory` gives.
-    needs: [test, test-amd64, review]
+    needs: [test, test-amd64]
     # A call that names a share of the gate (`gates`) only gates: what it would
     # publish is the whole repository's, and that is the one call gating on all of it.
-    if: always() && (needs.test.result == 'success' || needs.test-amd64.result == 'success') && needs.review.result == 'success' && inputs.gates == '' && !(startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository)
+    if: always() && (needs.test.result == 'success' || needs.test-amd64.result == 'success') && needs.test-amd64.outputs.shipped != 'true' && inputs.gates == '' && !(startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository)
     # One publish per ref runs and at most one waits. A push during a publish
     # lets the running one finish; the new publish waits, and a later push
     # replaces it while it waits. A busy branch therefore ships its newest gated
