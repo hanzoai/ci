@@ -1,77 +1,98 @@
 #!/usr/bin/env bash
-# gocache — this org's Go module and build cache, carried between runners.
+# gocache — this org's Go build cache and module downloads, carried between runners.
 #
-#   gocache restore <module-dir>     # prints hit=exact|partial|miss to $GITHUB_OUTPUT
-#   gocache save    <module-dir>     # writes on a trusted ref, on a miss, and nowhere else
+#   gocache restore <module-dir>   # starts the cache every later go command in this job uses
+#   gocache save    <module-dir>   # writes what this job built (a trusted ref only), then stops it
 #
 # A runner is a pod that lives for one job, so a cache on its disk dies with it.
-# Measured across 188 job logs: not one Go cache was restored, and 142 Go-gate
-# minutes were 31 downloading modules, 69 compiling and 41 testing. A second
-# pass over a warm cache compiled hanzoai/commerce's vet in 15s instead of 198s.
+# The program in gocache/ (its own module, standard library only, built here
+# with the job's own toolchain) runs once per job and answers every go command
+# through GOCACHEPROG, fetching each compiled package from the org's store the
+# first time a build asks for it, and serves the module files the store holds
+# as the first entry in GOPROXY. Nothing is restored before the gate starts.
 #
-# The store, who may write, the parts and the index are bin/cache's; this script
-# names what Go caches and what that is valid for.
+# WHY NOT AN ARCHIVE. This used to restore one tar of GOCACHE and GOMODCACHE per
+# go.sum: hanzo-inc/cloud's shares carried 2.4-4.5 GiB each and spent 110 to 1157
+# seconds restoring before a compile could begin (runs 16846, 16941), longer
+# than their tests on the small shares, and every job fetched all of it whatever
+# it built. Here a job fetches what it reads, and a save uploads only what the
+# store lacks.
 #
-# THE KEY: <owner/repo>/<go version>-<arch>/<sha256 of go.sum>. Modules are a
-# function of go.sum, and a build cache is only valid for the toolchain and
-# architecture that wrote it. A key that misses restores the newest key the repo
-# saved (`latest`), so a go.sum bump still reuses every module that did not move.
+# WHO WRITES: the default branch and tags (bin/cache trusted), never a pull
+# request, because the go command trusts a cached output it did not build. Each
+# output is named by the SHA-256 of its bytes and every fetch is checked
+# against that name. A save runs after a red gate too: an output is valid for
+# the inputs that produced it whatever the tests then said.
 #
-# Go trusts GOMODCACHE and GOCACHE without re-hashing them, which is why only a
-# trusted ref writes (bin/cache).
+# Go 1.24 or newer (GOCACHEPROG). Older toolchains build cold, and say so.
 #
-# A SAVE KEEPS WHAT ITS RUN USED. Each save archived the whole build cache it had
-# restored plus what it compiled, so every save carried every entry since the
-# first, and nothing ever left: hanzo-inc/cloud's shares grew to 7-8.5 GiB of
-# zstd, 27 GiB unpacked, and the runner pods restoring them were evicted at the
-# 80Gi ephemeral-storage limit mid-gate (hanzo-inc/cloud runs 1009-1013), so
-# every release was skipped. So restore stamps each restored entry two hours
-# old, past the hour within which Go leaves a used entry's mtime alone
-# (cmd/go/internal/cache, mtimeInterval); an entry the run reads is stamped
-# anew, and save drops every entry still older than the restore. Archives cut
-# that way live under their own name (`-used`), so one written before is never
-# restored again.
-#
-# ENV: everything bin/cache reads (HANZO_API_TOKEN, HANZO_API, CACHE_BUCKET, CACHE_PART).
+# ENV: HANZO_API_TOKEN (the org's IAM bearer, which the KMS step exports),
+# HANZO_API, CACHE_BUCKET, and GITHUB_* for the repository and the ref.
 set -uo pipefail
 
 cmd="${1:-}"; dir="${2:-.}"
-out="${GITHUB_OUTPUT:-/dev/null}"
-skip() { echo "::notice::gocache: $*"; echo "hit=miss" >> "$out"; exit 0; }
+skip() { echo "::notice::gocache: $*"; exit 0; }
 case "$cmd" in restore|save) ;; *) echo "usage: gocache restore|save <module-dir>" >&2; exit 2 ;; esac
-
 command -v go >/dev/null 2>&1 || skip "go is not on this runner"
-[ -f "$dir/go.sum" ] || skip "$dir has no go.sum"
 
-mod=$(go env GOMODCACHE); build=$(go env GOCACHE)
-# Every later step reads the caches from exactly these directories, so a gate
-# that names its own with `${GOCACHE:-…}` (hanzo-inc/cloud's do) builds into what
-# was restored, and save archives what the gate built.
-[ "$cmd" = restore ] && printf 'GOMODCACHE=%s\nGOCACHE=%s\n' "$mod" "$build" >> "${GITHUB_ENV:-/dev/null}"
+state="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/gocache"
+
 if [ "$cmd" = save ]; then
-  [ -d "$mod" ] || { echo "gocache: no module cache to save"; exit 0; }
-  mkdir -p "$build"   # a gate that compiled nothing still leaves modules worth keeping
-fi
-# A caller that splits its gate across parallel jobs (build.yml `gates`) keeps
-# one cache per share: each compiles its own part of the tree, and one key per
-# job means no share finds its key already taken by another's archive.
-name="$(go env GOVERSION)-$(go env GOARCH)-used"
-[ -n "${GOCACHE_SHARE:-}" ] && name="$name-$(printf '%s' "$GOCACHE_SHARE" | sha256sum | cut -c1-8)"
-key="$(sha256sum "$dir/go.sum" | cut -c1-32)"
-# When the restore finished, for save to tell a used entry from one that only came along.
-since="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/gocache-$name.since"
-
-if [ "$cmd" = restore ]; then
-  "$(dirname "$0")/cache" restore "$name" "$key" mod="$mod" build="$build"
-  if [ -d "$build" ]; then
-    find "$build" -type f -exec touch -d "@$(( $(date +%s) - 7200 ))" {} + 2>/dev/null
-  fi
-  touch "$since"
+  [ -s "$state/ready" ] || skip "no cache was started in this job, so there is nothing to save"
+  "$state/gocache" flush "$(cat "$state/ready")"
+  grep -v '^$' "$state/log" 2>/dev/null | tail -5 | sed 's/^/  /'
   exit 0
 fi
 
-if [ -f "$since" ]; then
-  find "$build" -type f ! -newer "$since" -delete 2>/dev/null
-  echo "gocache: the build cache holds what this run used, $(du -sh "$build" 2>/dev/null | cut -f1)"
+[ -f "$dir/go.mod" ] || skip "$dir has no go.mod"
+v=$(go env GOVERSION)
+case "$v" in
+  go1.2[4-9]*|go1.[3-9][0-9]*|go[2-9]*) ;;
+  *) skip "$v predates GOCACHEPROG (Go 1.24), so this job builds cold" ;;
+esac
+
+rm -rf "$state"; mkdir -p "$state"
+# The job's own toolchain, never another: the module says go 1.24, and nothing
+# here may reach for a download the gate did not ask for.
+if ! (cd "$(dirname "$0")/../gocache" && GOTOOLCHAIN=local GOWORK=off GOFLAGS= CGO_ENABLED=0 \
+      GOCACHE="$state/self" go build -trimpath -o "$state/gocache" .) > "$state/log" 2>&1; then
+  sed 's/^/  /' "$state/log"
+  skip "the cache program did not build, so this job builds cold"
 fi
-exec "$(dirname "$0")/cache" save "$name" "$key" mod="$mod" build="$build"
+rm -rf "$state/self"
+
+write=
+"$(dirname "$0")/cache" trusted && write=-write
+mods=$(go env GOMODCACHE)
+prefix="${GITHUB_REPOSITORY:-local/local}/gocache/$v-$(go env GOOS)-$(go env GOARCH)"
+# Its own session, so it outlives this step and every step after it; the runner
+# ends it with the job.
+launch=(nohup)
+command -v setsid >/dev/null 2>&1 && launch=(setsid nohup)
+"${launch[@]}" "$state/gocache" serve -dir "$state/dir" -sock "$state/sock" -ready "$state/ready" \
+  -prefix "$prefix" -mods "$mods" $write >> "$state/log" 2>&1 < /dev/null &
+
+# serve writes ready once the store's index is read (it gives up on that after two
+# minutes and serves what it has), so the first go command already sees it.
+for _ in $(seq 1 1300); do [ -s "$state/ready" ] && break; sleep 0.1; done
+[ -s "$state/ready" ] || { sed 's/^/  /' "$state/log"; skip "the cache did not start, so this job builds cold"; }
+addr=$(cat "$state/ready")
+
+# First in GOPROXY, with `|` after it: a miss or a fault there sends the go
+# command on to whatever GOPROXY already named. A GOPROXY that forbids
+# downloading (`off`) is left as it is.
+up=$(go env GOPROXY)
+case ",${up//|/,}," in
+  *,off,*) proxy=$up ;;
+  *) proxy="http://$addr|$up" ;;
+esac
+{
+  echo "GOCACHEPROG=$state/gocache connect $state/sock $state/dir"
+  echo "GOPROXY=$proxy"
+  # Every later step reads the caches from these directories, so a gate that
+  # names its own with `${GOCACHE:-…}` (hanzo-inc/cloud's do) builds into them.
+  echo "GOMODCACHE=$mods"
+  echo "GOCACHE=$(go env GOCACHE)"
+} >> "${GITHUB_ENV:-/dev/null}"
+grep -h 'index:\|own disk' "$state/log" | sed 's/^/  /'
+if [ -n "$write" ]; then echo "gocache: $prefix, writing what this job builds"; else echo "gocache: $prefix, read only"; fi

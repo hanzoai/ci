@@ -1,160 +1,85 @@
 #!/usr/bin/env bash
-# Tests for bin/gocache. Offline: stub `curl` plays cloud's /v1/s3 (presign) and
-# the store behind it, stub `go` names the caches, stub `zstd` is `cat`. What is
-# tested is the protocol — who may write, what a reader trusts, and that a
-# restored cache is byte-for-byte the saved one — not the network.
+# Tests for bin/gocache, the job's side of gocache/ (whose own suite, `go test`
+# in gocache/, covers the store, the packs and the protocol). What is pinned
+# here is what a job sees: an old toolchain or a missing module is a cold build
+# and exit 0, a started cache is wired into every later step through
+# GITHUB_ENV, a go build through it works with no store at all, GOPROXY keeps
+# what it named behind the cache, and save stops what restore started.
 # Run: bash bin/gocache_test.sh
 set -uo pipefail
 cd "$(dirname "$0")/.."
-GOCACHE_BIN="$PWD/bin/gocache"
+BIN="$PWD/bin/gocache"
 fail=0
-T=$(mktemp -d); trap 'chmod -R u+w "$T"; rm -rf "$T"' EXIT
-mkdir -p "$T/stub" "$T/store" "$T/repo"
-
-cat > "$T/stub/curl" <<'EOF'
-#!/usr/bin/env bash
-# The API answers presigned store:// URLs; the store is a directory.
-o= w= m=GET d= up= url= auth=
-while [ $# -gt 0 ]; do
-  case "$1" in
-    -o) o=$2; shift ;; -w) w=$2; shift ;; -X) m=$2; shift ;; -d) d=$2; shift ;;
-    -T) up=$2; shift ;; -H) case "$2" in Authorization:*) auth=$2 ;; esac; shift ;;
-    -m) shift ;; -*) ;; *) url=$1 ;;
-  esac
-  shift
-done
-code() { [ -n "$w" ] && printf '%s' "$1"; }
-case "$url" in
-  store://*)
-    k=${url#store://}
-    if [ -n "$up" ]; then mkdir -p "$STORE/$(dirname "$k")"; cp "$up" "$STORE/$k"; echo "$k" >> "$STORE.puts"; exit 0; fi
-    [ -f "$STORE/$k" ] || exit 22
-    cp "$STORE/$k" "$o"; exit 0 ;;
-  http://api.test/v1/s3/buckets)
-    [ "$auth" = "Authorization: Bearer tok" ] || { code 401; exit 0; }
-    code 201; exit 0 ;;
-  http://api.test/v1/s3/buckets/ci-cache/objects)
-    [ "$auth" = "Authorization: Bearer tok" ] || { code 401; exit 0; }
-    k=$(printf '%s' "$d" | jq -r .key)
-    printf '{"url":"store://%s","method":"PUT"}' "$k" > "$o"; code 200; exit 0 ;;
-  http://api.test/v1/s3/buckets/ci-cache/objects/*)
-    [ "$auth" = "Authorization: Bearer tok" ] || { code 401; exit 0; }
-    printf '{"url":"store://%s","method":"GET"}' "${url#http://api.test/v1/s3/buckets/ci-cache/objects/}" > "$o"; code 200; exit 0 ;;
-esac
-code 404
-EOF
-cat > "$T/stub/go" <<'EOF'
-#!/usr/bin/env bash
-case "$2" in
-  GOMODCACHE) echo "$HOME/go/pkg/mod" ;; GOCACHE) echo "$HOME/.cache/go-build" ;;
-  GOVERSION) echo go1.27.1 ;; GOARCH) echo amd64 ;;
-esac
-EOF
-printf '#!/bin/sh\nexec cat\n' > "$T/stub/zstd"
-chmod +x "$T/stub/"*
-export PATH="$T/stub:$PATH" STORE="$T/store" HANZO_API=http://api.test HANZO_API_TOKEN=tok
-export GITHUB_REPOSITORY=hanzoai/gateway CACHE_PART=4096
-printf '{"repository":{"default_branch":"main"}}' > "$T/event.json"
-printf 'example.com/a v1.0.0 h1:x=\n' > "$T/repo/go.sum"
-
-# A pod: a fresh HOME and temp dir, as every runner job gets.
-pod() { chmod -R u+w "$T/home" 2>/dev/null; rm -rf "$T/home" "$T/tmp"; mkdir -p "$T/home" "$T/tmp"; export HOME="$T/home" RUNNER_TEMP="$T/tmp"; }
-# Go's module cache is read-only, which is what a real save and restore meet.
-warm() {
-  mkdir -p "$HOME/go/pkg/mod/example.com/a@v1.0.0" "$HOME/.cache/go-build/ab"
-  head -c 20000 /dev/urandom > "$HOME/go/pkg/mod/example.com/a@v1.0.0/a.go"
-  head -c 9000 /dev/urandom > "$HOME/.cache/go-build/ab/abcd-d"
-  chmod -R a-w "$HOME/go/pkg/mod"
-}
-tree() { (cd "$HOME" && find go .cache/go-build -type f -exec sha256sum {} + 2>/dev/null | sort); }
-run() { # run <event> <ref> <reftype> <cmd>
-  GITHUB_EVENT_NAME=$1 GITHUB_REF_NAME=$2 GITHUB_REF_TYPE=$3 GITHUB_EVENT_PATH="$T/event.json" \
-    GITHUB_OUTPUT="$T/out" bash "$GOCACHE_BIN" "$4" "$T/repo" > "$T/log" 2>&1
-}
+T=$(mktemp -d); trap 'pkill -f "$T/tmp/gocache/gocache serve" 2>/dev/null; chmod -R u+w "$T"; rm -rf "$T"' EXIT
 ok() { printf 'ok    %s\n' "$1"; }
 no() { printf 'FAIL  %s\n' "$1"; sed 's/^/        /' "$T/log"; fail=1; }
-hit() { tail -1 "$T/out" 2>/dev/null | sed 's/^hit=//'; }
-puts() { wc -l < "$STORE.puts" 2>/dev/null || echo 0; }
-key=hanzoai/gateway/go1.27.1-amd64-used
+pod() { rm -rf "$T/tmp" "$T/env"; mkdir -p "$T/tmp"; : > "$T/env"; }
+mkdir -p "$T/m" "$T/stub"
+printf 'module example.com/m\n\ngo 1.24\n' > "$T/m/go.mod"
+printf 'package main\n\nimport "fmt"\n\nfunc main() { fmt.Println("m") }\n' > "$T/m/main.go"
+printf '{"repository":{"default_branch":"main"}}' > "$T/event.json"
+run() { # run <event> <ref> <cmd> [dir]
+  RUNNER_TEMP="$T/tmp" GITHUB_ENV="$T/env" GITHUB_REPOSITORY=hanzoai/x GITHUB_EVENT_NAME=$1 \
+    GITHUB_REF_NAME=$2 GITHUB_REF_TYPE=branch GITHUB_EVENT_PATH="$T/event.json" HANZO_API_TOKEN= \
+    bash "$BIN" "$3" "${4:-$T/m}" > "$T/log" 2>&1
+}
 
-pod; : > "$T/out"; run push main branch restore
-[ $? = 0 ] && [ "$(hit)" = miss ] && ok "an empty store is a miss, and exit 0" || no "an empty store is a miss, and exit 0"
+cat > "$T/stub/go" <<'EOF'
+#!/bin/sh
+[ "$2" = GOVERSION ] && echo go1.23.4
+EOF
+chmod +x "$T/stub/go"
+pod; PATH="$T/stub:$PATH" run push main restore
+[ $? = 0 ] && grep -q 'predates GOCACHEPROG' "$T/log" && [ ! -s "$T/env" ] \
+  && ok "a toolchain older than 1.24 builds cold, and exit 0" || no "a toolchain older than 1.24 builds cold, and exit 0"
 
-pod; warm; run pull_request main branch save
-[ ! -e "$STORE.puts" ] && ok "a pull request never writes" || no "a pull request never writes"
+pod; run push main restore "$T/stub"
+[ $? = 0 ] && grep -q 'has no go.mod' "$T/log" && [ ! -s "$T/env" ] \
+  && ok "no go.mod is a notice, not a red gate" || no "no go.mod is a notice, not a red gate"
 
-pod; warm; run push feature branch save
-[ ! -e "$STORE.puts" ] && ok "a branch that is not the default never writes" || no "a branch that is not the default never writes"
+pod; run push main save
+[ $? = 0 ] && grep -q 'nothing to save' "$T/log" && ok "save with nothing started is a notice" || no "save with nothing started is a notice"
 
-pod; warm; want=$(tree); run push main branch save
-n=$(ls "$STORE/$key/" 2>/dev/null | grep -c '\.tar\.zst\.')
-[ -f "$STORE/$key/$(sha256sum "$T/repo/go.sum" | cut -c1-32).idx" ] && [ -f "$STORE/$key/latest" ] && [ "$n" -gt 1 ] \
-  && ok "the default branch writes $n parts, then the index, then latest" || no "the default branch writes parts, index and latest"
-[ "$(tail -2 "$STORE.puts" | head -1)" = "$key/$(sha256sum "$T/repo/go.sum" | cut -c1-32).idx" ] \
-  && ok "the index is written after every part" || no "the index is written after every part"
+if ! command -v go >/dev/null 2>&1; then
+  printf 'skip  the rest builds with go, which this runner does not have\n'
+  exit $fail
+fi
 
-before=$(puts); pod; warm; run push main branch save
-[ "$(puts)" = "$before" ] && ok "a key already saved is not written again" || no "a key already saved is not written again"
+pod; run push main restore
+grep -q '^GOCACHEPROG=.*/gocache connect .*/sock .*/dir$' "$T/env" && grep -q '^GOPROXY=http://127\.0\.0\.1:[0-9]*|' "$T/env" \
+  && grep -q '^GOMODCACHE=' "$T/env" && grep -q '^GOCACHE=' "$T/env" \
+  && ok "restore wires GOCACHEPROG, GOPROXY and both cache directories into later steps" \
+  || no "restore wires GOCACHEPROG, GOPROXY and both cache directories into later steps"
+up=$(go env GOPROXY)
+[ "$(sed -n 's/^GOPROXY=http:\/\/127\.0\.0\.1:[0-9]*|//p' "$T/env")" = "$up" ] \
+  && ok "GOPROXY keeps what it named behind the cache" || no "GOPROXY keeps what it named behind the cache"
+grep -q 'writing what this job builds' "$T/log" && ok "the default branch may write" || no "the default branch may write"
 
-pod; : > "$T/env"; GITHUB_ENV="$T/env" run push main branch restore
-[ "$(hit)" = exact ] && [ "$(tree)" = "$want" ] && ok "a fresh pod restores the exact bytes that were saved" \
-  || no "a fresh pod restores the exact bytes that were saved"
-grep -qx "GOCACHE=$HOME/.cache/go-build" "$T/env" && grep -qx "GOMODCACHE=$HOME/go/pkg/mod" "$T/env" \
-  && ok "later steps are pinned to the directories restored" || no "later steps are pinned to the directories restored"
+( set -a; . "$T/env"; set +a; cd "$T/m" && GOWORK=off GOFLAGS= go build -o "$T/m.out" . ) > "$T/log" 2>&1 && "$T/m.out" | grep -qx m \
+  && ok "a go build runs through the cache with no store behind it" || no "a go build runs through the cache with no store behind it"
 
-pod; : > "$T/out"; HANZO_API_TOKEN=wrong run push main branch restore
-[ $? = 0 ] && [ "$(hit)" = miss ] && ok "a refused credential is a cold build, not a red one" || no "a refused credential is a cold build, not a red one"
+run push main save
+grep -q 'puts' "$T/log" && ! pgrep -f "$T/tmp/gocache/gocache serve" >/dev/null \
+  && ok "save reports what the cache did, and stops it" || no "save reports what the cache did, and stops it"
 
-printf 'example.com/a v1.0.1 h1:y=\n' >> "$T/repo/go.sum"
-pod; run pull_request feature branch restore
-[ "$(hit)" = partial ] && [ "$(tree)" = "$want" ] && ok "a go.sum the store has not seen restores the repo's latest" \
-  || no "a go.sum the store has not seen restores the repo's latest"
+pod; run pull_request feature restore
+grep -q 'read only' "$T/log" && ok "a pull request reads and never writes" || no "a pull request reads and never writes"
+run pull_request feature save
 
-old=$(cat "$STORE/$key/latest"); printf 'x' >> "$STORE/$key/$old.tar.zst.000"
-pod; : > "$T/out"; run push main branch restore
-[ $? = 0 ] && [ "$(hit)" = miss ] && [ -z "$(tree)" ] && ok "an archive that does not match its index is never unpacked" \
-  || no "an archive that does not match its index is never unpacked"
+pod; GOPROXY=off run push main restore
+grep -qx 'GOPROXY=off' "$T/env" && ok "a GOPROXY that forbids downloads is left as it is" || no "a GOPROXY that forbids downloads is left as it is"
+GOPROXY=off run push main save
 
-pod; : > "$T/out"; HANZO_API_TOKEN= run push main branch restore
-[ $? = 0 ] && [ "$(hit)" = miss ] && ok "no identity is a cold build" || no "no identity is a cold build"
-
-# A share of a split gate keeps its own key, so parallel jobs each save theirs.
-share=$(printf '%s' "go-unit" | sha256sum | cut -c1-8)
-pod; warm; GOCACHE_SHARE=go-unit run push main branch save
-[ -f "$STORE/$key-$share/latest" ] && ok "a share of the gate saves under its own key" || no "a share of the gate saves under its own key"
-pod; : > "$T/out"; GOCACHE_SHARE=go-unit run push main branch restore
-[ "$(hit)" = exact ] && ok "a share restores its own key" || no "a share restores its own key"
-
-# A save keeps what its run used and what it compiled, and nothing that only came
-# along with the restore: an entry the gate reads is stamped anew by Go, and one it
-# does not is left at the age the restore gave it.
-printf 'example.com/a v1.0.2 h1:z=\n' >> "$T/repo/go.sum"
-pod; warm
-for f in used idle; do head -c 9000 /dev/urandom > "$HOME/.cache/go-build/ab/$f-d"; done
-run push main branch save
-printf 'example.com/a v1.0.3 h1:w=\n' >> "$T/repo/go.sum"
-pod; run push main branch restore
-old=$(stat -c %Y "$HOME/.cache/go-build/ab/idle-d")
-[ $(( $(date +%s) - old )) -ge 3600 ] && ok "a restored entry is stamped past the hour Go leaves a used entry alone" \
-  || no "a restored entry is stamped past the hour Go leaves a used entry alone"
-sleep 1; touch "$HOME/.cache/go-build/ab/used-d"; head -c 9000 /dev/urandom > "$HOME/.cache/go-build/ab/built-d"
-run push main branch save
-pod; run push main branch restore
-[ -f "$HOME/.cache/go-build/ab/used-d" ] && [ -f "$HOME/.cache/go-build/ab/built-d" ] && [ ! -e "$HOME/.cache/go-build/ab/idle-d" ] \
-  && ok "a save keeps what its run used or compiled, and drops what only came along" \
-  || no "a save keeps what its run used or compiled, and drops what only came along"
-
-# An archive saved before the cut, under the old name, is never restored.
-pod; mkdir -p "$STORE/hanzoai/gateway/go1.27.1-amd64"; printf 'stale\n' > "$STORE/hanzoai/gateway/go1.27.1-amd64/latest"
-printf 'example.com/a v1.0.4 h1:v=\n' >> "$T/repo/go.sum"
-run push main branch restore
-[ "$(hit)" = partial ] && ok "the old name's archives are not read" || no "the old name's archives are not read"
-
-# The workflow wires it: restore before the gate, save after it, both reading
-# the module the Go provisioning found.
+# The workflow wires it: start before the gate, save after it red or green,
+# both reading the module the Go provisioning found, and the gates run from
+# one path on every runner.
 WF=.github/workflows/build.yml
 grep -q '"$CI_HOME/bin/gocache" restore' "$WF" && grep -q '"$CI_HOME/bin/gocache" save' "$WF" \
-  && ok "build.yml restores and saves through bin/gocache" || { printf 'FAIL  build.yml restores and saves through bin/gocache\n'; fail=1; }
+  && ok "build.yml starts and saves through bin/gocache" || { printf 'FAIL  build.yml starts and saves through bin/gocache\n'; fail=1; }
+grep -q "if: (success() || failure()) && steps.gomod.outputs.file != ''" "$WF" \
+  && ok "the save runs after a red gate too" || { printf 'FAIL  the save runs after a red gate too\n'; fail=1; }
+grep -q 'src="/var/tmp/src/${GITHUB_REPOSITORY' "$WF" \
+  && ok "gates run from one path on every runner" || { printf 'FAIL  gates run from one path on every runner\n'; fail=1; }
 grep -q 'cache: false' "$WF" && ! grep -q 'cache: ${{ inputs.go-cache' "$WF" \
   && ok "setup-go's own cache (GitHub's store) is off" || { printf "FAIL  setup-go's own cache (GitHub's store) is off\n"; fail=1; }
 

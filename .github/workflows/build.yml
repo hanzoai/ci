@@ -147,15 +147,17 @@ on:
         type: string
       go-cache:
         description: >-
-          Carry GOMODCACHE and GOCACHE between runs through this org's own
-          bucket in cloud's object store (bin/gocache). ON by default: a runner
-          is a pod that lives one job, so without it every Go gate downloads
-          every module and compiles every dependency from nothing. Measured, not
-          one Go cache was restored across 188 job logs, and a warm second pass
-          compiled hanzoai/commerce's vet in 15s instead of 198s. The cache is
-          keyed by go.sum, Go version and architecture, isolated per org by the
-          server, and written only from the default branch or a tag. 'false'
-          turns it off.
+          Carry Go's build cache and module downloads between runs through this
+          org's own bucket in cloud's object store (bin/gocache): one program
+          per job answers every go command through GOCACHEPROG and fetches each
+          compiled package the first time a build asks for it, and serves the
+          module files the store holds as the first entry in GOPROXY. ON by
+          default: a runner is a pod that lives one job, so without it every Go
+          gate downloads every module and compiles every dependency from
+          nothing. Keyed by Go version, OS and architecture, isolated per org by
+          the server, written only from the default branch or a tag, and every
+          output checked against the hash Go names it by. Go 1.24 or newer.
+          'false' turns it off.
         required: false
         default: "true"
         type: string
@@ -1281,15 +1283,13 @@ jobs:
           # forge has none. The cache is bin/gocache's, in the next step.
           cache: false
 
-      - name: Restore the Go cache (this org's store)
-        # Before the first gate, so `go vet` and `go test` start from this org's
-        # modules and compiled dependencies instead of the network. A miss, a
+      - name: Start the Go cache (this org's store)
+        # Before the first gate, so every go command the gate runs reads this
+        # org's compiled packages and modules before the network. A miss, a
         # refusal or an outage is a cold build and never a red one; the script
         # says which on the log.
         id: gocache
         if: steps.gomod.outputs.file != '' && env.HANZO_CI_ROLE == 'test' && inputs.go-cache != 'false'
-        env:
-          GOCACHE_SHARE: ${{ inputs.gates }}
         run: |
           "$CI_HOME/bin/gocache" restore "$(dirname '${{ steps.gomod.outputs.file }}')"
 
@@ -1835,8 +1835,22 @@ jobs:
         if: env.HANZO_CI_ROLE == 'test' && (inputs.tests != 'false')
         env:
           GATES: ${{ inputs.gates }}
+          GOMOD: ${{ steps.gomod.outputs.file }}
         run: |
           set -euo pipefail
+          # ONE PATH FOR THE SOURCE ON EVERY RUNNER. Without -trimpath the go
+          # command keys every package's compile by its directory, and the forge
+          # checks out under a directory named for the job
+          # (/home/runner/.cache/act/<hash>/hostexecutor), so no job ever found the
+          # packages the last one compiled — only the module cache's. The gates
+          # run from one stable name for the same tree, which the go command reads
+          # from PWD, so every job and both planes ask for the same keys.
+          if [ -n "${GOMOD:-}" ]; then
+            src="/var/tmp/src/${GITHUB_REPOSITORY:-local/local}"
+            if mkdir -p "$(dirname "$src")" && ln -sfn "$PWD" "$src" && cd "$src"; then
+              echo "gates run from $src (this checkout, one path on every runner)"
+            fi
+          fi
           NOTHING='\[no test files\]|\[no tests to run\]|no tests ran|collected 0 items|No tests found|no test specified|running 0 tests|Tests:[[:space:]]+0 total|(^|[^0-9])0 (passing|passed)'
           SOMETHING='^[[:space:]]*--- (PASS|FAIL|SKIP):|^(ok|FAIL)[[:space:]]+[^[:space:]]+[[:space:]]+([0-9.]+s|\(cached\))([[:space:]]+coverage)?$|[1-9][0-9]* (passed|failed|passing|failing)|[1-9][0-9]* tests? (passed|failed)|test result: (ok|FAILED)\.[[:space:]]+[1-9]|Tests:[[:space:]]+[1-9]'
           # The runners this estate actually invokes, as they are spelled in a
@@ -1967,13 +1981,13 @@ jobs:
           done
 
       - name: Save the Go cache (this org's store)
-        # After a green gate, so what is saved is what a passing build compiled.
-        # bin/gocache writes only from the default branch or a tag and only a key
-        # the store does not hold: a pull request reads this org's cache and
-        # never writes it, because Go trusts a cache without re-hashing it.
-        if: steps.gomod.outputs.file != '' && env.HANZO_CI_ROLE == 'test' && inputs.go-cache != 'false' && steps.gocache.outputs.hit != 'exact'
-        env:
-          GOCACHE_SHARE: ${{ inputs.gates }}
+        # After the gate, red or green: an output is valid for the inputs that
+        # produced it whatever the tests then said, so a failing push still warms
+        # the push that fixes it. bin/gocache writes only from the default branch
+        # or a tag, and only what the store lacks: a pull request reads this
+        # org's cache and never writes it, because Go trusts a cached output it
+        # did not build. A cancelled job leaves it.
+        if: (success() || failure()) && steps.gomod.outputs.file != '' && env.HANZO_CI_ROLE == 'test' && inputs.go-cache != 'false'
         run: |
           "$CI_HOME/bin/gocache" save "$(dirname '${{ steps.gomod.outputs.file }}')"
 

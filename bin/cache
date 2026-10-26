@@ -3,11 +3,12 @@
 #
 #   cache restore <name> <key> <label>=<dir>...   # prints hit=exact|partial|miss to $GITHUB_OUTPUT
 #   cache save    <name> <key> <label>=<dir>...   # writes on a trusted ref, on a miss, and nowhere else
+#   cache trusted                                 # exit 0 when this run may write (bin/gocache asks)
 #
 # A runner is a pod that lives for one job, so a cache on its disk dies with it.
-# This is the one way a job hands a directory to the next one. bin/gocache is
-# Go's caller; hanzoai/dev's release carries its compiled Rust objects (sccache)
-# and crate downloads through it.
+# This is the one way a job hands a directory to the next one: hanzoai/dev's
+# release carries its compiled Rust objects (sccache) and crate downloads
+# through it. Go does not: bin/gocache fetches each entry as a build asks.
 #
 # WHERE IT LIVES: the org's own bucket in cloud's object store (/v1/s3), reached
 # with the IAM identity the KMS step already minted (HANZO_API_TOKEN). cloud
@@ -18,8 +19,8 @@
 #
 # THE KEY: <owner/repo>/<name>/<key>, and the caller names both halves. <name>
 # is what an archive is only valid for — a toolchain and an architecture
-# (gocache: go1.27.1-amd64). <key> is the hash of the inputs that decide what is
-# in it (go.sum, Cargo.lock). A key that misses restores the newest key saved
+# (node: v22.23.3-x86_64). <key> is the hash of the inputs that decide what is
+# in it (pnpm-lock.yaml, Cargo.lock). A key that misses restores the newest key saved
 # under that name (`latest`), so a lock bump still reuses everything that did
 # not move.
 #
@@ -48,7 +49,20 @@
 #      CACHE_PART       94371840 (90 MiB), the size of one uploaded part
 set -uo pipefail
 
-usage() { echo "usage: cache restore|save <name> <key> <label>=<dir>..." >&2; exit 2; }
+usage() { echo "usage: cache restore|save <name> <key> <label>=<dir>... | cache trusted" >&2; exit 2; }
+
+# trusted: a pull request never writes; the default branch and tags do. why says
+# which, for the line a refusal prints.
+trusted() {
+  case "${GITHUB_EVENT_NAME:-}" in pull_request*) why="a pull request reads the cache and never writes it"; return 1 ;; esac
+  local default
+  default=$(jq -r '.repository.default_branch // empty' "${GITHUB_EVENT_PATH:-/dev/null}" 2>/dev/null || true)
+  if [ "${GITHUB_REF_TYPE:-}" != tag ] && { [ -z "$default" ] || [ "${GITHUB_REF_NAME:-}" != "$default" ]; }; then
+    why="${GITHUB_REF_NAME:-this ref} is not the default branch or a tag, so it does not write"; return 1
+  fi
+}
+if [ "${1:-}" = trusted ]; then trusted; exit; fi
+
 cmd="${1:-}"; name="${2:-}"; key="${3:-}"
 case "$cmd" in restore|save) ;; *) usage ;; esac
 [ $# -ge 4 ] || usage
@@ -177,11 +191,7 @@ if [ "$cmd" = restore ]; then
 fi
 
 # save: a trusted ref, and only when the exact key is not already there.
-case "${GITHUB_EVENT_NAME:-}" in pull_request*) say "a pull request reads the cache and never writes it"; exit 0 ;; esac
-default=$(jq -r '.repository.default_branch // empty' "${GITHUB_EVENT_PATH:-/dev/null}" 2>/dev/null || true)
-if [ "${GITHUB_REF_TYPE:-}" != tag ] && { [ -z "$default" ] || [ "${GITHUB_REF_NAME:-}" != "$default" ]; }; then
-  say "${GITHUB_REF_NAME:-this ref} is not the default branch or a tag, so it does not write"; exit 0
-fi
+trusted || { say "$why"; exit 0; }
 get "$prefix/$key.idx" "$tmp/have" 2>/dev/null && { say "$prefix/$key is already saved"; exit 0; }
 # Each label is a symlink to its directory, archived as `<label>/.`: the path
 # goes through that one link and every symlink beneath it is kept as a link.
