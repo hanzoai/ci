@@ -1,50 +1,42 @@
 #!/usr/bin/env bash
-# rollback — which release a site serves, and the flip back to the one before.
+# rollback — what a site serves, read back from its live host and kept, so a
+# release that fails verification can be replaced by the one it replaced.
 #
-#   rollback mark <slug>                 # "<slug> <active> <previous> <url>": what serves now
-#   rollback undo <slug> <now> <before>  # serve <before> again, if <now> still serves
+#   rollback live <url>        # the sha-256 of the manifest <url> serves now
+#   rollback keep <url> <dir>  # every file of that release into <dir>; prints the same digest
 #
-# The Sites plane keeps a site's releases, newest first, and serves exactly one
-# (GET /v1/project/<slug>/releases); pointing the site at an older one is the
-# rollback (POST .../releases/<id>/activate), with nothing rebuilt or copied.
-# The publish step marks each site before and after it publishes; the verify job
-# undoes the publish when a suite fails. A publish of identical content leaves
-# the same release serving, and undoing it changes nothing. Undo flips only
-# while the release this run made live is still the one serving, so a newer
-# publish is never rolled back by an older run's verdict.
+# A site's host serves its prefix in place (the ingress reads s3://hanzo-sites/
+# <org>/<slug> directly) and a publish rewrites that prefix, so the release
+# before a publish exists only until the publish lands. bin/site leaves a
+# `<sha256>  <key>` manifest of every file at _site/manifest.txt; `keep` reads it
+# and fetches each file over the public host, sixteen at a time, checking each
+# against its hash, so <dir> is that release byte for byte and bin/site can
+# publish it again. `live` names a release by its manifest's digest, so the
+# verify job rolls back only while the release this run published still serves.
 #
-# ENV: HANZO_API (https://api.hanzo.ai), HANZO_DEPLOY_TOKEN (the org's sk- key).
+# A site with no manifest, or one past ROLLBACK_MAX_FILES (2000) files or
+# ROLLBACK_MAX_BYTES (512 MiB), is not kept: `keep` says so and exits 3.
 set -uo pipefail
-cmd=${1:-}; slug=${2:-}
-case "$cmd" in mark) [ $# = 2 ] ;; undo) [ $# = 4 ] ;; *) false ;; esac \
-  && [[ $slug =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "usage: rollback mark <slug> | rollback undo <slug> <active> <previous>" >&2; exit 2; }
-api=${HANZO_API:-https://api.hanzo.ai}
-[ -n "${HANZO_DEPLOY_TOKEN:-}" ] || { echo "::error::rollback: no HANZO_DEPLOY_TOKEN" >&2; exit 1; }
+cmd=${1:-}; url=${2:-}; url=${url%/}
+case "$cmd" in live) [ $# = 2 ] ;; keep) [ $# = 3 ] ;; *) false ;; esac && [[ $url == https://* ]] \
+  || { echo "usage: rollback live <https-url> | rollback keep <https-url> <dir>" >&2; exit 2; }
+work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 
-# releases -> the site's releases as JSON, newest first, or non-zero.
-releases() {
-  local out code
-  out=$(mktemp)
-  code=$(curl -sS -m 30 -o "$out" -w '%{http_code}' "$api/v1/project/$slug/releases" \
-    -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN") || code=000
-  [ "$code" = 200 ] && jq -e 'type == "array"' "$out" >/dev/null 2>&1 && cat "$out"
-  local ok=$?; [ $ok = 0 ] || echo "::error::rollback: the releases of $slug answered HTTP $code: $(head -c 200 "$out")" >&2
-  rm -f "$out"; return $ok
-}
+curl -fsS -m 30 -H 'Cache-Control: no-cache' -o "$work/m" "$url/_site/manifest.txt?t=$(date +%s)" 2>/dev/null \
+  && [ -s "$work/m" ] && ! grep -qvE '^[0-9a-f]{64}  [^ ]' "$work/m" \
+  || { echo "::warning::rollback: $url serves no manifest, so its release cannot be kept" >&2; exit 3; }
+digest=$(sha256sum < "$work/m" | cut -c1-64)
+[ "$cmd" = keep ] || { echo "$digest"; exit 0; }
 
-list=$(releases) || exit 1
-active=$(jq -r 'map(select(.active))[0].releaseId // ""' <<<"$list")
-if [ "$cmd" = mark ]; then
-  prev=$(jq -r '(map(.active) | index(true)) as $i | if $i == null then "" else (.[$i + 1].releaseId // "") end' <<<"$list")
-  url=$(jq -r 'map(select(.active))[0].url // ""' <<<"$list")
-  printf '%s %s %s %s\n' "$slug" "${active:--}" "${prev:--}" "${url:--}"
-  exit 0
-fi
-
-now=$3 prev=$4
-[ "$now" != "$prev" ] || { echo "rollback: $slug serves what it served before this run ($now), so there is nothing to undo"; exit 0; }
-[ "$prev" != - ] || { echo "::error::rollback: $slug served nothing before $now, so there is no release to serve again"; exit 1; }
-[ "$active" = "$now" ] || { echo "::notice::rollback: $slug now serves ${active:-nothing}, not $now — a newer publish stands"; exit 0; }
-code=$(curl -sS -m 30 -o /dev/null -w '%{http_code}' -X POST "$api/v1/project/$slug/releases/$prev/activate" \
-  -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN") || code=000
-case "$code" in 2*) echo "rollback: $slug serves $prev again (was $now)" ;; *) echo "::error::rollback: activating $prev for $slug answered HTTP $code"; exit 1 ;; esac
+dir=$3 max=${ROLLBACK_MAX_FILES:-2000}
+n=$(grep -c . "$work/m")
+[ "$n" -le "$max" ] || { echo "::warning::rollback: $url serves $n files, past the $max a release is kept for" >&2; exit 3; }
+rm -rf "$dir"; mkdir -p "$dir"
+cut -c67- "$work/m" | U="$url" D="$dir" xargs -P 16 -I{} bash -c \
+  'mkdir -p "$(dirname "$D/$1")" && curl -fsS -g -m 120 -o "$D/$1" "$U/$1" 2>/dev/null || exit 255' _ {} \
+  || { echo "::warning::rollback: a file of the release at $url did not download, so it is not kept" >&2; exit 3; }
+(cd "$dir" && sha256sum -c --quiet "$work/m" >/dev/null 2>&1) \
+  || { echo "::warning::rollback: the release at $url changed while it was read, so it is not kept" >&2; exit 3; }
+bytes=$(du -sb "$dir" | cut -f1)
+[ "$bytes" -le "${ROLLBACK_MAX_BYTES:-536870912}" ] || { echo "::warning::rollback: $url serves $bytes bytes, past what a release is kept for" >&2; exit 3; }
+echo "$digest"

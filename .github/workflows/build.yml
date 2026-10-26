@@ -2062,7 +2062,7 @@ jobs:
         # `slug url` per line.
         if: env.HANZO_CI_ROLE == 'verify' && env.HANZO_CI_TRUSTED == 'true'
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           d="$RUNNER_TEMP/verify"; mkdir -p "$d"
           HANZO_SITES=$(for m in $HANZO_CI_RELEASED; do IFS=: read -r slug _ _ url <<<"$m"; echo "$slug $url"; done)
           HANZO_SITE_URL=$(awk 'NR==1{print $2}' <<<"$HANZO_SITES")
@@ -2082,10 +2082,10 @@ jobs:
           echo "verify: $n suite(s) passed against the live site"
 
       - name: Roll back (verify failed)
-        # A red suite puts every site this run made live back on the release
-        # that served before it (bin/rollback), unless a newer publish has
-        # replaced it since, and tells hanzo.yml's `page:` addresses and the
-        # commit's author.
+        # A red suite publishes again, for each site this run made live, the
+        # release it replaced (kept by the publish step), unless a newer publish
+        # has replaced this run's since, and tells hanzo.yml's `page:` addresses
+        # and the commit's author.
         if: failure() && steps.verify.outcome == 'failure'
         env:
           API: ${{ vars.API_ENDPOINT || 'https://api.hanzo.ai' }}
@@ -2097,16 +2097,27 @@ jobs:
           set -uo pipefail
           HANZO_DEPLOY_TOKEN=$(bash "$CI_HOME/bin/kms" "${KMS_PATH:-deploy}/HANZO_DEPLOY_TOKEN" "${KMS_ENV:-prod}") || exit 1
           case "$HANZO_DEPLOY_TOKEN" in *$'\n'*|::*) echo "::error::bin/kms printed more than the token; refusing it unprinted"; exit 1 ;; esac
-          echo "::add-mask::$HANZO_DEPLOY_TOKEN"; export HANZO_DEPLOY_TOKEN HANZO_API="$API"
+          echo "::add-mask::$HANZO_DEPLOY_TOKEN"; export HANZO_DEPLOY_TOKEN
           said=
           for m in $HANZO_CI_RELEASED; do
-            IFS=: read -r slug now prev url <<<"$m"
-            said="$said$("$CI_HOME/bin/rollback" undo "$slug" "$now" "$prev" 2>&1)"$'\n'
+            IFS=: read -r slug now kept url <<<"$m"
+            b="$RUNNER_TEMP/before/$slug"; out=$(mktemp)
+            if [ "$kept" != yes ]; then
+              said="$said$slug: no earlier release was kept, so it still serves ${GITHUB_SHA:0:7}"$'\n'
+            elif [ "$("$CI_HOME/bin/rollback" live "$url" 2>/dev/null)" != "$now" ]; then
+              said="$said$slug: a newer publish replaced ${GITHUB_SHA:0:7}, so it stands"$'\n'
+            elif GITHUB_OUTPUT=$out "$CI_HOME/bin/cache" restore "site-before-$slug" "$GITHUB_SHA" "b=$b" \
+                 && [ "$(sed -n 's/^hit=//p' "$out" | tail -1)" = exact ] \
+                 && HANZO_API="$API" SITE_BRANCH="$GITHUB_REF_NAME" "$CI_HOME/bin/site" "$slug" "$b"; then
+              said="$said$slug: serves the release before ${GITHUB_SHA:0:7} again"$'\n'
+            else
+              said="$said$slug: the release before ${GITHUB_SHA:0:7} could not be published again"$'\n'
+            fi
           done
           printf '%s' "$said"
           to=$(jq -nc --arg a "${AUTHOR:-}" --argjson p "$(yq -o=json -I=0 '.page // []' hanzo.yml)" '$p + [$a] | map(select(. != "")) | unique')
           [ "$to" != '[]' ] || { echo "::warning::no page: in hanzo.yml and no commit author, so nobody is told"; exit 1; }
-          body=$(jq -nc --argjson to "$to" --arg s "${GITHUB_REPOSITORY}: verify failed on ${GITHUB_SHA:0:7}, rolled back" \
+          body=$(jq -nc --argjson to "$to" --arg s "${GITHUB_REPOSITORY}: verify failed on ${GITHUB_SHA:0:7}" \
             --arg b "$(printf 'verify failed against the live site, run %s/%s/actions/runs/%s\n\n%s' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$said")" \
             '{to: $to, subject: $s, body: $b}')
           code=$(curl -sS -m 30 -o /dev/null -w '%{http_code}' -X POST "$API/v1/notify/send/email" \
@@ -3557,24 +3568,29 @@ jobs:
           # One publish per site, from the one implementation. A file, not a
           # pipe: site runs curl, and curl inherits stdin — it would eat
           # the rest of the list and report success for sites it never sent.
-          # When hanzo.yml lists `verify:`, what each site served before this
-          # publish and serves after it (bin/rollback), for the verify job to
-          # roll back to: slug:now:before:url.
+          # When hanzo.yml lists `verify:`, the release each site serves is kept
+          # before the publish replaces it (bin/rollback keep, into this org's
+          # store), and the verify job is handed slug:release:kept:url, the
+          # release this run made live named by its manifest.
           verify=$(yq '.verify // [] | length' hanzo.yml)
           released=
           printf '%s\n' "$PAIRS" > "$RUNNER_TEMP/site-pairs"
           while IFS= read -r pair; do
             [ -n "${pair//[[:space:]]/}" ] || continue
             slug=${pair%%=*}
-            [ "$verify" = 0 ] || { before=$(HANZO_API="$API" "$CI_HOME/bin/rollback" mark "$slug" 2>/dev/null) || before="$slug - - -"; }
+            if [ "$verify" != 0 ]; then
+              url=$(curl -sS -m 20 -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN" "$API/v1/projects/$slug" | jq -r '.liveUrl // empty' 2>/dev/null || true)
+              kept=no; b="$RUNNER_TEMP/before/$slug"
+              [ -z "$url" ] || ! "$CI_HOME/bin/rollback" keep "$url" "$b" >/dev/null \
+                || ! "$CI_HOME/bin/cache" save "site-before-$slug" "${{ github.sha }}" "b=$b" || kept=yes
+            fi
             echo "::group::publish $slug"
             HANZO_API="$API" SITE_COMMIT="${{ github.sha }}" SITE_BRANCH="$REF" \
               "$CI_HOME/bin/site" "$slug" "${pair#*=}"
             echo "::endgroup::"
             if [ "$verify" != 0 ]; then
-              read -r _ now _ url < <(HANZO_API="$API" "$CI_HOME/bin/rollback" mark "$slug") || exit 1
-              read -r _ was _ _ <<<"$before"
-              released="$released $slug:$now:$was:$url"
+              now=$("$CI_HOME/bin/rollback" live "${url:-https://-}" 2>/dev/null) || now=-
+              released="$released $slug:$now:$kept:${url:--}"
             fi
           done < "$RUNNER_TEMP/site-pairs"
           [ "$HANZO_CI_ROLE" = publish ] || echo "shipped=true" >> "$GITHUB_OUTPUT"
