@@ -168,6 +168,29 @@ kms 403 403; gate 0 "::warning::review: KMS login.*answered 403.*withholds no ve
 echo "the store holds no review/IAM_CLIENT_ID for this org (403) -> warned, release continues (~75s of retries)"
 kms 200 403; gate 0 "::warning::review: the store answered 403 for review/IAM_CLIENT_ID" "IAM_CLIENT_ID 403 does not block"
 
+echo "the IAM endpoint answers its web app, not JSON -> warned at once, release continues"
+python3 - <<'PY' &
+import http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get('content-length', 0) or 0))
+        b = b'<!doctype html><html></html>'
+        self.send_response(200); self.send_header('content-type', 'text/html')
+        self.send_header('content-length', str(len(b))); self.end_headers(); self.wfile.write(b)
+    def log_message(self, *a): pass
+http.server.HTTPServer(('127.0.0.1', 8793), H).serve_forever()
+PY
+HTML_PID=$!; sleep 1; kms 200 200
+t0=$SECONDS
+KMS_ENDPOINT=http://127.0.0.1:8792 KMS_CLIENT_ID=ci KMS_CLIENT_SECRET=s IAM_ENDPOINT=http://127.0.0.1:8793 \
+  bash "$GATE" "$BASE" "$HEAD_SHA" > "$WORK/out" 2>&1; got=$?
+if [ "$got" = 0 ] && grep -q "does not answer as an IAM token endpoint" "$WORK/out" && [ $((SECONDS - t0)) -lt 20 ]; then
+  echo "  PASS  a web app at the IAM address does not block, and is not asked again"
+else
+  echo "  FAIL  a web app at the IAM address: exit $got in $((SECONDS - t0))s"; sed -n '1,12p' "$WORK/out" | sed 's/^/        /'; fail=1
+fi
+kill "$KMS_PID" "$HTML_PID" 2>/dev/null; wait "$KMS_PID" "$HTML_PID" 2>/dev/null
+
 echo "a reviewer that runs and REFUSES still blocks through the gate"
 stub 500 '{"error":"boom"}'
 REVIEW_API=http://127.0.0.1:8791 REVIEW_TOKEN=stub REVIEW_MODEL=stub REVIEW_FALLBACKS="" \

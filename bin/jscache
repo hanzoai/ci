@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# jscache — Next's build cache, carried between runners through the org's store
-# (bin/cache).
+# jscache — Next's build cache, and pnpm's record of a verified lockfile, carried
+# between runners through the org's store (bin/cache).
 #
 #   jscache restore   # right before the gate
 #   jscache save      # after the gate, and after a site build: writes on a trusted ref
@@ -11,6 +11,14 @@
 # checks what it reads), so every trusted run writes its own and restores the
 # newest, and bin/cache keeps two. hanzoai/community compiles in 1.7 s from it
 # and 9.7 to 27.8 s without.
+#
+# pnpm 11 checks a lockfile against its supply-chain policies on every install,
+# fetching each entry's packument first: 1 m 54 s to 1 m 59 s of an install on
+# hanzoai/community and hanzoai/help-site (runs 40304493306, 40304515329). It
+# records a lockfile that passed in lockfile-verified.jsonl in its cache dir, and
+# a --frozen-lockfile install that finds the record skips the check. That one
+# file is carried, keyed by the lockfile and the workspace file, and saved after
+# the gate's own frozen install wrote it.
 #
 # node_modules is not carried. On a runner, restoring it cost more than the
 # install it replaced (hanzoai/community run 40297610093: 54 s to unpack 154 MiB,
@@ -43,11 +51,27 @@ while IFS= read -r pj; do
   d=$(dirname "$pj"); d=${d#./}
   if [ "$d" = . ]; then apps+=("n_root=.next/cache"); else apps+=("n_$(printf '%s' "$d" | tr -c 'A-Za-z0-9._-' '_')=$d/.next/cache"); fi
 done < <(find . -maxdepth 3 -name package.json -not -path '*/node_modules/*' -not -path './.*/*' -not -path '*/.next/*' 2>/dev/null | awk '{print (($0 == "./package.json") ? 0 : 1) "\t" $0}' | sort | cut -f2)
-[ ${#apps[@]} -gt 0 ] || skip "nothing here depends on next"
+# pnpm's verified-lockfile record, for a root pnpm-lock.yaml under pnpm 11 or later.
+record= rkey= rname= rdir="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/jscache-verified"
+if [ -f pnpm-lock.yaml ] && pv=$(pnpm --version 2>/dev/null) && [ "${pv%%.*}" -ge 11 ] 2>/dev/null; then
+  record="$(pnpm cache path 2>/dev/null)/lockfile-verified.jsonl"
+  rname="pnpm-verified-$pv"
+  rkey=$(git ls-tree HEAD -- pnpm-lock.yaml pnpm-workspace.yaml 2>/dev/null | sha256sum | cut -c1-32)
+fi
+[ ${#apps[@]} -gt 0 ] || [ -n "$record" ] || skip "nothing here depends on next or installs with pnpm 11"
 
 if [ "$cmd" = restore ]; then
-  GITHUB_OUTPUT=/dev/null "$CACHE" restore "$next" "$key" "${apps[@]}"
+  [ ${#apps[@]} = 0 ] || GITHUB_OUTPUT=/dev/null "$CACHE" restore "$next" "$key" "${apps[@]}"
+  if [ -n "$record" ]; then
+    rm -rf "$rdir"
+    GITHUB_OUTPUT=/dev/null "$CACHE" restore "$rname" "$rkey" "v=$rdir"
+    [ ! -f "$rdir/lockfile-verified.jsonl" ] || { mkdir -p "$(dirname "$record")" && cp "$rdir/lockfile-verified.jsonl" "$record"; }
+  fi
   exit 0
+fi
+
+if [ -n "$record" ] && [ -f "$record" ]; then
+  rm -rf "$rdir"; mkdir -p "$rdir" && cp "$record" "$rdir/" && "$CACHE" save "$rname" "$rkey" "v=$rdir"
 fi
 
 have=()

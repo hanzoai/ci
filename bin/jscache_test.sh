@@ -15,7 +15,9 @@ echo "$*" >> "$CALLS"
 exit 0
 STUB
 printf '#!/bin/sh\necho v22.23.3\n' > "$T/stub/node"
-chmod +x "$T/bin/"* "$T/stub/node"
+# pnpm answers its version from $PNPM_V and its cache dir under $T.
+printf '#!/bin/sh\ncase "$1" in --version) echo "${PNPM_V:-10.34.5}" ;; cache) echo "%s/pcache" ;; esac\n' "$T" > "$T/stub/pnpm"
+chmod +x "$T/bin/"* "$T/stub/node" "$T/stub/pnpm"
 ok() { printf 'ok    %s\n' "$1"; }
 no() { printf 'FAIL  %s\n' "$1"; sed 's/^/        /' "$CALLS"; fail=1; }
 cd "$T/repo" && git init -q && printf 'lockfileVersion: 9\n' > pnpm-lock.yaml \
@@ -50,4 +52,16 @@ printf '{"name":"x","dependencies":{"next":"15"}}' > package.json; printf 'site:
 printf 'site:\n  slug: s\n  dir: out\n  build: pnpm build\n' > hanzo.yml
 : > "$CALLS"; HANZO_CI_ROLE=publish bash "$T/bin/jscache" restore > /dev/null 2>&1
 grep -q '^restore next-' "$CALLS" && ok "a publish job that builds its site restores Next's cache" || no "a publish job that builds its site restores Next's cache"
+printf '{"name":"x"}' > package.json; git -c user.email=t@t -c user.name=t commit -qam z
+: > "$CALLS"; PNPM_V=11.24.0 bash "$T/bin/jscache" restore > /dev/null 2>&1
+grep -q "^restore pnpm-verified-11.24.0 [0-9a-f]\{32\} v=$T/jscache-verified$" "$CALLS" && [ "$(wc -l < "$CALLS")" = 1 ] \
+  && ok "pnpm 11 restores its verified-lockfile record by lockfile" || no "pnpm 11 restores its verified-lockfile record by lockfile"
+: > "$CALLS"; PNPM_V=11.24.0 bash "$T/bin/jscache" save > /dev/null 2>&1
+[ ! -s "$CALLS" ] && ok "no record written, nothing saved" || no "no record written, nothing saved"
+mkdir -p "$T/pcache" && echo '{"v":1}' > "$T/pcache/lockfile-verified.jsonl"
+: > "$CALLS"; PNPM_V=11.24.0 bash "$T/bin/jscache" save > /dev/null 2>&1
+grep -q "^save pnpm-verified-11.24.0 [0-9a-f]\{32\} v=$T/jscache-verified$" "$CALLS" && [ -f "$T/jscache-verified/lockfile-verified.jsonl" ] \
+  && ok "the record the install wrote is saved, and only it" || no "the record the install wrote is saved, and only it"
+: > "$CALLS"; out=$(PNPM_V=10.34.5 bash "$T/bin/jscache" restore 2>&1)
+[ ! -s "$CALLS" ] && ok "pnpm 10 has no record to carry" || no "pnpm 10 has no record to carry"
 exit $fail

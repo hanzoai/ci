@@ -96,6 +96,13 @@ if [ -z "${REVIEW_TOKEN:-}" ]; then
           -d 'grant_type=client_credentials' \
       | jq -r '.access_token // empty'
   }
+  # An endpoint that answers anything but JSON is not an IAM token endpoint, and
+  # asking it six more times does not make it one (iam.hanzo.ai serves its web
+  # app on this path).
+  curl -s --max-time 15 -X POST "${IAM}/v1/iam/oauth/token" -d 'grant_type=client_credentials' 2>/dev/null \
+    | jq -e 'type == "object"' >/dev/null 2>&1 || {
+    echo "::warning::review: ${IAM}/v1/iam/oauth/token does not answer as an IAM token endpoint — the reviewer did not run, so it withholds no verdict"
+    exit 0; }
   REVIEW_TOKEN=$(again mint_review || true)
   if [ -z "$REVIEW_TOKEN" ]; then
     echo "::warning::review: IAM issued no token to ${CLIENT_NAME} at ${IAM} — the reviewer did not run, so it withholds no verdict"
