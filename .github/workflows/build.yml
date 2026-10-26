@@ -1372,15 +1372,6 @@ jobs:
           esac
           corepack enable
 
-      - name: Restore the JS caches (this org's store)
-        # node_modules for the root lockfile, and Next's build cache, before the
-        # gate installs or builds anything: measured on hanzoai/blog, the gate's
-        # `pnpm install` reused 0 of 1015 packages (73 s) and the publish job
-        # installed them all again (27 s). bin/jscache says what each restore
-        # found; a miss or an outage installs from the registry as before.
-        if: hashFiles('package.json') != '' && env.HANZO_CI_TRUSTED == 'true'
-        run: '"$CI_HOME/bin/jscache" restore'
-
       - name: Provision bun (bun test gates)
         # Same guarded provision as the Go, Node and Rust steps: only for callers
         # that declare it, harmless once a runner image bakes bun in. Keyed on the
@@ -1825,6 +1816,14 @@ jobs:
           fi
           echo "runner git authenticated for private Go modules"
 
+      - name: Restore the JS caches (this org's store)
+        # Next's build cache, right before the gate: after every step whose
+        # condition is a hashFiles('**/…'), because each of those walks the whole
+        # workspace and a restored tree is walked with it. bin/jscache says what
+        # it found; a miss or an outage compiles from nothing as before.
+        if: hashFiles('package.json') != '' && env.HANZO_CI_TRUSTED == 'true'
+        run: '"$CI_HOME/bin/jscache" restore'
+
       - name: Test (per hanzo.yml)
         # Every gate runs here, and every gate is then asked ONE question: did it
         # actually run a test?
@@ -2054,7 +2053,7 @@ jobs:
 
       - name: Save the JS caches (this org's store)
         # After the gate, red or green, like the Go cache, and only from a trusted
-        # ref (bin/cache): node_modules when its key missed, Next's cache always.
+        # ref (bin/cache).
         if: (success() || failure()) && hashFiles('package.json') != '' && env.HANZO_CI_ROLE == 'test' && env.HANZO_CI_TRUSTED == 'true'
         run: '"$CI_HOME/bin/jscache" save'
 

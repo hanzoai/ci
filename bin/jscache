@@ -1,92 +1,55 @@
 #!/usr/bin/env bash
-# jscache — a JS repo's node_modules and Next's build cache, carried between
-# runners through the org's store (bin/cache).
+# jscache — Next's build cache, carried between runners through the org's store
+# (bin/cache).
 #
-#   jscache restore   # before the first gate; records what it found for save
-#   jscache save      # after the gate: writes on a trusted ref, through bin/cache
-#
-# Every package's node_modules, not the package manager's store. Restored as
-# the install that saved it left it, node_modules needs no install at all, where
-# a store still has to be linked from (hanzo-inc/app measured the pnpm store at
-# 49 s to restore and 16 s to install from, against 33 s from the registry). In a
-# workspace that means each package's own node_modules as well as the root's:
-# pnpm reads the root's state, answers "Already up to date" and links nothing,
-# so a package whose node_modules did not come back resolves its imports from
-# the root's and builds against other versions (hanzoai/ui's @hanzo/ui failed to
-# typecheck that way). The name is what the archive is valid for — the Node
-# version and the architecture, because native modules are built for both — and
-# the key is what decides its contents: the lockfile, package.json, .npmrc and
-# the workspace file. A key that misses restores the newest one saved, and the
-# gate's own install brings it to the lockfile; the save then writes the new key
-# once.
+#   jscache restore   # right before the gate
+#   jscache save      # after the gate, and after a site build: writes on a trusted ref
 #
 # .next/cache, keyed by commit, for every package in the repo that depends on
 # next — the root, or apps/docs in a workspace — in one archive, each under a
-# label named for its directory: the compile store is valid across commits (Next
+# label named for its directory. The compile store is valid across commits (Next
 # checks what it reads), so every trusted run writes its own and restores the
-# newest, and bin/cache keeps two. The publish job saves it too, when it is the
-# one that builds the site.
+# newest, and bin/cache keeps two. hanzoai/community compiles in 1.7 s from it
+# and 9.7 to 27.8 s without.
 #
-# Root lockfile only. Best effort, like bin/cache: nothing here fails a gate.
+# node_modules is not carried. On a runner, restoring it cost more than the
+# install it replaced (hanzoai/community run 40297610093: 54 s to unpack 154 MiB,
+# then pnpm 11 still verified the lockfile against the registry for 56 s,
+# against 46 to 60 s for a cold install), and a tree that size in the workspace
+# is walked by every later `hashFiles('**/…')`, 218 s in that run.
+#
+# Best effort, like bin/cache: nothing here fails a gate.
 set -uo pipefail
 cmd=${1:-}
 case "$cmd" in restore|save) ;; *) echo "usage: jscache restore|save" >&2; exit 2 ;; esac
 skip() { echo "::notice::jscache: $*"; exit 0; }
 CACHE="$(dirname "$0")/cache"
-state="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/jscache.state"
 
-lock=
-for f in pnpm-lock.yaml package-lock.json yarn.lock bun.lock bun.lockb; do [ -f "$f" ] && { lock=$f; break; }; done
-[ -n "$lock" ] || skip "no lockfile at the root, so there is no node_modules to carry"
-# The publish job installs nothing unless it builds a site; the export the gate
-# built arrives already built (bin/sites).
-if [ "$cmd" = restore ] && [ "${HANZO_CI_ROLE:-}" = publish ] && [ -z "$("$(dirname "$0")/sites" build 2>/dev/null)" ]; then
-  skip "the publish job builds nothing here, so it needs no node_modules"
+# The publish job compiles only when hanzo.yml names a site build.
+if [ "${HANZO_CI_ROLE:-}" = publish ] && [ -z "$("$(dirname "$0")/sites" build 2>/dev/null)" ]; then
+  skip "the publish job builds nothing here, so it needs no Next cache"
 fi
 v=$(node -p process.version 2>/dev/null) || skip "node is not on this runner"
-arch=$(uname -m)
 # A new name when what an archive holds changes, so none written before is read.
-modules="node_modules-$v-$arch"
-key=$(git ls-tree HEAD -- "$lock" package.json .npmrc pnpm-workspace.yaml 2>/dev/null | sha256sum | cut -c1-32)
-next="next-$v-$arch"
+next="next-$v-$(uname -m)"
+key=$(printf '%s' "${GITHUB_SHA:-$(git rev-parse HEAD)}" | cut -c1-40)
 # Each package that depends on next, three levels down at most, as
 # <label>=<dir>/.next/cache; the label is the directory, which bin/cache
-# requires to be one plain name.
+# requires to be one plain name. A build's own output is not a package: Next
+# writes .next/package.json.
 apps=()
 while IFS= read -r pj; do
   jq -e '(.dependencies // {}) + (.devDependencies // {}) | has("next")' "$pj" >/dev/null 2>&1 || continue
   d=$(dirname "$pj"); d=${d#./}
   if [ "$d" = . ]; then apps+=("n_root=.next/cache"); else apps+=("n_$(printf '%s' "$d" | tr -c 'A-Za-z0-9._-' '_')=$d/.next/cache"); fi
-done < <(find . -maxdepth 3 -name package.json -not -path '*/node_modules/*' -not -path './.*/*' 2>/dev/null | awk '{print (($0 == "./package.json") ? 0 : 1) "\t" $0}' | sort | cut -f2)
-sha=${GITHUB_SHA:-$(git rev-parse HEAD)}
-# Each package's node_modules, three levels down at most, labelled by directory
-# as the Next caches are.
-mods=()
-while IFS= read -r pj; do
-  d=$(dirname "$pj"); d=${d#./}
-  if [ "$d" = . ]; then mods+=("m_root=node_modules"); else mods+=("m_$(printf '%s' "$d" | tr -c 'A-Za-z0-9._-' '_')=$d/node_modules"); fi
-done < <(find . -maxdepth 3 -name package.json -not -path '*/node_modules/*' -not -path './.*/*' 2>/dev/null | awk '{print (($0 == "./package.json") ? 0 : 1) "\t" $0}' | sort | cut -f2)
-
-# one <name> <key> <label>=<dir>: a restore whose hit= is read back rather than
-# left in GITHUB_OUTPUT, where two restores would answer as one.
-one() {
-  local out; out=$(mktemp)
-  GITHUB_OUTPUT=$out "$CACHE" restore "$@" >&2
-  sed -n 's/^hit=//p' "$out" | tail -1
-  rm -f "$out"
-}
+done < <(find . -maxdepth 3 -name package.json -not -path '*/node_modules/*' -not -path './.*/*' -not -path '*/.next/*' 2>/dev/null | awk '{print (($0 == "./package.json") ? 0 : 1) "\t" $0}' | sort | cut -f2)
+[ ${#apps[@]} -gt 0 ] || skip "nothing here depends on next"
 
 if [ "$cmd" = restore ]; then
-  m=$(one "$modules" "$key" "${mods[@]}")
-  printf 'modules=%s\n' "${m:-miss}" > "$state"
-  [ ${#apps[@]} = 0 ] || one "$next" "$(printf '%s' "$sha" | cut -c1-40)" "${apps[@]}" >/dev/null
+  GITHUB_OUTPUT=/dev/null "$CACHE" restore "$next" "$key" "${apps[@]}"
   exit 0
 fi
 
-[ -f "$state" ] || skip "no restore ran in this job"
-if [ "$(sed -n 's/^modules=//p' "$state")" != exact ] && [ -d node_modules ]; then
-  "$CACHE" save "$modules" "$key" "${mods[@]}"
-fi
 have=()
 for a in "${apps[@]}"; do
   d=${a#*=}
@@ -95,4 +58,4 @@ for a in "${apps[@]}"; do
   rm -rf "$d/fetch-cache"
   have+=("$a")
 done
-[ ${#have[@]} = 0 ] || "$CACHE" save "$next" "$(printf '%s' "$sha" | cut -c1-40)" "${have[@]}"
+[ ${#have[@]} = 0 ] || "$CACHE" save "$next" "$key" "${have[@]}"
