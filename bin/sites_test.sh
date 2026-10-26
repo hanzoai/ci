@@ -36,4 +36,12 @@ run push v1 tag pairs; [ $? = 1 ] && grep -q 'BOTH site: and sites:' "$T/out" &&
 printf 'site:\n  slug: a\n' > "$T/hanzo.yml"
 run push v1 tag pairs; [ $? = 1 ] && grep -q 'both slug: .* and dir:' "$T/out" && ok "a site without its dir is refused" || no "a site without its dir is refused"
 
+mkdir -p "$T/e/a" && printf 'x' > "$T/e/a/1" && printf 'y' > "$T/e/2"
+one=$(bash "$BIN" digest "$T/e"); cp -a "$T/e" "$T/f"
+[ "$(bash "$BIN" digest "$T/f")" = "$one" ] && ok "an export's digest is its paths and bytes, wherever it sits" || no "an export's digest is its paths and bytes, wherever it sits"
+printf 'z' > "$T/f/2"
+[ "$(bash "$BIN" digest "$T/f")" != "$one" ] && ok "a byte that moved moves the digest" || no "a byte that moved moves the digest"
+mv "$T/f/2" "$T/f/3"; printf 'y' > "$T/f/3"
+[ "$(bash "$BIN" digest "$T/f")" != "$one" ] && ok "a file that moved moves the digest" || no "a file that moved moves the digest"
+
 exit $fail

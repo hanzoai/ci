@@ -290,6 +290,9 @@ jobs:
       matrix:
         runner: [linux-amd64, linux-arm64]
     runs-on: ${{ (startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) && format('ephemeral-{0}', matrix.runner) || matrix.runner }}
+    # The amd64 leg carries the site export; its digest is the publish job's to check.
+    outputs:
+      export: ${{ steps.carry.outputs.export }}
     env:
       # 'true' only when this run's code came from this repository. Every step
       # that reads a credential requires it, so an empty or unevaluated value
@@ -1879,9 +1882,16 @@ jobs:
           # run from one stable name for the same tree, which the go command reads
           # from PWD, so every job and both planes ask for the same keys.
           if [ -n "${GOMOD:-}" ]; then
+            # A runner is one job's pod, so nothing else writes this link; on a
+            # host that runs jobs side by side, a link another job moved between
+            # the write and the cd is caught by its target and the gates run from
+            # the checkout itself.
             src="/var/tmp/src/${GITHUB_REPOSITORY:-local/local}"
-            if mkdir -p "$(dirname "$src")" && ln -sfn "$PWD" "$src" && cd "$src"; then
+            here=$(pwd -P)
+            if mkdir -p "$(dirname "$src")" && ln -sfn "$here" "$src" && cd "$src" && [ "$(pwd -P)" = "$here" ]; then
               echo "gates run from $src (this checkout, one path on every runner)"
+            else
+              cd "$here"
             fi
           fi
           NOTHING='\[no test files\]|\[no tests to run\]|no tests ran|collected 0 items|No tests found|no test specified|running 0 tests|Tests:[[:space:]]+0 total|(^|[^0-9])0 (passing|passed)'
@@ -2014,6 +2024,7 @@ jobs:
           done
 
       - name: Carry the site export to the publish job
+        id: carry
         # When hanzo.yml names no site build, the gate is what built the export,
         # so the bytes the tests read are the bytes that ship: the publish job
         # restores this, keyed by the commit, instead of building it a second
@@ -2021,17 +2032,25 @@ jobs:
         # Only the run that will publish carries it (bin/sites), only from the
         # call that gates on everything, and one architecture's leg.
         if: success() && env.HANZO_CI_ROLE == 'test' && env.HANZO_CI_TRUSTED == 'true' && inputs.gates == '' && inputs.tests != 'false' && matrix.runner != 'linux-arm64'
+        # The digest of each export leaves as this job's output, which the store
+        # cannot touch: the publish job ships a carried export only if it hashes
+        # to what this gate built. A key already in the store is replaced, never
+        # trusted — any org identity may write the store.
         run: |
           set -euo pipefail
           [ -z "$("$CI_HOME/bin/sites" build)" ] || exit 0
           "$CI_HOME/bin/sites" pairs > "$RUNNER_TEMP/carry-pairs"
+          export=
           while IFS= read -r pair; do
             [ -n "$pair" ] || continue
             slug=${pair%%=*}; dir=${pair#*=}
             [ -d "$dir" ] || {
               echo "::error::hanzo.yml names no site build, so the gate must leave the export at $dir for $slug, and it did not"; exit 1; }
+            export="$export $slug=$("$CI_HOME/bin/sites" digest "$dir")"
+            "$CI_HOME/bin/cache" drop "site-$slug" "$GITHUB_SHA"
             "$CI_HOME/bin/cache" save "site-$slug" "$GITHUB_SHA" export="$dir"
           done < "$RUNNER_TEMP/carry-pairs"
+          echo "export=${export# }" >> "$GITHUB_OUTPUT"
 
       - name: Save the JS caches (this org's store)
         # After the gate, red or green, like the Go cache, and only from a trusted
@@ -3394,6 +3413,7 @@ jobs:
         if: env.HANZO_CI_ROLE == 'publish' && (github.event_name != 'pull_request')
         env:
           API: ${{ vars.API_ENDPOINT || 'https://api.hanzo.ai' }}
+          HANZO_CI_EXPORT: ${{ needs.test-amd64.outputs.export || needs.test.outputs.export }}
         run: |
           set -euo pipefail
           REF="${{ github.ref_name }}"
@@ -3415,13 +3435,20 @@ jobs:
           else
             # No build named: the gate built each export and the test job
             # carried it here, keyed by this commit.
+            # Shipped only when it hashes to what the gate built, the digest the
+            # test job handed this one as a job output.
             while IFS= read -r pair; do
               slug=${pair%%=*}; dir=${pair#*=}
+              want=$(printf '%s\n' $HANZO_CI_EXPORT | sed -n "s/^$slug=//p")
+              [ -n "$want" ] || {
+                echo "::error::the test job handed no digest for $slug's export, and hanzo.yml names no build to make it here"; exit 1; }
+              rm -rf "$dir"
               out=$(mktemp)
               GITHUB_OUTPUT=$out "$CI_HOME/bin/cache" restore "site-$slug" "${{ github.sha }}" export="$dir"
-              hit=$(sed -n 's/^hit=//p' "$out" | tail -1)
-              [ "$hit" = exact ] || [ -d "$dir" ] || {
+              [ "$(sed -n 's/^hit=//p' "$out" | tail -1)" = exact ] && [ -d "$dir" ] || {
                 echo "::error::the gate's export of $slug ($dir) was not carried from the test job, and hanzo.yml names no build to make it here"; exit 1; }
+              [ "$("$CI_HOME/bin/sites" digest "$dir")" = "$want" ] || {
+                echo "::error::the carried export of $slug is not the one the gate built (its digest differs), so it is not published"; exit 1; }
             done <<<"$PAIRS"
           fi
           # Fail closed on the ONE thing that can be missing, and say which one.
@@ -3467,7 +3494,11 @@ jobs:
   # leg for the reason `test` gives: an input cannot choose a matrix here.
   test-amd64:
     if: join(fromJson(inputs.test-runners), ',') == 'linux-amd64'
-    runs-on: ${{ (startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) && 'ephemeral-linux-amd64' || (inputs.class != '' && format('{0}-linux-amd64', inputs.class) || 'linux-amd64') }}
+    # A class the platform does not have runs on an ordinary runner rather than
+    # queueing for one that never comes.
+    runs-on: ${{ (startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) && 'ephemeral-linux-amd64' || ((inputs.class == 'heavy' || inputs.class == 'xl') && format('{0}-linux-amd64', inputs.class) || 'linux-amd64') }}
+    outputs:
+      export: ${{ steps.carry.outputs.export }}
     env:
       COREPACK_NPM_REGISTRY: https://pkg.hanzo.ai
       HANZO_CI_ROLE: test

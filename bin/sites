@@ -2,8 +2,9 @@
 # sites — the static exports this run publishes, read from hanzo.yml once for
 # both jobs that need them.
 #
-#   sites pairs   # slug=dir per line when this ref publishes, nothing when it does not
-#   sites build   # the command that builds them (site.build, or site-build for sites:)
+#   sites pairs        # slug=dir per line when this ref publishes, nothing when it does not
+#   sites build        # the command that builds them (site.build, or site-build for sites:)
+#   sites digest <dir> # the SHA-256 of an export: every file's path and bytes
 #
 # `site:` is one export, `sites:` is several: a white-labelled product builds once
 # and ships an export per brand, and a site keys on its HOST, so a brand per host
@@ -16,13 +17,25 @@
 # The publish job publishes these pairs. The test job reads them too: when
 # hanzo.yml names no build, the gate is what built each export, and the test job
 # carries it to the publish job (bin/cache, keyed by the commit) instead of the
-# publish job building it a second time.
+# publish job building it a second time. The digest of what the gate built
+# travels as a job output, which the store cannot touch, and the publish job
+# ships the carried export only when it hashes to it: any org identity may write
+# the store, so the store's bytes are not trusted on their own.
 #
 # Exit 1, with an ::error::, when hanzo.yml declares both spellings or a pair
 # lacks its slug or its dir.
 set -euo pipefail
 cmd=${1:-}
-case "$cmd" in pairs|build) ;; *) echo "usage: sites pairs|build" >&2; exit 2 ;; esac
+case "$cmd" in pairs|build|digest) ;; *) echo "usage: sites pairs|build|digest <dir>" >&2; exit 2 ;; esac
+if [ "$cmd" = digest ]; then
+  d=${2:?usage: sites digest <dir>}
+  [ -d "$d" ] || { echo "::error::no export at $d" >&2; exit 1; }
+  (cd "$d" && find . \( -type f -o -type l \) -print0 | LC_ALL=C sort -z \
+    | while IFS= read -r -d '' f; do
+        if [ -L "$f" ]; then printf 'l %s %s\n' "$f" "$(readlink "$f")"; else printf 'f %s %s\n' "$f" "$(sha256sum < "$f" | cut -d' ' -f1)"; fi
+      done) | sha256sum | cut -d' ' -f1
+  exit 0
+fi
 f=${HANZO_YML:-hanzo.yml}
 [ -f "$f" ] || exit 0
 
