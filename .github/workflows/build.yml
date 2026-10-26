@@ -3485,15 +3485,16 @@ jobs:
         # reports success when it verified nothing is worse than one that never
         # verified, because it is indistinguishable from a working one until a
         # site quietly stops updating.
-        # WHICH JOB PUBLISHES. A run whose hanzo.yml ships nothing but sites
-        # (bin/sites alone) and gates on one architecture publishes from its
-        # gating job, after the gate and the review verdict: the export the gate
-        # built, or site.build run beside it, ships from the runner that tested
-        # it, with no second runner, install or build (hanzoai/community: the
-        # publish job queued 19 to 378 s). Any other run publishes from the
-        # publish job, after its images and binaries, building the site there
-        # with site.build — a matrix leg cannot wait for its sibling. The two
-        # jobs read the same predicate, so exactly one of them publishes.
+        # WHICH JOB PUBLISHES. A run that gates on one architecture publishes
+        # its sites from the gating job, after the gate and the review verdict:
+        # the export the gate built, or site.build run beside it, ships from the
+        # runner that tested it, with no second runner, install or build
+        # (hanzoai/community: the publish job queued 19 to 378 s). Its images,
+        # binaries and clients still ship from the publish job, which does not
+        # start when sites are all the run ships (bin/sites alone). A run gating
+        # on two architectures publishes its sites from the publish job, built
+        # there with site.build: a matrix leg cannot wait for its sibling. The
+        # two jobs read the same predicate, so exactly one of them publishes.
         #
         # THE DEPLOY TOKEN is read here, after the build and before the upload,
         # through bin/kms with the org identity the KMS step minted — the one
@@ -3515,11 +3516,11 @@ jobs:
           set -euo pipefail
           REF="${{ github.ref_name }}"
           SITES="$CI_HOME/bin/sites"
-          # Which job ships the sites: the gating job when they are all this run
-          # ships and it gated on linux-amd64 alone, else the publish job.
-          if [ "$HANZO_CI_ROLE" = test ]; then
-            "$SITES" alone || { echo "::notice::this run ships more than its sites, so the publish job ships them after the rest"; exit 0; }
-          elif [ "$(jq -c . <<<"${HANZO_CI_GATED:-[]}")" = '["linux-amd64"]' ] && "$SITES" alone; then
+          # Which job ships the sites: the gating job when it gated on
+          # linux-amd64 alone, else the publish job. `shipped` tells the publish
+          # job it has nothing left: sites are all this run ships.
+          alone=false; "$SITES" alone && alone=true
+          if [ "$HANZO_CI_ROLE" = publish ] && [ "$(jq -c . <<<"${HANZO_CI_GATED:-[]}")" = '["linux-amd64"]' ]; then
             echo "::notice::the gating job shipped this run's sites"; exit 0
           fi
           # Which exports this ref publishes, and the build that makes them: one
@@ -3530,7 +3531,7 @@ jobs:
           BUILD=$("$SITES" build)
           if [ -z "$PAIRS" ]; then
             echo "::notice::no site:/sites: in hanzo.yml publishes from $REF — nothing to publish"
-            [ "$HANZO_CI_ROLE" = publish ] || echo "shipped=true" >> "$GITHUB_OUTPUT"
+            [ "$HANZO_CI_ROLE" = publish ] || [ "$alone" = false ] || echo "shipped=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ -n "$BUILD" ]; then
@@ -3538,7 +3539,7 @@ jobs:
             sh -c "$BUILD"
             echo "::endgroup::"
           elif [ "$HANZO_CI_ROLE" = publish ]; then
-            echo "::error::hanzo.yml names no site build. A run that ships more than its sites, or gates on two architectures, builds its site in the publish job: name site.build (site-build for sites:)."; exit 1
+            echo "::error::hanzo.yml names no site build. A run that gates on two architectures builds its site in the publish job: name site.build (site-build for sites:)."; exit 1
           elif [ "$TESTS" = false ]; then
             echo "::error::hanzo.yml names no site build and this run skipped the gate (tests: 'false'), so nothing built the export"; exit 1
           fi
@@ -3593,7 +3594,7 @@ jobs:
               released="$released $slug:$now:$kept:${url:--}"
             fi
           done < "$RUNNER_TEMP/site-pairs"
-          [ "$HANZO_CI_ROLE" = publish ] || echo "shipped=true" >> "$GITHUB_OUTPUT"
+          [ "$HANZO_CI_ROLE" = publish ] || [ "$alone" = false ] || echo "shipped=true" >> "$GITHUB_OUTPUT"
           [ -z "$released" ] || echo "released=${released# }" >> "$GITHUB_OUTPUT"
 
       - name: Save the JS caches (this org's store)

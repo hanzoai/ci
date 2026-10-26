@@ -15,10 +15,9 @@
 # list's gate is the first entry's, so every brand of one product goes live
 # together. A pull request publishes nothing.
 #
-# A run that is `alone` ships from its gating job: no images, binaries, client,
-# pypi or bucket, so the sites are everything it ships, and the runner that
-# tested an export publishes it. Otherwise the publish job ships the sites after
-# the rest.
+# A run that is `alone` ships nothing but its sites: no images, binaries,
+# client, pypi or bucket, so once its gating job has published them the publish
+# job has nothing left to do.
 #
 # Exit 1, with an ::error::, when hanzo.yml declares both spellings or a pair
 # lacks its slug or its dir.
