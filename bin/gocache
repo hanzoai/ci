@@ -52,25 +52,40 @@ case "$v" in
 esac
 
 rm -rf "$state"; mkdir -p "$state"
-# The job's own toolchain, never another: the module says go 1.24, and nothing
-# here may reach for a download the gate did not ask for.
-if ! (cd "$(dirname "$0")/../gocache" && GOTOOLCHAIN=local GOWORK=off GOFLAGS= CGO_ENABLED=0 \
-      GOCACHE="$state/self" go build -trimpath -o "$state/gocache" .) > "$state/log" 2>&1; then
-  sed 's/^/  /' "$state/log"
-  skip "the cache program did not build, so this job builds cold"
+arch=$(go env GOARCH)
+# The program itself comes from the store, keyed by its source and the
+# toolchain: building it from nothing compiles net/http and crypto/tls, 36 s of
+# a warm job (hanzoai/orm). The job's own toolchain builds it on a miss, never
+# another: the module says go 1.24, and nothing here may reach for a download
+# the gate did not ask for.
+src="$(dirname "$0")/../gocache"
+self=$(cat "$src"/go.mod "$src"/*.go | sha256sum | cut -c1-32)
+GITHUB_OUTPUT="$state/hit" "$(dirname "$0")/cache" restore "gocache-$v-$arch" "$self" bin="$state/bin" > /dev/null
+if [ ! -x "$state/bin/gocache" ]; then
+  mkdir -p "$state/bin"
+  if ! (cd "$src" && GOTOOLCHAIN=local GOWORK=off GOFLAGS= CGO_ENABLED=0 \
+        GOCACHE="$state/self" go build -trimpath -o "$state/bin/gocache" .) > "$state/log" 2>&1; then
+    sed 's/^/  /' "$state/log"
+    skip "the cache program did not build, so this job builds cold"
+  fi
+  rm -rf "$state/self"
+  "$(dirname "$0")/cache" save "gocache-$v-$arch" "$self" bin="$state/bin" > /dev/null
 fi
-rm -rf "$state/self"
+ln -s bin/gocache "$state/gocache"
 
 write=
 "$(dirname "$0")/cache" trusted && write=-write
 mods=$(go env GOMODCACHE)
-prefix="${GITHUB_REPOSITORY:-local/local}/gocache/$v-$(go env GOOS)-$(go env GOARCH)"
+prefix="${GITHUB_REPOSITORY:-local/local}/gocache/$v-$(go env GOOS)-$arch"
+# Which gate this job runs (build.yml: the share and the scope it was handed), so
+# its last run's entries are fetched ahead of the build.
+scope=$(printf '%s' "${GOCACHE_SCOPE:-}" | sha256sum | cut -c1-16)
 # Its own session, so it outlives this step and every step after it; the runner
 # ends it with the job.
 launch=(nohup)
 command -v setsid >/dev/null 2>&1 && launch=(setsid nohup)
 "${launch[@]}" "$state/gocache" serve -dir "$state/dir" -sock "$state/sock" -ready "$state/ready" \
-  -prefix "$prefix" -mods "$mods" $write >> "$state/log" 2>&1 < /dev/null &
+  -prefix "$prefix" -scope "$scope" -mods "$mods" $write >> "$state/log" 2>&1 < /dev/null &
 
 # serve writes ready once the store's index is read (it gives up on that after two
 # minutes and serves what it has), so the first go command already sees it.

@@ -320,7 +320,7 @@ func TestTheGoCommandBuildsWarmFromTheStore(t *testing.T) {
 		dir := filepath.Join(tmp, name)
 		sock := filepath.Join(tmp, name+".sock")
 		ready := filepath.Join(tmp, name+".ready")
-		args := []string{"serve", "-dir", dir, "-sock", sock, "-ready", ready, "-prefix", "o/r/gocache/go-test"}
+		args := []string{"serve", "-dir", dir, "-sock", sock, "-ready", ready, "-prefix", "o/r/gocache/go-test", "-scope", "gate"}
 		if write {
 			args = append(args, "-write")
 		}
@@ -360,6 +360,9 @@ func TestTheGoCommandBuildsWarmFromTheStore(t *testing.T) {
 	warm, s2 := run("warm", false)
 	if warm != 0 {
 		t.Fatalf("the warm build compiled %d packages; want 0 (cold compiled %d)\ncold: %s\nwarm: %s", warm, cold, s1, s2)
+	}
+	if strings.Contains(s2, ", 0 ahead of the build") {
+		t.Fatalf("the warm job fetched nothing ahead of the build, though its scope's last run left a list: %s", s2)
 	}
 	t.Logf("cold compiled %d packages, warm 0\ncold: %s\nwarm: %s", cold, s1, s2)
 }

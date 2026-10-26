@@ -145,6 +145,17 @@ on:
         required: false
         default: ''
         type: string
+      class:
+        description: >-
+          The runner class the gate runs on when it gates on linux-amd64 alone:
+          '' (default) shares a node, heavy asks six cores on a node no other
+          heavy job holds, xl takes a 32-core node of its own. An ordinary runner
+          asks 1.5 cores, so the scheduler places a dozen on one 8-core node:
+          measured on hanzoai/ui, a sixth of its suite ran 453 s that the whole
+          suite ran in 657 s alone. A compile- or test-bound gate asks heavy.
+        required: false
+        default: ''
+        type: string
       scope:
         description: >-
           What this call's gates cover, handed to every `test:` entry as
@@ -1300,6 +1311,8 @@ jobs:
         # says which on the log.
         id: gocache
         if: steps.gomod.outputs.file != '' && env.HANZO_CI_ROLE == 'test' && inputs.go-cache != 'false'
+        env:
+          GOCACHE_SCOPE: ${{ inputs.gates }}|${{ inputs.scope }}
         run: |
           "$CI_HOME/bin/gocache" restore "$(dirname '${{ steps.gomod.outputs.file }}')"
 
@@ -3447,7 +3460,7 @@ jobs:
   # leg for the reason `test` gives: an input cannot choose a matrix here.
   test-amd64:
     if: join(fromJson(inputs.test-runners), ',') == 'linux-amd64'
-    runs-on: ${{ (startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) && 'ephemeral-linux-amd64' || 'linux-amd64' }}
+    runs-on: ${{ (startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) && 'ephemeral-linux-amd64' || (inputs.class != '' && format('{0}-linux-amd64', inputs.class) || 'linux-amd64') }}
     env:
       COREPACK_NPM_REGISTRY: https://pkg.hanzo.ai
       HANZO_CI_ROLE: test

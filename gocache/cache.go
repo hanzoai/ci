@@ -26,6 +26,7 @@ type cache struct {
 	mods   string // GOMODCACHE, whose cache/download a save carries
 	st     *store // nil: this job reads and writes its own disk only
 	prefix string
+	scope  string // which gate this job runs; names the list of what its last run used
 	write  bool
 
 	mu      sync.Mutex
@@ -39,6 +40,53 @@ type cache struct {
 	hits, misses, fetched, puts atomic.Int64
 	fetchedBytes                atomic.Int64
 	fetchErrs                   atomic.Int64
+	prefetched                  atomic.Int64
+}
+
+// usedKey is where a scope's last saving run recorded the entries it used.
+func (c *cache) usedKey() string { return c.prefix + "/u/" + c.scope + ".gz" }
+
+// prefetch reads, in the background, every entry the last run of this scope
+// used. A gate asks for its compiled packages a few at a time, each a round
+// trip, so on its own it waits on latency; fetched ahead on many connections,
+// most are on disk before it asks, and a get for one still in flight waits for
+// that fetch rather than starting another.
+func (c *cache) prefetch(ctx context.Context, workers int) {
+	if c.st == nil || c.scope == "" {
+		return
+	}
+	b, err := c.st.read(ctx, c.usedKey(), 0, -1)
+	if err != nil {
+		return
+	}
+	es := map[string]*entry{}
+	if decodeIndex(b, es) != nil {
+		return
+	}
+	work := make(chan *entry)
+	for i := 0; i < workers; i++ {
+		go func() {
+			for e := range work {
+				if _, err := os.Stat(c.outPath(e.id)); err == nil {
+					continue
+				}
+				if c.fetch(ctx, e) == nil {
+					c.prefetched.Add(1)
+				}
+			}
+		}()
+	}
+	go func() {
+		defer close(work)
+		for k := range es {
+			c.mu.Lock()
+			e := c.remote[k]
+			c.mu.Unlock()
+			if e != nil {
+				work <- e
+			}
+		}
+	}()
 }
 
 type call struct {
@@ -414,6 +462,19 @@ func (c *cache) save(ctx context.Context) (string, error) {
 	if err := c.st.write(ctx, idx, encodeIndex(merged)); err != nil {
 		return "", fmt.Errorf("index: %w", err)
 	}
+	if c.scope != "" {
+		c.mu.Lock()
+		mine := map[string]*entry{}
+		for k := range c.used {
+			if e := merged[k]; e != nil {
+				mine[k] = e
+			}
+		}
+		c.mu.Unlock()
+		if err := c.st.write(ctx, c.usedKey(), encodeIndex(mine)); err != nil {
+			log.Printf("used list: %v", err)
+		}
+	}
 	dropped := 0
 	for _, o := range objs {
 		if loaded[o.Key] && o.Key != idx && c.st.remove(ctx, o.Key) == nil {
@@ -465,6 +526,6 @@ func (c *cache) sweep(ctx context.Context, merged map[string]*entry, now time.Ti
 }
 
 func (c *cache) summary() string {
-	return fmt.Sprintf("%d hits, %d misses, %d fetched (%d MiB), %d fetch errors, %d puts",
-		c.hits.Load(), c.misses.Load(), c.fetched.Load(), c.fetchedBytes.Load()>>20, c.fetchErrs.Load(), c.puts.Load())
+	return fmt.Sprintf("%d hits, %d misses, %d fetched (%d MiB, %d ahead of the build), %d fetch errors, %d puts",
+		c.hits.Load(), c.misses.Load(), c.fetched.Load(), c.fetchedBytes.Load()>>20, c.prefetched.Load(), c.fetchErrs.Load(), c.puts.Load())
 }

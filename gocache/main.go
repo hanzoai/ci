@@ -2,7 +2,7 @@
 // runners through this org's object store, fetching each entry when the build
 // asks for it instead of restoring an archive before the build may start.
 //
-//	gocache serve -dir D -sock S -ready F [-prefix P -mods M -write]
+//	gocache serve -dir D -sock S -ready F [-prefix P -scope G -mods M -write]
 //	gocache connect S D       the GOCACHEPROG command: bridges one go command to serve
 //	gocache flush ADDR        saves what this job made (serve -write), then stops serve
 //
@@ -60,7 +60,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: gocache serve -dir D -sock S -ready F [-prefix P -mods M -write] | connect S D | flush ADDR")
+	fmt.Fprintln(os.Stderr, "usage: gocache serve -dir D -sock S -ready F [-prefix P -scope G -mods M -write] | connect S D | flush ADDR")
 	os.Exit(2)
 }
 
@@ -71,6 +71,7 @@ func serve(args []string) {
 	ready := fs.String("ready", "", "file written with the proxy address once the index is loaded")
 	prefix := fs.String("prefix", "", "<owner>/<repo>/gocache/<go version>-<os>-<arch>")
 	mods := fs.String("mods", "", "GOMODCACHE, whose downloads a save carries")
+	scope := fs.String("scope", "", "the gate this job runs: its last run's used entries are fetched ahead")
 	write := fs.Bool("write", false, "save what this job made (a trusted ref only)")
 	fs.Parse(args)
 	if *dir == "" || *sock == "" || *ready == "" {
@@ -87,6 +88,7 @@ func serve(args []string) {
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
+	c.scope = *scope
 	t0 := time.Now()
 	ctx := context.Background()
 	lctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -98,6 +100,7 @@ func serve(args []string) {
 	n, frags := len(c.remote), len(c.frags)
 	c.mu.Unlock()
 	log.Printf("index: %d entries from %d index file(s) in %s", n, frags, time.Since(t0).Round(time.Millisecond))
+	c.prefetch(ctx, 48)
 
 	os.Remove(*sock)
 	ul, err := net.Listen("unix", *sock)
