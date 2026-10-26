@@ -64,4 +64,12 @@ grep -q "^save pnpm-verified-11.24.0 [0-9a-f]\{32\} v=$T/jscache-verified$" "$CA
   && ok "the record the install wrote is saved, and only it" || no "the record the install wrote is saved, and only it"
 : > "$CALLS"; out=$(PNPM_V=10.34.5 bash "$T/bin/jscache" restore 2>&1)
 [ ! -s "$CALLS" ] && ok "pnpm 10 has no record to carry" || no "pnpm 10 has no record to carry"
+printf '#!/bin/sh\n[ "$1 $2 $3" = "config get cache" ] && echo "%s/npm"\n' "$T" > "$T/stub/npm"; chmod +x "$T/stub/npm"
+rm -f pnpm-lock.yaml; printf '{"lockfileVersion":3}' > package-lock.json; git add -A; git -c user.email=t@t -c user.name=t commit -qm npm
+: > "$CALLS"; bash "$T/bin/jscache" restore > /dev/null 2>&1
+grep -q "^restore npm-cache [0-9a-f]\{32\} c=$T/npm/_cacache$" "$CALLS" && [ "$(wc -l < "$CALLS")" = 1 ] \
+  && ok "a package-lock.json restores npm's download cache by lockfile" || no "a package-lock.json restores npm's download cache by lockfile"
+mkdir -p "$T/npm/_cacache/content-v2"
+: > "$CALLS"; bash "$T/bin/jscache" save > /dev/null 2>&1
+grep -q "^save npm-cache [0-9a-f]\{32\} c=$T/npm/_cacache$" "$CALLS" && ok "npm's cache is saved after the install filled it" || no "npm's cache is saved after the install filled it"
 exit $fail

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# jscache — Next's build cache, and pnpm's record of a verified lockfile, carried
-# between runners through the org's store (bin/cache).
+# jscache — Next's build cache, pnpm's record of a verified lockfile and npm's
+# download cache, carried between runners through the org's store (bin/cache).
 #
 #   jscache restore   # right before the gate
 #   jscache save      # after the gate, and after a site build: writes on a trusted ref
@@ -19,6 +19,12 @@
 # a --frozen-lockfile install that finds the record skips the check. That one
 # file is carried, keyed by the lockfile and the workspace file, and saved after
 # the gate's own frozen install wrote it.
+#
+# npm ci fetches every tarball its cache does not hold, and pkg.hanzo.ai served
+# hanzoai/computer's 1,011 in 3 minutes (run 40308075765). npm's cache is
+# content-addressed by each package's integrity, so it is carried for a root
+# package-lock.json, keyed by it; a lockfile that moved restores the newest and
+# fetches only what changed.
 #
 # node_modules is not carried. On a runner, restoring it cost more than the
 # install it replaced (hanzoai/community run 40297610093: 54 s to unpack 154 MiB,
@@ -58,7 +64,13 @@ if [ -f pnpm-lock.yaml ] && pv=$(pnpm --version 2>/dev/null) && [ "${pv%%.*}" -g
   rname="pnpm-verified-$pv"
   rkey=$(git ls-tree HEAD -- pnpm-lock.yaml pnpm-workspace.yaml 2>/dev/null | sha256sum | cut -c1-32)
 fi
-[ ${#apps[@]} -gt 0 ] || [ -n "$record" ] || skip "nothing here depends on next or installs with pnpm 11"
+# npm's download cache, for a root package-lock.json.
+npmc= nkey=
+if [ -f package-lock.json ] && npmc=$(npm config get cache 2>/dev/null) && [ -n "$npmc" ]; then
+  npmc="$npmc/_cacache"
+  nkey=$(git ls-tree HEAD -- package-lock.json 2>/dev/null | sha256sum | cut -c1-32)
+fi
+[ ${#apps[@]} -gt 0 ] || [ -n "$record" ] || [ -n "$nkey" ] || skip "nothing here depends on next, installs with pnpm 11 or has a package-lock.json"
 
 if [ "$cmd" = restore ]; then
   [ ${#apps[@]} = 0 ] || GITHUB_OUTPUT=/dev/null "$CACHE" restore "$next" "$key" "${apps[@]}"
@@ -67,8 +79,11 @@ if [ "$cmd" = restore ]; then
     GITHUB_OUTPUT=/dev/null "$CACHE" restore "$rname" "$rkey" "v=$rdir"
     [ ! -f "$rdir/lockfile-verified.jsonl" ] || { mkdir -p "$(dirname "$record")" && cp "$rdir/lockfile-verified.jsonl" "$record"; }
   fi
+  [ -z "$nkey" ] || GITHUB_OUTPUT=/dev/null "$CACHE" restore npm-cache "$nkey" "c=$npmc"
   exit 0
 fi
+
+[ -z "$nkey" ] || [ ! -d "$npmc" ] || "$CACHE" save npm-cache "$nkey" "c=$npmc"
 
 if [ -n "$record" ] && [ -f "$record" ]; then
   rm -rf "$rdir"; mkdir -p "$rdir" && cp "$record" "$rdir/" && "$CACHE" save "$rname" "$rkey" "v=$rdir"
