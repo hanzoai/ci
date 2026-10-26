@@ -714,7 +714,7 @@ jobs:
           s=; command -v setsid >/dev/null 2>&1 && s=setsid
           GITHUB_STEP_SUMMARY="$r/summary" $s nohup bash -c 'bash "$0" "$1" "$2"; echo $? > "$3/status"' \
             "$gate" "$base" "$REVIEW_HEAD" "$r" > "$r/log" 2>&1 < /dev/null &
-          date +%s > "$r/started"
+          echo "$!" > "$r/started"
           echo "review: reading ${base:-the last commit}..$REVIEW_HEAD beside the gate"
 
       - name: Read hanzo.yml (what this caller ships)
@@ -2152,8 +2152,10 @@ jobs:
           set -uo pipefail
           r="$RUNNER_TEMP/review"
           [ -f "$r/started" ] || { echo "review: not started on this pin, so there is no verdict to wait for"; exit 0; }
-          while [ ! -f "$r/status" ]; do sleep 2; done
+          # A reviewer that is gone without an answer was stopped, not refused.
+          while [ ! -f "$r/status" ] && kill -0 "$(cat "$r/started")" 2>/dev/null; do sleep 2; done
           echo "::group::review"; cat "$r/log"; echo "::endgroup::"
+          [ -f "$r/status" ] || { echo "::warning::review: the reviewer stopped without an answer, so it withholds no verdict"; exit 0; }
           [ ! -f "$r/summary" ] || cat "$r/summary" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
           exit "$(cat "$r/status")"
 
