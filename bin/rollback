@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# rollback — which release a site serves, and the flip back to the one before.
+#
+#   rollback mark <slug>                 # "<slug> <active> <previous> <url>": what serves now
+#   rollback undo <slug> <active> <prev> # serve <prev> again, if <active> still serves
+#
+# The Sites plane keeps a site's releases, newest first, and serves exactly one
+# (GET /v1/project/<slug>/releases); pointing the site at an older one is the
+# rollback (POST .../releases/<id>/activate), with nothing rebuilt or copied.
+# The publish step marks each site right after it goes live; the verify job
+# undoes the mark when a suite fails. Undo flips only while the release this run
+# made live is still the one serving, so a newer publish is never rolled back by
+# an older run's verdict.
+#
+# ENV: HANZO_API (https://api.hanzo.ai), HANZO_DEPLOY_TOKEN (the org's sk- key).
+set -uo pipefail
+cmd=${1:-}; slug=${2:-}
+case "$cmd" in mark) [ $# = 2 ] ;; undo) [ $# = 4 ] ;; *) false ;; esac \
+  && [[ $slug =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "usage: rollback mark <slug> | rollback undo <slug> <active> <previous>" >&2; exit 2; }
+api=${HANZO_API:-https://api.hanzo.ai}
+[ -n "${HANZO_DEPLOY_TOKEN:-}" ] || { echo "::error::rollback: no HANZO_DEPLOY_TOKEN" >&2; exit 1; }
+
+# releases -> the site's releases as JSON, newest first, or non-zero.
+releases() {
+  local out code
+  out=$(mktemp)
+  code=$(curl -sS -m 30 -o "$out" -w '%{http_code}' "$api/v1/project/$slug/releases" \
+    -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN") || code=000
+  [ "$code" = 200 ] && jq -e 'type == "array"' "$out" >/dev/null 2>&1 && cat "$out"
+  local ok=$?; [ $ok = 0 ] || echo "::error::rollback: the releases of $slug answered HTTP $code: $(head -c 200 "$out")" >&2
+  rm -f "$out"; return $ok
+}
+
+list=$(releases) || exit 1
+active=$(jq -r 'map(select(.active))[0].releaseId // ""' <<<"$list")
+if [ "$cmd" = mark ]; then
+  prev=$(jq -r '(map(.active) | index(true)) as $i | if $i == null then "" else (.[$i + 1].releaseId // "") end' <<<"$list")
+  url=$(jq -r 'map(select(.active))[0].url // ""' <<<"$list")
+  printf '%s %s %s %s\n' "$slug" "${active:--}" "${prev:--}" "${url:--}"
+  exit 0
+fi
+
+now=$3 prev=$4
+[ "$prev" != - ] || { echo "::error::rollback: $slug has no release before $now to serve again"; exit 1; }
+[ "$active" = "$now" ] || { echo "::notice::rollback: $slug now serves ${active:-nothing}, not $now — a newer publish stands"; exit 0; }
+code=$(curl -sS -m 30 -o /dev/null -w '%{http_code}' -X POST "$api/v1/project/$slug/releases/$prev/activate" \
+  -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN") || code=000
+case "$code" in 2*) echo "rollback: $slug serves $prev again (was $now)" ;; *) echo "::error::rollback: activating $prev for $slug answered HTTP $code"; exit 1 ;; esac

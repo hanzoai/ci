@@ -562,6 +562,15 @@ test:
     # the publish job use, so the two can never disagree about what a ref
     # publishes, or about which of them publishes it.
     run: bash bin/sites_test.sh
+  - name: rollback
+    # bin/rollback is how a red `verify:` suite puts a site back on the release
+    # that served before: pinned against a stub plane, including that a newer
+    # publish is never rolled back by an older run.
+    run: bash bin/rollback_test.sh
+  - name: smoke
+    # bin/smoke is the check of a built export before it ships: every route has
+    # a page, and every page's own assets are in the export.
+    run: bash bin/smoke_test.sh
   - name: cache
     # bin/cache is the store under gocache and under hanzoai/dev's Rust release
     # cache, so the protocol is pinned once, here, for every caller: who may

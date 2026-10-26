@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# smoke — the built export serves its pages, checked on disk before it ships.
+#
+#   smoke <dir> [route...]   # exit 0 when every route has a page and every page's assets exist
+#
+# A route is a path as a browser asks for it (`/`, `/blog`); it resolves the way
+# the Sites plane serves a directory-index export: <route>/index.html, then
+# <route>.html, then the file itself. Each page's own scripts, stylesheets,
+# images and preloads (`src=` and `href=` naming a path on this site, not a
+# link to another page) must be files in the export, so a build that dropped a
+# chunk fails here rather than at the first reader. `/` is always checked.
+#
+# Offline and quick: no server and no browser. The suites that drive a browser
+# against the live site belong to `verify:`, after the publish.
+set -uo pipefail
+dir=${1:?usage: smoke <dir> [route...]}; shift
+[ -d "$dir" ] || { echo "::error::smoke: no export at $dir"; exit 1; }
+page() { # page <route> -> the file that serves it
+  local r=${1#/}; r=${r%/}
+  for f in "$dir/${r:+$r/}index.html" "$dir/$r.html" "$dir/$r"; do [ -f "$f" ] && { echo "$f"; return 0; }; done
+  return 1
+}
+bad=0 n=0
+for route in / "$@"; do
+  f=$(page "$route") || { echo "::error::smoke: $route has no page in $dir"; bad=1; continue; }
+  # The page's own assets: src and href values naming a site path with a file
+  # extension that is not a page, before any query or fragment.
+  while IFS= read -r a; do
+    a=${a%%[?#]*}; n=$((n + 1))
+    [ -f "$dir$a" ] || { echo "::error::smoke: $route needs $a, which is not in the export"; bad=1; }
+  done < <(grep -oE '(src|href)="/[^"/][^"]*\.(js|mjs|css|woff2?|png|jpe?g|svg|webp|ico|json|txt)([?#][^"]*)?"' "$f" | sed -E 's/^(src|href)="//; s/"$//' | sort -u)
+done
+[ "$bad" = 0 ] && echo "smoke: $(( $# + 1 )) route(s) and $n asset(s) present in $dir"
+exit $bad

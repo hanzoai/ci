@@ -45,4 +45,10 @@ done
 printf 'images: []\nsites:\n  - {slug: a, dir: out}\n' > "$T/hanzo.yml"
 run push main branch alone; [ $? = 0 ] && ok "an empty images: list ships nothing" || no "an empty images: list ships nothing"
 
+printf 'site:\n  slug: a\n  dir: out\n  smoke: [/blog, /docs]\n' > "$T/hanzo.yml"
+run push main branch smoke; [ "$(tr '\n' ' ' < "$T/out")" = "/blog /docs " ] && ok "site.smoke names the routes to check" || no "site.smoke names the routes to check"
+printf 'sites:\n  - {slug: a, dir: out/a, smoke: [/x]}\n  - {slug: b, dir: out/b}\n' > "$T/hanzo.yml"
+HANZO_YML="$T/hanzo.yml" bash "$BIN" smoke a > "$T/out" 2>&1; [ "$(cat "$T/out")" = "/x" ] && ok "each of sites: names its own" || no "each of sites: names its own"
+HANZO_YML="$T/hanzo.yml" bash "$BIN" smoke b > "$T/out" 2>&1; [ ! -s "$T/out" ] && ok "a site that names none checks its home alone" || no "a site that names none checks its home alone"
+
 exit $fail

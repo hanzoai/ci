@@ -5,6 +5,7 @@
 #   sites pairs        # slug=dir per line when this ref publishes, nothing when it does not
 #   sites build        # the command that builds them (site.build, or site-build for sites:)
 #   sites alone        # exit 0 when hanzo.yml ships nothing the publish job ships but sites
+#   sites smoke <slug> # the routes bin/smoke checks in that site's export, one per line
 #
 # `site:` is one export, `sites:` is several: a white-labelled product builds once
 # and ships an export per brand, and a site keys on its HOST, so a brand per host
@@ -23,7 +24,7 @@
 # lacks its slug or its dir.
 set -euo pipefail
 cmd=${1:-}
-case "$cmd" in pairs|build|alone) ;; *) echo "usage: sites pairs|build|alone" >&2; exit 2 ;; esac
+case "$cmd" in pairs|build|alone|smoke) ;; *) echo "usage: sites pairs|build|alone|smoke <slug>" >&2; exit 2 ;; esac
 f=${HANZO_YML:-hanzo.yml}
 [ -f "$f" ] || exit 0
 if [ "$cmd" = alone ]; then
@@ -39,6 +40,10 @@ if [ "$one" = '!!map' ] && [ "$many" = '!!seq' ]; then
   echo "::error::hanzo.yml declares BOTH site: and sites:. One list, one spelling." >&2; exit 1
 fi
 
+if [ "$cmd" = smoke ]; then
+  if [ "$many" = '!!seq' ]; then SLUG="${2:-}" yq -r '.sites[] | select(.slug == strenv(SLUG)) | .smoke // [] | .[]' "$f"; else yq -r '.site.smoke // [] | .[]' "$f"; fi
+  exit 0
+fi
 if [ "$cmd" = build ]; then
   if [ "$many" = '!!seq' ]; then yq -r '.["site-build"] // ""' "$f"; else yq -r '.site.build // ""' "$f"; fi
   exit 0

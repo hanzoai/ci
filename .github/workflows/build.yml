@@ -469,7 +469,7 @@ jobs:
           # Naming the list here also makes the release order self-announcing: a
           # pipeline that has grown a tool refuses at step one, and says which ref
           # it read and what was missing from it.
-          need="cache certclaims conflictmarkers gocache gover ignoretracked imgplat imgtags imgver jscache kms modsize narrative publishable site sites vendormark"
+          need="cache certclaims conflictmarkers gocache gover ignoretracked imgplat imgtags imgver jscache kms modsize narrative publishable rollback site sites smoke vendormark"
           miss='<no host answered>'
           # A sha cannot be a --branch, so it arrives by fetch rather than clone:
           # the caller's pin as well as this file's own commit. Both are wrapped
@@ -1851,7 +1851,7 @@ jobs:
         # condition is a hashFiles('**/…'), because each of those walks the whole
         # workspace and a restored tree is walked with it. bin/jscache says what
         # it found; a miss or an outage compiles from nothing as before.
-        if: hashFiles('package.json') != '' && env.HANZO_CI_TRUSTED == 'true'
+        if: hashFiles('package.json') != '' && env.HANZO_CI_TRUSTED == 'true' && env.HANZO_CI_ROLE != 'verify'
         run: '"$CI_HOME/bin/jscache" restore'
 
       - name: Test (per hanzo.yml)
@@ -2052,6 +2052,68 @@ jobs:
             printf '%s\t%s\t%s\n' "$n" "$claims" "$name" >> "$receipt"
           done
 
+      - name: Verify the live site (per hanzo.yml)
+        id: verify
+        # The suites hanzo.yml lists under `verify:` — browsers, end-to-end,
+        # visual, link crawls — against the site once it is live, all at once on
+        # this runner, each with its own log. They never hold a publish: the job
+        # that published is done before this one starts. HANZO_SITE_URL is the
+        # first site's live address and HANZO_SITES every site's, one
+        # `slug url` per line.
+        if: env.HANZO_CI_ROLE == 'verify' && env.HANZO_CI_TRUSTED == 'true'
+        run: |
+          set -uo pipefail
+          d="$RUNNER_TEMP/verify"; mkdir -p "$d"
+          HANZO_SITES=$(for m in $HANZO_CI_RELEASED; do IFS=: read -r slug _ _ url <<<"$m"; echo "$slug $url"; done)
+          HANZO_SITE_URL=$(awk 'NR==1{print $2}' <<<"$HANZO_SITES")
+          export HANZO_SITES HANZO_SITE_URL
+          n=$(yq '.verify // [] | length' hanzo.yml)
+          for i in $(seq 0 $((n - 1))); do
+            ( bash -c "$(yq -r ".verify[$i].run" hanzo.yml)" > "$d/$i.log" 2>&1; echo $? > "$d/$i.rc" ) &
+          done
+          wait
+          bad=
+          for i in $(seq 0 $((n - 1))); do
+            name=$(yq -r ".verify[$i].name // \"verify $i\"" hanzo.yml)
+            echo "::group::$name (exit $(cat "$d/$i.rc"))"; cat "$d/$i.log"; echo "::endgroup::"
+            [ "$(cat "$d/$i.rc")" = 0 ] || bad="$bad $name"
+          done
+          [ -z "$bad" ] || { echo "::error::verify failed:$bad"; exit 1; }
+          echo "verify: $n suite(s) passed against the live site"
+
+      - name: Roll back (verify failed)
+        # A red suite puts every site this run made live back on the release
+        # that served before it (bin/rollback), unless a newer publish has
+        # replaced it since, and tells hanzo.yml's `page:` addresses and the
+        # commit's author.
+        if: failure() && steps.verify.outcome == 'failure'
+        env:
+          API: ${{ vars.API_ENDPOINT || 'https://api.hanzo.ai' }}
+          KMS_ENDPOINT: ${{ vars.KMS_ENDPOINT || 'https://api.hanzo.ai' }}
+          KMS_PATH: ${{ steps.kms.outputs.path }}
+          KMS_ENV: ${{ steps.kms.outputs.env }}
+          AUTHOR: ${{ github.event.head_commit.author.email }}
+        run: |
+          set -uo pipefail
+          HANZO_DEPLOY_TOKEN=$(bash "$CI_HOME/bin/kms" "${KMS_PATH:-deploy}/HANZO_DEPLOY_TOKEN" "${KMS_ENV:-prod}") || exit 1
+          case "$HANZO_DEPLOY_TOKEN" in *$'\n'*|::*) echo "::error::bin/kms printed more than the token; refusing it unprinted"; exit 1 ;; esac
+          echo "::add-mask::$HANZO_DEPLOY_TOKEN"; export HANZO_DEPLOY_TOKEN HANZO_API="$API"
+          said=
+          for m in $HANZO_CI_RELEASED; do
+            IFS=: read -r slug now prev url <<<"$m"
+            said="$said$("$CI_HOME/bin/rollback" undo "$slug" "$now" "$prev" 2>&1)"$'\n'
+          done
+          printf '%s' "$said"
+          to=$(jq -nc --arg a "${AUTHOR:-}" --argjson p "$(yq -o=json -I=0 '.page // []' hanzo.yml)" '$p + [$a] | map(select(. != "")) | unique')
+          [ "$to" != '[]' ] || { echo "::warning::no page: in hanzo.yml and no commit author, so nobody is told"; exit 1; }
+          body=$(jq -nc --argjson to "$to" --arg s "${GITHUB_REPOSITORY}: verify failed on ${GITHUB_SHA:0:7}, rolled back" \
+            --arg b "$(printf 'verify failed against the live site, run %s/%s/actions/runs/%s\n\n%s' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$said")" \
+            '{to: $to, subject: $s, body: $b}')
+          code=$(curl -sS -m 30 -o /dev/null -w '%{http_code}' -X POST "$API/v1/notify/send/email" \
+            -H "Authorization: Bearer $HANZO_API_TOKEN" -H 'Content-Type: application/json' -d "$body") || code=000
+          case "$code" in 2*) echo "paged: $to" ;; *) echo "::warning::the page to $to answered HTTP $code" ;; esac
+          exit 1
+
       - name: Tests not run (declared by caller)
         # The complement of the step above, and the reason opting out cannot be
         # quiet. `tests: 'false'` asserts THIS EXACT COMMIT was gated before this
@@ -2101,6 +2163,10 @@ jobs:
           # runners. It exists only through `needs: test`, and it refuses unless
           # that job answered success. HANZO_CI_ROLE and HANZO_CI_TESTED are set
           # per job in this file; no caller input reaches either.
+          if [ "${HANZO_CI_ROLE:-}" = verify ]; then
+            say "**Tests: gated before the publish; this job verifies the live site.**"
+            exit 0
+          fi
           if [ "${HANZO_CI_ROLE:-}" = publish ]; then
             [ "${HANZO_CI_TESTED:-}" = success ] || {
               echo "::error::publishing, and the test job answered '${HANZO_CI_TESTED:-nothing}'"; exit 1; }
@@ -3465,10 +3531,12 @@ jobs:
           elif [ "$TESTS" = false ]; then
             echo "::error::hanzo.yml names no site build and this run skipped the gate (tests: 'false'), so nothing built the export"; exit 1
           fi
-          # No build named: the gate built each export, on this runner.
+          # Every export is there and serves its pages (bin/smoke, on disk).
           while IFS= read -r pair; do
             [ -d "${pair#*=}" ] || {
               echo "::error::${pair#*=} is not there to publish as ${pair%%=*}: the build left no export at the dir hanzo.yml names"; exit 1; }
+            mapfile -t routes < <("$SITES" smoke "${pair%%=*}")
+            "$CI_HOME/bin/smoke" "${pair#*=}" ${routes[@]+"${routes[@]}"}
           done <<<"$PAIRS"
           # The Sites plane issues its presigned upload grant to the org of an
           # `sk-` key, which the IAM bearer cannot stand in for. Sealed once per
@@ -3498,12 +3566,22 @@ jobs:
             echo "::endgroup::"
           done < "$RUNNER_TEMP/site-pairs"
           [ "$HANZO_CI_ROLE" = publish ] || echo "shipped=true" >> "$GITHUB_OUTPUT"
+          # What each site serves now and served before, for the verify job to
+          # roll back to, when hanzo.yml lists `verify:`.
+          if [ "$(yq '.verify // [] | length' hanzo.yml)" != 0 ]; then
+            released=
+            while IFS= read -r pair; do
+              m=$(HANZO_API="$API" "$CI_HOME/bin/rollback" mark "${pair%%=*}") || exit 1
+              released="$released ${m// /:}"
+            done <<<"$PAIRS"
+            echo "released=${released# }" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Save the JS caches (this org's store)
         # After the gate and any site build, red or green, like the Go cache, and
         # only from a trusted ref (bin/cache). After the publish, so a site is
         # live before its build cache is written.
-        if: (success() || failure()) && hashFiles('package.json') != '' && env.HANZO_CI_TRUSTED == 'true'
+        if: (success() || failure()) && hashFiles('package.json') != '' && env.HANZO_CI_TRUSTED == 'true' && env.HANZO_CI_ROLE != 'verify'
         run: '"$CI_HOME/bin/jscache" save'
 
       - name: Save the Go cache (this org's store)
@@ -3529,6 +3607,7 @@ jobs:
     # alone), so the publish job has nothing left to do.
     outputs:
       shipped: ${{ steps.site.outputs.shipped }}
+      released: ${{ steps.site.outputs.released }}
     env:
       COREPACK_NPM_REGISTRY: https://pkg.hanzo.ai
       HANZO_CI_ROLE: test
@@ -3603,6 +3682,8 @@ jobs:
       group: hanzoai-ci-${{ github.repository }}-${{ github.workflow }}-${{ github.ref }}
       cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
     runs-on: ${{ (startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) && 'ephemeral-linux-amd64' || fromJson(inputs.runner) }}
+    outputs:
+      released: ${{ steps.site.outputs.released }}
     env:
       COREPACK_NPM_REGISTRY: https://pkg.hanzo.ai
       HANZO_CI_ROLE: publish
@@ -3610,4 +3691,20 @@ jobs:
       HANZO_CI_TESTED: ${{ needs.test.result == 'success' && 'success' || needs.test-amd64.result }}
       HANZO_CI_GATED: ${{ inputs.test-runners }}
     # The same steps as `test`; HANZO_CI_ROLE decides which of them run here.
+    steps: *steps
+
+  # The live site, verified: hanzo.yml's `verify:` suites run once a publish has
+  # made a release live, on a runner of their own, and nothing waits on them. A
+  # red suite rolls the release back (`Roll back (verify failed)`). It runs only
+  # when a job published sites and hanzo.yml lists `verify:`, so `released` is
+  # set.
+  verify:
+    needs: [test-amd64, cicd]
+    if: always() && (needs.test-amd64.outputs.released != '' || needs.cicd.outputs.released != '') && !(startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository)
+    runs-on: ${{ (startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) && 'ephemeral-linux-amd64' || 'linux-amd64' }}
+    env:
+      COREPACK_NPM_REGISTRY: https://pkg.hanzo.ai
+      HANZO_CI_ROLE: verify
+      HANZO_CI_TRUSTED: ${{ !(startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) }}
+      HANZO_CI_RELEASED: ${{ needs.test-amd64.outputs.released || needs.cicd.outputs.released }}
     steps: *steps
