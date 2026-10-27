@@ -80,7 +80,7 @@ MODEL="${REVIEW_MODEL:-enso}"
 # Fail-closed is UNTOUCHED. Exhausting the ladder still reaches `die`: this makes
 # the gate try harder to get a verdict, never accept the absence of one. Nothing
 # here can turn a refusal into a pass — only a real answer from a real model can.
-FALLBACKS="${REVIEW_FALLBACKS:-fireworks/gpt-oss-120b fireworks/gpt-oss-20b}"
+FALLBACKS="${REVIEW_FALLBACKS:-zen6}"
 
 # An IAM access token, minted for this run by whoever invokes the reviewer.
 # There is no API key here and there is not meant to be one: IAM issues tokens,
@@ -422,7 +422,7 @@ PY
 # all, so a fallback model is given exactly the patience the first one had.
 for try_model in $MODEL $FALLBACKS; do
   if [ "$try_model" != "$MODEL" ]; then
-    echo "review: $LABEL — $MODEL could not be paid for; asking $try_model instead"
+    echo "review: $LABEL — $MODEL could not answer; asking $try_model instead"
     python3 -c 'import json,sys; b=json.load(open(sys.argv[1])); b["model"]=sys.argv[2]; json.dump(b, open(sys.argv[1],"w"))' "$req" "$try_model"
   fi
   # HOW MUCH PATIENCE A TRANSIENT IS OWED IS A MEASUREMENT, and three tries over
@@ -457,10 +457,14 @@ for try_model in $MODEL $FALLBACKS; do
     sleep $(( attempt * 10 ))
     attempt=$(( attempt + 1 ))
   done
-  # 402 is the ONLY status that moves to the next rung. A 401 is a bad bearer and
-  # a 400 a bad body — both fail identically on every model, so walking the ladder
-  # on them turns one legible refusal into three slow ones.
-  [ "$code" = "402" ] || break
+  # 402 moves to the next rung, and so does the gateway's own masked refusal: a 400
+  # reading "the model could not serve this request" is the model's upstream
+  # refusing a field (a temperature, a JSON mode) it does not take, which another
+  # model takes. Any other 401 or 400 is a bad bearer or a bad body, fails
+  # identically on every model, and stops here.
+  if [ "$code" != "402" ] && ! { [ "$code" = "400" ] && grep -q 'could not serve this request' "$resp"; }; then
+    break
+  fi
 done
 # A REFUSED BEARER NAMES ITSELF. The gateway answers `jwt: audience not allowed`
 # without saying which audience it saw or which it wanted, and the two live in
