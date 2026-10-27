@@ -55,7 +55,11 @@ for i in "${!dirs[@]}"; do
   read -r -a args <<<"${specs[$i]}"
   host=${args[0]}
   echo "::group::agent ${dirs[$i]} ($host)"
-  node --experimental-strip-types --disable-warning=ExperimentalWarning "$here/agent/main.ts" \
-    --dir "${dirs[$i]}" --host "$host" "${args[@]:1}" || { echo "::endgroup::"; echo "::error::agent: ${dirs[$i]} for $host failed"; exit 1; }
+  out=$(node --experimental-strip-types --disable-warning=ExperimentalWarning "$here/agent/main.ts" \
+    --dir "${dirs[$i]}" --host "$host" "${args[@]:1}") || { printf '%s\n' "$out"; echo "::endgroup::"; echo "::error::agent: ${dirs[$i]} for $host failed"; exit 1; }
+  printf '%s\n' "$out"
   echo "::endgroup::"
+  # A run that says nothing did nothing; a step that went green on it would
+  # report an export ready that is exactly as it was built.
+  grep -q "^agent $host: " <<<"$out" || { echo "::error::agent: agent/main.ts printed no report for $host, so it did not run"; exit 1; }
 done

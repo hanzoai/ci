@@ -14,7 +14,6 @@
 // when any request failed, 2 when the site cannot be read at all.
 
 import fs from 'node:fs';
-import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
@@ -152,7 +151,8 @@ function origin(arg: string): string {
   return new URL(/^https?:\/\//.test(arg) ? arg : `https://${arg}`).origin;
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+// Run as a script, by whatever path led here (a symlinked checkout included).
+if (process.argv[1] && fs.realpathSync(fileURLToPath(import.meta.url)) === fs.realpathSync(process.argv[1])) {
   const { values, positionals } = parseArgs({
     args: process.argv.slice(2),
     allowPositionals: true,

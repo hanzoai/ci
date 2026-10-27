@@ -173,7 +173,9 @@ export async function main(argv: string[]): Promise<string[]> {
   return report;
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+// Run as a script, by whatever path led here: a symlinked checkout names this
+// file by a path that is not the one Node resolved it to.
+if (process.argv[1] && fs.realpathSync(fileURLToPath(import.meta.url)) === fs.realpathSync(process.argv[1])) {
   main(process.argv.slice(2)).then(
     (report) => console.log(report.join('\n')),
     (err: unknown) => {

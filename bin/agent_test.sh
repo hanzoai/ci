@@ -40,4 +40,8 @@ bash "$BIN" "b=$T/b" 'b.example.com' > "$T/log" 2>&1; [ $? = 1 ] && grep -q 'the
 fresh
 bash "$BIN" "a=$T/a" 'a=A.example.com' > "$T/log" 2>&1; [ $? = 1 ] && grep -q 'not a lowercase hostname' "$T/log" \
   && ok "the tool's own refusal fails the step" || no "the tool's own refusal fails the step"
+# CI runs the tools from a symlinked checkout; the tool must run, not exit 0 silent.
+fresh; ln -s "$PWD" "$T/link"
+bash "$T/link/bin/agent" "a=$T/a" 'a.example.com' > "$T/log" 2>&1 && [ -f "$T/a/index.md" ] && grep -q '^agent a.example.com: ' "$T/log" \
+  && ok "a symlinked checkout runs the tool" || no "a symlinked checkout runs the tool"
 exit $fail
