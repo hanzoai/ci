@@ -97,7 +97,9 @@ for gm in $mods; do
   nested=$(printf '%s\n' "$mods" | while read -r o; do
     [ "$o" = "$gm" ] && continue
     od="${o%go.mod}"
-    case "$od" in "$mdir"?*) printf '%s\n' "$od";; esac
+    case "$od" in
+      ("$mdir"?*) printf '%s\n' "$od" ;;
+    esac
   done)
   total=$(printf '%s\n' "$sizes" | awk -F'\t' -v m="$mdir" -v nl="$nested" '
     BEGIN{ n=split(nl, arr, "\n") }
