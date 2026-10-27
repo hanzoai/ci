@@ -1,0 +1,11 @@
+# Example's own rules.
+User-Agent: *
+Content-Signal: search=yes, ai-input=yes, ai-train=yes
+Allow: /
+Disallow: /private
+Disallow: /*?session=
+
+User-agent: Bytespider
+Disallow: /
+
+Sitemap: https://example.com/sitemap.xml

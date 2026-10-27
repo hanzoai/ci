@@ -76,6 +76,17 @@ inputs:
       plane does not complete a copy still publish whole and in parallel.
     required: false
     default: 'true'
+  agent:
+    description: >-
+      Make the export readable by AI agents before it publishes (bin/agent,
+      agent/main.ts): a Markdown twin of every public page and the <link> to it,
+      robots.txt, sitemap.xml, llms.txt, /.well-known/api-catalog and /auth.md,
+      each only where the site ships none of its own. The host it is served at,
+      then any opt-outs: `hanzo.ai`, or `hanzo.ai --no-llms`. With sites:, one
+      `slug=host [flags]` line per site that opts in. Empty, the default, ships
+      every export exactly as it was built.
+    required: false
+    default: ''
 runs:
   using: composite
   steps:
@@ -134,6 +145,24 @@ runs:
         done
         [ -x "$dst/bin/site" ] \
           || { echo "::error::could not fetch hanzoai/ci@$ref (bin/site) from git.hanzo.ai or github.com"; exit 1; }
+
+    - name: Agent readiness
+      if: inputs.agent != ''
+      shell: bash
+      # Every export it names is finished before the first one publishes, so a
+      # refusal here ships nothing rather than half a publish.
+      env:
+        AGENT_LINES: ${{ inputs.agent }}
+        AGENT_SITES: ${{ inputs.sites }}
+        AGENT_SLUG: ${{ inputs.slug }}
+        AGENT_DIR: ${{ inputs.dir }}
+      run: |
+        set -euo pipefail
+        [ -x "$RUNNER_TEMP/site-ci/bin/agent" ] \
+          || { echo "::error::hanzoai/ci at this action's ref has no bin/agent; pin a ref that does"; exit 1; }
+        pairs="$AGENT_SITES"
+        [ -n "${pairs//[[:space:]]/}" ] || pairs="$AGENT_SLUG=$AGENT_DIR"
+        bash "$RUNNER_TEMP/site-ci/bin/agent" "$pairs" "$AGENT_LINES"
 
     - name: Read the deploy key
       id: key

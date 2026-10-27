@@ -3,3 +3,7 @@
 # a repo whose image is built linux/amd64 from source by the Dockerfile. The
 # artifact is never an input to anything; only the source is.
 /ci
+
+# agent/'s dependencies install from its lockfile (bin/agent, hanzo.yml's agent
+# test); the lockfile is the source.
+/agent/node_modules/

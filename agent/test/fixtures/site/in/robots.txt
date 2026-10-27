@@ -1,0 +1,8 @@
+# Example's own rules.
+User-Agent: *
+Allow: /
+Disallow: /private
+Disallow: /*?session=
+
+User-agent: Bytespider
+Disallow: /

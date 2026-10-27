@@ -561,6 +561,18 @@ test:
     # asks for, that the fetch cache never travels, and that a repo without next
     # carries nothing.
     run: bash bin/jscache_test.sh
+  - name: agent
+    # agent/ is the one definition of what makes a Hanzo static site readable by
+    # AI agents (Markdown twins, robots.txt, sitemap.xml, llms.txt, the API
+    # catalog, auth.md), run by every publish that names agent:. Typechecked
+    # strict, then node --test: each fixture bundle must become its want/ byte
+    # for byte, a second run must change nothing, a hardlinked page must change
+    # in one bundle only. bin/agent_test.sh pins which export each line reaches.
+    # Offline but for the install: fixtures on disk and a local HTTP server.
+    run: |
+      set -e
+      (cd agent && npm ci --no-audit --no-fund --ignore-scripts --loglevel=error && npx tsc -p . && npm test)
+      bash bin/agent_test.sh
   - name: sites
     # bin/sites is the one reading of site:/sites: that both the gating job and
     # the publish job use, so the two can never disagree about what a ref

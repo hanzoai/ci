@@ -1,0 +1,19 @@
+{
+  "name": "@hanzo/agent-ready",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "check": "tsc -p .",
+    "test": "node --test --experimental-strip-types --disable-warning=ExperimentalWarning test/*.test.ts"
+  },
+  "dependencies": {
+    "@mixmark-io/domino": "2.2.0",
+    "turndown": "7.2.4"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "@types/turndown": "5.0.6",
+    "typescript": "5.9.3"
+  }
+}

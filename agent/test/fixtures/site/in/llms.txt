@@ -1,0 +1,11 @@
+# Example
+
+> Example builds tools for agents.
+
+## For agents
+
+- [API](https://api.example.com/v1): every operation.
+
+## Docs
+
+- [Intro](https://example.com/docs/intro.md)

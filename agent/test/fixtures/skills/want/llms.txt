@@ -1,0 +1,15 @@
+# Skills
+
+## Pages
+
+- [Skills](https://skills.example.com/index.md)
+
+## For agents
+
+- [Sign in as an agent](https://skills.example.com/auth.md): a wallet with no person, the device flow (`hanzo auth login`), API keys, and OpenID Connect at hanzo.id.
+- [API catalog](https://skills.example.com/.well-known/api-catalog): the Hanzo API, its OpenAPI document and its MCP endpoint, as an RFC 9727 linkset.
+- [Hanzo API](https://api.hanzo.ai/v1): every capability at one endpoint; every operation is in https://api.hanzo.ai/v1/openapi.json.
+- [MCP](https://docs.hanzo.ai/docs/mcp): `POST https://api.hanzo.ai/v1/mcp`, or locally `npx -y --package=@hanzo/mcp@latest hanzo-mcp serve`.
+- [Docs](https://docs.hanzo.ai/llms.txt): every Hanzo docs page.
+- [Skills](https://hanzoskills.com/llms.txt): the skills an agent installs.
+- [Agents](https://hanzo.ai/agents): sign up, the free tier, the first call, and paying with no person.

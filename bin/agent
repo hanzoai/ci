@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# agent — make each export of a publish readable by AI agents before it ships:
+# Markdown twins, the <link> naming them, robots.txt, sitemap.xml, llms.txt,
+# the API catalog and auth.md, each only where the site ships none of its own.
+# The work is agent/main.ts (TypeScript, run by Node's own type stripping);
+# this is how a publish reaches it.
+#
+#   agent <pairs> <lines>
+#
+#   pairs  the publish's sites, one `slug=dir[@url]` per line (the site
+#          action's sites:, or `slug=dir` for one site)
+#   lines  the sites that opt in, one `slug=host [flags]` per line; with one
+#          site the `slug=` may be left off. Flags are agent/main.ts's own:
+#          --no-twins --no-links --no-robots --no-sitemap --no-llms
+#          --no-catalog --no-auth --skills <dir> --jobs <n>
+#
+# A site with no line here is published exactly as it was built. A line naming
+# a slug the publish does not ship is refused before anything is written,
+# because it says the caller expected a file this run would never produce.
+#
+# Its two dependencies (turndown and domino, its HTML parser) install from the
+# committed lockfile, production only, once per checkout of this repo.
+set -euo pipefail
+here=$(cd "$(dirname "$0")/.." && pwd)
+pairs=${1-}; lines=${2-}
+[ -n "${lines//[[:space:]]/}" ] || exit 0
+
+command -v node >/dev/null 2>&1 || { echo "::error::agent: no node on this runner; agent/main.ts needs Node 22.18 or later"; exit 1; }
+node -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit(a>22||(a===22&&b>=18)?0:1)' \
+  || { echo "::error::agent: node $(node --version) cannot run agent/main.ts; it needs 22.18 or later (type stripping)"; exit 1; }
+
+# Each line resolved to its export before any is run.
+declare -a dirs specs
+n_pairs=$(printf '%s\n' "$pairs" | grep -c '[^[:space:]]' || true)
+while IFS= read -r line; do
+  line=${line#"${line%%[![:space:]]*}"}; line=${line%"${line##*[![:space:]]}"}
+  [ -n "$line" ] || continue
+  first=${line%%[[:space:]]*}
+  if [[ "$first" == *=* ]]; then slug=${first%%=*}; spec=${line#*=}
+  elif [ "$n_pairs" = 1 ]; then slug=$(printf '%s\n' "$pairs" | grep '[^[:space:]]' | sed 's/^[[:space:]]*//; s/=.*//'); spec=$line
+  else echo "::error::agent: '$line' names no site; with several sites each line is slug=host [flags]"; exit 1; fi
+  dir=$(printf '%s\n' "$pairs" | sed 's/^[[:space:]]*//' | awk -F= -v s="$slug" '$1 == s { sub(/^[^=]*=/, ""); sub(/@.*/, ""); sub(/[[:space:]]+$/, ""); print; exit }')
+  [ -n "$dir" ] || { echo "::error::agent: '$slug' is not a site this publish ships"; exit 1; }
+  [ -d "$dir" ] || { echo "::error::agent: $dir (site $slug) is not there; the build left no export"; exit 1; }
+  dirs+=("$dir"); specs+=("$spec")
+done <<<"$lines"
+[ "${#dirs[@]}" -gt 0 ] || exit 0
+
+if [ ! -f "$here/agent/node_modules/turndown/package.json" ]; then
+  (cd "$here/agent" && npm ci --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error) \
+    || { echo "::error::agent: npm ci in $here/agent failed"; exit 1; }
+fi
+
+for i in "${!dirs[@]}"; do
+  read -r -a args <<<"${specs[$i]}"
+  host=${args[0]}
+  echo "::group::agent ${dirs[$i]} ($host)"
+  node --experimental-strip-types --disable-warning=ExperimentalWarning "$here/agent/main.ts" \
+    --dir "${dirs[$i]}" --host "$host" "${args[@]:1}" || { echo "::endgroup::"; echo "::error::agent: ${dirs[$i]} for $host failed"; exit 1; }
+  echo "::endgroup::"
+done

@@ -1,0 +1,12 @@
+# Example
+
+> Example builds tools for agents.
+
+## For agents
+
+- [API](https://api.example.com/v1): every operation.
+- [Sign in as an agent](https://example.com/auth.md): a wallet with no person, the device flow (`hanzo auth login`), API keys, and OpenID Connect at hanzo.id.
+
+## Docs
+
+- [Intro](https://example.com/docs/intro.md)

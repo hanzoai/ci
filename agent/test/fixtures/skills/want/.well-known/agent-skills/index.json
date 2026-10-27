@@ -1,0 +1,33 @@
+{
+  "$schema": "https://schemas.agentskills.io/discovery/0.2.0/schema.json",
+  "skills": [
+    {
+      "name": "alpha",
+      "type": "skill-md",
+      "description": "Plain description, with a colon: kept.",
+      "url": "/.well-known/agent-skills/alpha/SKILL.md",
+      "digest": "sha256:fc75f362b873e18e1e454e7a6226e838935302a03e9138fd9ed2faa1ca5c4c70"
+    },
+    {
+      "name": "beta",
+      "type": "skill-md",
+      "description": "Folded across two lines.\nAnd a second paragraph.",
+      "url": "/.well-known/agent-skills/beta/SKILL.md",
+      "digest": "sha256:3d75f9853e7a0b57e778d40eb8c8425270de3ad6907bc9d78b2341f66e56be21"
+    },
+    {
+      "name": "delta",
+      "type": "skill-md",
+      "description": "Quoted \"inner\" text, a \\ backslash and a # hash.",
+      "url": "/.well-known/agent-skills/delta/SKILL.md",
+      "digest": "sha256:d306ec8d062802edbedf265ea5b69eba07a6166a52bf02d00b101489c0a8a91b"
+    },
+    {
+      "name": "gamma",
+      "type": "skill-md",
+      "description": "Literal line one.\nLiteral line two.",
+      "url": "/.well-known/agent-skills/gamma/SKILL.md",
+      "digest": "sha256:0b978551e87a1cf0032d2df9f47a05899e87156fd7e4f5d0e909662bcf540412"
+    }
+  ]
+}

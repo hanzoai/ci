@@ -469,7 +469,7 @@ jobs:
           # Naming the list here also makes the release order self-announcing: a
           # pipeline that has grown a tool refuses at step one, and says which ref
           # it read and what was missing from it.
-          need="cache certclaims conflictmarkers gocache gover ignoretracked imgplat imgtags imgver jscache kms modsize narrative publishable rollback site sites smoke vendormark"
+          need="agent cache certclaims conflictmarkers gocache gover ignoretracked imgplat imgtags imgver jscache kms modsize narrative publishable rollback site sites smoke vendormark"
           miss='<no host answered>'
           # A sha cannot be a --branch, so it arrives by fetch rather than clone:
           # the caller's pin as well as this file's own commit. Both are wrapped
@@ -3526,6 +3526,12 @@ jobs:
           elif [ "$TESTS" = false ]; then
             echo "::error::hanzo.yml names no site build and this run skipped the gate (tests: 'false'), so nothing built the export"; exit 1
           fi
+          # Each site that names agent: in hanzo.yml is made readable by AI
+          # agents (bin/agent: Markdown twins, robots.txt, sitemap.xml, llms.txt,
+          # the API catalog, auth.md), before the smoke check reads the export
+          # and before any site publishes. A site that names none ships as built.
+          AGENT=$("$SITES" agent)
+          [ -z "$AGENT" ] || "$CI_HOME/bin/agent" "$PAIRS" "$AGENT"
           # Every export is there and serves its pages (bin/smoke, on disk).
           while IFS= read -r pair; do
             [ -d "${pair#*=}" ] || {

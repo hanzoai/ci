@@ -51,4 +51,11 @@ printf 'sites:\n  - {slug: a, dir: out/a, smoke: [/x]}\n  - {slug: b, dir: out/b
 HANZO_YML="$T/hanzo.yml" bash "$BIN" smoke a > "$T/out" 2>&1; [ "$(cat "$T/out")" = "/x" ] && ok "each of sites: names its own" || no "each of sites: names its own"
 HANZO_YML="$T/hanzo.yml" bash "$BIN" smoke b > "$T/out" 2>&1; [ ! -s "$T/out" ] && ok "a site that names none checks its home alone" || no "a site that names none checks its home alone"
 
+printf 'site:\n  slug: docs-hanzo-ai\n  dir: out\n  agent: docs.hanzo.ai --no-llms\n' > "$T/hanzo.yml"
+run push main branch agent; [ "$(cat "$T/out")" = "docs-hanzo-ai=docs.hanzo.ai --no-llms" ] && ok "site.agent names its host and flags" || no "site.agent names its host and flags"
+printf 'sites:\n  - {slug: a, dir: out/a, agent: a.example.com}\n  - {slug: b, dir: out/b}\n' > "$T/hanzo.yml"
+run push main branch agent; [ "$(tr '\n' ' ' < "$T/out")" = "a=a.example.com " ] && ok "only the sites: entries that name agent: opt in" || no "only the sites: entries that name agent: opt in"
+printf 'site:\n  slug: a\n  dir: out\n' > "$T/hanzo.yml"
+run push main branch agent; [ $? = 0 ] && [ ! -s "$T/out" ] && ok "a site without agent: ships as built" || no "a site without agent: ships as built"
+
 exit $fail

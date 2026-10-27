@@ -449,6 +449,50 @@ exports in the estate 22 fit that body; the two that do not (`hanzo.ai`, 27.9 Mi
 zipped over 8,536 files, and `trillerfest.com` at 76.7 MiB) can only stream —
 `hanzo.ai` is past the server's own 5,000-entry release cap besides.
 
+### `agent:` — an export AI agents can read
+
+One line makes a published site readable by agents, from one definition
+([`agent/`](agent/main.ts)) rather than one per site:
+
+```yaml
+site:
+  slug: docs-hanzo-ai
+  dir: apps/docs/out
+  agent: docs.hanzo.ai              # the host it is served at, then any opt-outs
+```
+
+The site action takes the same value (`agent: hanzo.ai`), or with `sites:` one
+`slug=host [flags]` line per site that opts in. A site that names no `agent:`
+ships exactly as it was built. Before the smoke check and before anything
+publishes, the export gains, each only where the site wrote none of its own:
+
+| file | what it is |
+|---|---|
+| `<page>.md` | every public page as Markdown (`/` → `/index.md`, `/a/b` → `/a/b.md`, `/models/zen5.8` → `/models/zen5.8.md`): `# Title`, the description as a quote, the page's main content with absolute links, tables and code |
+| `<link rel="alternate" type="text/markdown">` | in each page's `<head>`, naming its twin; every other byte of the page is unchanged |
+| `robots.txt` | the canonical file (named AI crawlers Allow, `Content-Signal: search=yes, ai-input=yes, ai-train=yes`, Sitemap); a site's own gains only the Content-Signal line inside its first `User-agent: *` group and a Sitemap line it lacks |
+| `sitemap.xml` | every public page's canonical URL |
+| `llms.txt` | the pages with their twins and where an agent goes next; a site's own gains only a link to `/auth.md` it lacks |
+| `/.well-known/api-catalog` | the Hanzo API catalog (RFC 9727) |
+| `/auth.md` | how an agent signs in: [`agent/auth.md`](agent/auth.md), one text for every site |
+
+Public means not closed to `*` by the site's robots.txt, not `noindex`, not an
+error page (404, 500) and not a framework internal (`_next/`, any `_` or `.`
+segment). A site opts out of a piece, with its reason in a comment beside the
+line: `--no-twins --no-links --no-robots --no-sitemap --no-llms --no-catalog
+--no-auth`. `--skills <dir>` writes `/.well-known/agent-skills/index.json`
+(agent-skills-discovery v0.2.0) from a directory of `SKILL.md` files.
+
+It runs on the runner's Node (22.18 or later, type stripping, no build step),
+installs `turndown` and its parser from `agent/package-lock.json`, and spreads
+the pages over at most eight threads (`--jobs`).
+
+`node agent/sweep.ts <host> [--from <file>]` fetches every URL a live site's
+sitemap.xml and llms.txt name, and every URL or path in a `--from` file (a
+redirect table's sources), as ClaudeBot, Meta-ExternalAgent and Googlebot, six
+at a time, and prints each one that does not end 2xx with the file that linked
+it. Exit 1 when any failed.
+
 ## Runners — our fleet or your own
 
 By default the build runs on the **Hanzo `git-runner` fleet** on git.hanzo.ai

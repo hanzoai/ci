@@ -6,6 +6,7 @@
 #   sites build        # the command that builds them (site.build, or site-build for sites:)
 #   sites alone        # exit 0 when hanzo.yml ships nothing the publish job ships but sites
 #   sites smoke <slug> # the routes bin/smoke checks in that site's export, one per line
+#   sites agent        # `slug=host [flags]` per site that names agent: (bin/agent)
 #
 # `site:` is one export, `sites:` is several: a white-labelled product builds once
 # and ships an export per brand, and a site keys on its HOST, so a brand per host
@@ -23,7 +24,7 @@
 # lacks its slug or its dir.
 set -euo pipefail
 cmd=${1:-}
-case "$cmd" in pairs|build|alone|smoke) ;; *) echo "usage: sites pairs|build|alone|smoke <slug>" >&2; exit 2 ;; esac
+case "$cmd" in pairs|build|alone|smoke|agent) ;; *) echo "usage: sites pairs|build|alone|smoke <slug>|agent" >&2; exit 2 ;; esac
 f=${HANZO_YML:-hanzo.yml}
 [ -f "$f" ] || exit 0
 if [ "$cmd" = alone ]; then
@@ -41,6 +42,11 @@ fi
 
 if [ "$cmd" = smoke ]; then
   if [ "$many" = '!!seq' ]; then SLUG="${2:-}" yq -r '.sites[] | select(.slug == strenv(SLUG)) | .smoke // [] | .[]' "$f"; else yq -r '.site.smoke // [] | .[]' "$f"; fi
+  exit 0
+fi
+if [ "$cmd" = agent ]; then
+  if [ "$many" = '!!seq' ]; then yq -r '.sites[] | select((.agent // "") != "") | .slug + "=" + .agent' "$f"
+  else yq -r 'select((.site.agent // "") != "") | .site.slug + "=" + .site.agent' "$f"; fi
   exit 0
 fi
 if [ "$cmd" = build ]; then
