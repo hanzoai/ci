@@ -165,7 +165,19 @@ case "$url" in
   # it belongs to, so the looser pattern would swallow it.
   */complete)      if [ -n "$src" ]; then cp "$src" "$T_DIR/complete.body"
                    else printf '%s' "$body" > "$T_DIR/complete.body"; fi
-                   printf '%s' "$T_DONE" > "$out"; printf '200' ;;
+                   # T_409 counts how many completions the plane refuses as
+                   # incomplete before it takes one.
+                   c=$(cat "$T_DIR/c409" 2>/dev/null || echo 0); c=$((c + 1)); echo "$c" > "$T_DIR/c409"
+                   if [ "$c" -le "${T_409:-0}" ]; then
+                     printf '{"code":"conflict","detail":"1 of 3 keys of the release are not in the store: about.html"}' > "$out"; printf '409'
+                   else printf '%s' "$T_DONE" > "$out"; printf '200'; fi ;;
+  # The store's own listing of the prefix (bin/site step 1b). T_HELD is its body,
+  # and T_HELD2 the body of every later listing; unset answers 404, which is a
+  # plane that does not list.
+  */deployments/dep_x/objects)
+                   l=$(cat "$T_DIR/lists" 2>/dev/null || echo 0); l=$((l + 1)); echo "$l" > "$T_DIR/lists"
+                   h=${T_HELD:-}; [ "$l" -gt 1 ] && [ -n "${T_HELD2:-}" ] && h=$T_HELD2
+                   if [ -n "$h" ]; then printf '%s' "$h" > "$out"; printf '200'; else printf '{}' > "$out"; printf '404'; fi ;;
   */deployments)   printf '%s' "$body" > "$T_DIR/enqueue.body";  printf '%s' "$T_ENQ"  > "$out"; printf '202' ;;
   */v1/keys)       printf '200' ;;
   # Counted, and 503 for the first T_5XX calls, so a retry can be OBSERVED
@@ -174,13 +186,6 @@ case "$url" in
   */v1/projects)   n=$(cat "$T_DIR/n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$T_DIR/n"
                    printf '{}' > "$out"
                    if [ "$n" -le "${T_5XX:-0}" ]; then printf '503'; else printf '200'; fi ;;
-  # The live host's record of the last release (bin/site step 1b). T_PREV is
-  # its body; unset answers 404, which is a first publish.
-  https://a-slug.hanzo.app/_site/manifest.txt*)
-                   if [ -n "${T_PREV:-}" ]; then printf '%s\n' "$T_PREV" > "$out"; printf '200'; else : > "$out"; printf '404'; fi ;;
-  # A sampled unchanged asset. T_PROBE=gone answers 404, which is an origin that
-  # no longer holds what the previous manifest says it does.
-  https://a-slug.hanzo.app/_next/*) if [ "${T_PROBE:-}" = gone ]; then printf '404'; else printf '200'; fi ;;
   # The deployment the run completed, as cloud records it: what the completion
   # sent, which is what cloud stores (apps/projects/deploy.go land). T_REC
   # replaces it to make the record disagree.
@@ -259,7 +264,7 @@ t "the enqueue body is commit and nothing else" \
 t "the commit travels"  "$(jq -r .commit "$tmp/enqueue.body")"  "abc123"
 
 # The completion carries the manifest cloud prunes against, so a short one
-# deletes live pages. It is the six files plus the release's own hash manifest.
+# deletes live pages. It is the six files plus the release's own hash record.
 t "the completion reports live"        "$(jq -r .status "$tmp/complete.body")"        "live"
 t "the completion carries every key"   "$(jq -r '.keys|length' "$tmp/complete.body")" "7"
 t "the manifest is relative"           "$(jq -r '.keys|index("nested/deep/page.html")|type' "$tmp/complete.body")" "number"
@@ -467,7 +472,7 @@ out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
       bash "$SD" a-slug "$site" 2>&1); rc=$?
 t "an unpublished preview publishes"       "$rc"  "0"
 t "  ...read back from the deployment"     "$(grep -c '^GET https://api.test/v1/projects/a-slug/deployments/dep_x$' "$tmp/calls")"  "1"
-t "  ...and from the project it serves"    "$(grep -c '^GET https://api.test/v1/projects/a-slug$' "$tmp/calls")"  "2"
+t "  ...and from the project it serves"    "$(grep -c '^GET https://api.test/v1/projects/a-slug$' "$tmp/calls")"  "1"
 t "  ...saying so"                         "$(printf '%s' "$out" | grep -c '^::notice::https://a-slug.hanzo.app answers 404')"  "1"
 t "  ...not calling it unreadable"         "$(printf '%s' "$out" | grep -c 'does not serve its own bytes')"  "0"
 
@@ -499,45 +504,81 @@ for back in signin unavailable; do
 done
 
 # --- incremental publish -----------------------------------------------------
-# The previous release's hash manifest is read back over the live host, and only
-# keys whose hash differs (or that it lacks) are uploaded. The completion still
-# names EVERY key, or reconciliation would delete the unchanged ones.
+# The diff is against the store: the plane lists the prefix with each object's
+# MD5 etag, and only a key the listing lacks, or holds with other bytes, is sent.
+# The completion still names EVERY key, or reconciliation would delete the rest.
 inc="$tmp/inc"; mkdir -p "$inc/_next/static"
 echo one > "$inc/index.html"; echo two > "$inc/about.html"; echo js > "$inc/_next/static/a.js"
-prev=$(cd "$inc" && sha256sum index.html about.html _next/static/a.js 2>/dev/null || shasum -a 256 index.html about.html _next/static/a.js)
+md5of() { if command -v md5sum >/dev/null 2>&1; then md5sum < "$1" | cut -c1-32; else md5 -q "$1"; fi; }
+held=$(jq -nc --arg i "$(md5of "$inc/index.html")" --arg a "$(md5of "$inc/about.html")" --arg j "$(md5of "$inc/_next/static/a.js")" \
+  '{objects:[{key:"index.html",size:4,etag:$i},{key:"about.html",size:4,etag:$a},{key:"_next/static/a.js",size:3,etag:$j},{key:"gone.html",size:1,etag:"00"}]}')
 echo changed > "$inc/about.html"
-rm -f "$tmp/calls" "$tmp/uploads" "$tmp/complete.body"
+rm -f "$tmp/calls" "$tmp/uploads" "$tmp/complete.body" "$tmp/c409" "$tmp/lists"
 out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
-      SITE_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_PREV="$prev" \
+      SITE_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_HELD="$held" \
       bash "$SD" a-slug "$inc" 2>&1); rc=$?
 t "an incremental publish succeeds"          "$rc"  "0"
-t "  ...uploads the changed page and the manifest" "$(wc -l < "$tmp/uploads" | tr -d ' ')"  "2"
-t "  ...not the unchanged ones"              "$(grep -c 'key=acme/a-slug/index.html\|a.js' "$tmp/uploads")"  "0"
+t "  ...asks the plane what the prefix holds" "$(grep -c '^GET https://api.test/v1/projects/a-slug/deployments/dep_x/objects$' "$tmp/calls")"  "1"
+t "  ...uploads the changed page and the record" "$(wc -l < "$tmp/uploads" | tr -d ' ')"  "2"
+t "  ...which is about.html"                 "$(grep -c 'key=acme/a-slug/about.html' "$tmp/uploads")"  "1"
 t "  ...but the completion names every key"  "$(jq -r '.keys|length' "$tmp/complete.body")"  "4"
-t "  ...asked the origin for the unchanged asset" "$(grep -c '^GET https://a-slug.hanzo.app/_next/static/a.js' "$tmp/calls")"  "1"
-# Hashed on every core, then sorted, so the record is the same bytes whichever
-# hasher finished first.
-t "  ...its record is sorted by key"         "$(awk '{print substr($0, 67)}' "$inc/_site/manifest.txt" | LC_ALL=C sort -c 2>&1 && echo sorted)"  "sorted"
+t "  ...the record last"                     "$(tail -1 "$tmp/uploads" | grep -c 'key=acme/a-slug/_site/manifest.txt')"  "1"
+# The record is bin/rollback's: sha-256 per key, sorted, every file but itself.
+t "  ...its record is sha-256, sorted by key" "$(awk '{print substr($0, 67)}' "$inc/_site/manifest.txt" | LC_ALL=C sort -c 2>&1 && (cd "$inc" && sha256sum -c --quiet _site/manifest.txt) && echo sorted)"  "sorted"
 t "  ...and says where its time went"        "$(printf '%s\n' "$out" | grep -c '^timing: scan [0-9.]*s, enqueue [0-9.]*s, hash [0-9.]*s, diff [0-9.]*s, upload [0-9.]*s, complete [0-9.]*s, readback [0-9.]*s$')"  "1"
-# The sample is asked all at once, and one asset the origin no longer answers is
-# enough to distrust the record: everything goes.
-rm -f "$tmp/calls" "$tmp/uploads"
+# A key the store lacks is sent even though nothing in the export changed: the
+# listing, not a record of a past publish, is what decides.
+held_lost=$(jq -c '.objects |= map(select(.key != "_next/static/a.js"))' <<<"$held")
+rm -f "$tmp/calls" "$tmp/uploads" "$tmp/c409" "$tmp/lists"
 out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
-      SITE_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_PREV="$prev" T_PROBE=gone \
+      SITE_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_HELD="$held_lost" \
       bash "$SD" a-slug "$inc" 2>&1); rc=$?
-t "an unchanged asset gone: the publish succeeds" "$rc"  "0"
-t "  ...distrusts the record"                "$(printf '%s\n' "$out" | grep -c 'previous manifest is not trusted: _next/static/a.js (404)')"  "1"
-t "  ...and sends everything"                "$(wc -l < "$tmp/uploads" | tr -d ' ')"  "4"
-rm -f "$tmp/calls" "$tmp/uploads"
+t "an asset the store lost is sent again"     "$(grep -c 'key=acme/a-slug/_next/static/a.js' "$tmp/uploads")"  "1"
+t "  ...beside the changed page and the record" "$(wc -l < "$tmp/uploads" | tr -d ' ')"  "3"
+# Bytes the store holds under the key but not these bytes: sent.
+held_stale=$(jq -c '(.objects[] | select(.key == "index.html") | .etag) = "0123456789abcdef0123456789abcdef"' <<<"$held")
+rm -f "$tmp/calls" "$tmp/uploads" "$tmp/c409" "$tmp/lists"
 out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
-      SITE_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_PREV="not a manifest" \
+      SITE_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_HELD="$held_stale" \
       bash "$SD" a-slug "$inc" 2>&1); rc=$?
-t "a malformed manifest sends everything"    "$(wc -l < "$tmp/uploads" | tr -d ' ')"  "4"
-rm -f "$tmp/calls" "$tmp/uploads"
+t "other bytes under a key are replaced"      "$(grep -c 'key=acme/a-slug/index.html' "$tmp/uploads")"  "1"
+# A plane that does not list the prefix gets everything.
+rm -f "$tmp/calls" "$tmp/uploads" "$tmp/c409" "$tmp/lists"
 out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
-      SITE_JOBS=1 SITE_FULL=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_PREV="$prev" \
+      SITE_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" \
       bash "$SD" a-slug "$inc" 2>&1); rc=$?
-t "SITE_FULL sends everything"               "$(wc -l < "$tmp/uploads" | tr -d ' ')"  "4"
+t "no listing: the publish succeeds"          "$rc"  "0"
+t "  ...and sends everything"                 "$(wc -l < "$tmp/uploads" | tr -d ' ')"  "4"
+rm -f "$tmp/calls" "$tmp/uploads" "$tmp/c409" "$tmp/lists"
+out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
+      SITE_JOBS=1 SITE_FULL=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_HELD="$held" \
+      bash "$SD" a-slug "$inc" 2>&1); rc=$?
+t "SITE_FULL sends everything"                "$(wc -l < "$tmp/uploads" | tr -d ' ')"  "4"
+t "  ...without asking for the listing"       "$(grep -c '/objects$' "$tmp/calls")"  "0"
+
+# --- an incomplete release is not marked live ----------------------------------
+# The plane lists the prefix at the completion and answers 409 while any key of
+# the release is absent. What its listing then lacks is sent and the completion
+# asked again. Here the first listing claims about.html with these bytes, so it is
+# skipped; the completion says it is not there, and the second listing agrees.
+held_now=$(jq -c --arg a "$(md5of "$inc/about.html")" '(.objects[] | select(.key == "about.html") | .etag) = $a' <<<"$held")
+held_gone=$(jq -c '.objects |= map(select(.key != "about.html"))' <<<"$held")
+rm -f "$tmp/calls" "$tmp/uploads" "$tmp/c409" "$tmp/lists"
+out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
+      SITE_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_HELD="$held_now" T_HELD2="$held_gone" T_409=1 \
+      bash "$SD" a-slug "$inc" 2>&1); rc=$?
+t "a refused completion is repaired"          "$rc"  "0"
+t "  ...completing twice"                     "$(grep -c '/complete$' "$tmp/calls")"  "2"
+t "  ...listing again in between"             "$(grep -c '/objects$' "$tmp/calls")"  "2"
+t "  ...saying why"                           "$(printf '%s\n' "$out" | grep -c 'the plane holds the release incomplete')"  "1"
+t "  ...sending what the second listing lacks" "$(grep -c 'key=acme/a-slug/about.html' "$tmp/uploads")"  "1"
+rm -f "$tmp/calls" "$tmp/uploads" "$tmp/c409" "$tmp/lists"
+out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
+      SITE_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_HELD="$held_lost" T_409=9 \
+      bash "$SD" a-slug "$inc" 2>&1); rc=$?
+t "a release that never completes fails"      "$([ "$rc" != 0 ] && echo failed)"  "failed"
+t "  ...after three completions, not more"    "$(grep -c '/complete$' "$tmp/calls")"  "4"
+t "  ...each round sending what is missing"   "$(grep -c 'key=acme/a-slug/_next/static/a.js' "$tmp/uploads")"  "3"
 
 # --- copy from a sibling site ---------------------------------------------------
 # Objects identical to the peer's are named in the completion for the plane to

@@ -42,7 +42,7 @@ inputs:
     default: ''
   sites:
     description: >-
-      Several sites from one build, one `slug=dir` or `slug=dir@https://host` pair per line. A white-labelled
+      Several sites from one build, one `slug=dir` pair per line. A white-labelled
       product is one codebase and several hosts, and a site keys on its HOST — so
       a brand per host is a site per host, and one build writes an export per
       brand. bin/site stays single-site: a publish IS one site, and which
@@ -221,19 +221,17 @@ runs:
           [ -n "${pair//[[:space:]]/}" ] || continue
           case "$pair" in *=*) ;; *) echo "::error::sites: entry '$pair' is not slug=dir"; exit 1 ;; esac
           slug="${pair%%=*}"
-          # slug=dir[@url]: the optional url is the host that serves the prefix.
-          rest="${pair#*=}"; url=""
-          case "$rest" in *@*) url="${rest#*@}"; rest="${rest%%@*}" ;; esac
+          rest="${pair#*=}"
           if [ '${{ inputs.copy }}' = 'false' ]; then
-            SITE_URL="$url" bash "$RUNNER_TEMP/site-ci/bin/site" "$slug" "$rest" > "$RUNNER_TEMP/site-log-$((n + 1))" 2>&1 &
+            bash "$RUNNER_TEMP/site-ci/bin/site" "$slug" "$rest" > "$RUNNER_TEMP/site-log-$((n + 1))" 2>&1 &
             pids+=($!); names+=("$slug")
           elif [ "$n" -eq 0 ]; then
             first_slug="$slug"; first_dir="$rest"
             echo "::group::publish $slug"
-            SITE_URL="$url" bash "$RUNNER_TEMP/site-ci/bin/site" "$slug" "$rest" || { echo "::endgroup::"; echo "::error::publish $slug failed"; exit 1; }
+            bash "$RUNNER_TEMP/site-ci/bin/site" "$slug" "$rest" || { echo "::endgroup::"; echo "::error::publish $slug failed"; exit 1; }
             echo "::endgroup::"
           else
-            SITE_URL="$url" SITE_COPY_FROM="$first_slug:$first_dir" bash "$RUNNER_TEMP/site-ci/bin/site" "$slug" "$rest" > "$RUNNER_TEMP/site-log-$n" 2>&1 &
+            SITE_COPY_FROM="$first_slug:$first_dir" bash "$RUNNER_TEMP/site-ci/bin/site" "$slug" "$rest" > "$RUNNER_TEMP/site-log-$n" 2>&1 &
             pids+=($!); names+=("$slug")
           fi
           n=$((n + 1))
