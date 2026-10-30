@@ -51,8 +51,7 @@
 #      GATEWAY_BODY_LIMIT  (16777216) the edge's own name for its own limit
 #      SITE_JOBS     (24)  parallel uploads
 #      SITE_COMMIT / SITE_BRANCH  recorded on the deployment
-#      SITE_URL            the public host serving the prefix; the previous release's
-#                          hash manifest is read from it (default: the project's liveUrl)
+#      SITE_FULL=1         send every file, whatever the store already holds
 #      SITE_COPY_FROM      <slug>:<dir> of a site just published from the same build;
 #                          its identical objects are copied by the plane, not sent
 #      SITE_PLAN=1   print the manifest and exit; no network. The test seam.
@@ -168,9 +167,10 @@ ctype() { ctype_of "$1"; printf '%s\n' "$REPLY"; }
 #
 # CNAME does not travel. It is a GitHub Pages artifact that means nothing to S3
 # and would ship a stale hostname claim into the bucket.
-# _site/manifest.txt is the release's own record of its hashes (1b below). It is
-# a key of the release like any other, so `keys` names it and reconciliation
-# keeps it; it is written last, and its bytes are not part of `bytes`.
+# _site/manifest.txt is the release's own record of its sha-256 hashes, which
+# bin/rollback reads to keep a release before a publish replaces it. It is a key
+# of the release like any other, so `keys` names it and reconciliation keeps it;
+# it is written last, and its bytes are not part of `bytes`.
 mkey=_site/manifest.txt
 manifest=$( { (cd "$dir" && find . -type f ! -name CNAME ! -path "./$mkey" | sed 's|^\./||'); echo "$mkey"; } | LC_ALL=C sort)
 count=$(printf '%s' "$manifest" | grep -c . || true)
@@ -398,77 +398,68 @@ trap 'fail' ERR
 # ---- 1b. what changed ---------------------------------------------------------
 # Most of a release is what the last one already put there: content-hashed chunks
 # never change under their name, and a one-page edit rewrites one document. So
-# the publisher keeps a `<hash>  <key>` manifest INSIDE the prefix it serves
-# (_site/manifest.txt), reads the previous one back over the public host, and
-# uploads only the keys whose hash differs or which it lacks. The grant authorizes
-# writes only and the server needs to know nothing: `keys` still names the whole
-# release, so reconciliation deletes exactly what it always did.
+# only what the store does not already hold, byte for byte, is sent.
 #
-# The manifest is written LAST. A publish cut anywhere earlier leaves the old one
-# in place, so the next run re-sends whatever the cut run may not have finished —
-# an object is only ever skipped once a run that completed its uploads said so.
+# THE DIFF IS AGAINST THE STORE, NOT AGAINST A RECORD OF IT. The plane lists the
+# deployment's own prefix (GET .../deployments/<id>/objects): every key it holds
+# and the MD5 etag the store computed from the bytes it took. A key is skipped only
+# when that listing holds it with the MD5 this export has for it, so a skipped
+# object is one the store was seen holding, in full, at the start of this publish.
 #
-# It fails toward the full upload, never toward a partial site: no manifest, an
-# unreadable or malformed one, or a sampled unchanged asset that does not answer
-# 200 all mean "send everything". SITE_FULL=1 forces that.
+# It replaced a diff against _site/manifest.txt, the record this script leaves of
+# what it published, read back over the public host and trusted after twenty
+# sampled assets answered. A record says what a publish meant to leave, not what
+# is there: on 2026-10-26 hanzo.ai's named a stylesheet and five scripts the store
+# no longer held, the sample missed them, and every later publish skipped them as
+# unchanged. The deploy then sent all ten thousand files on every push (SITE_FULL)
+# until this. The record is still written, for bin/rollback; nothing here reads it.
+#
+# The completion closes what is left: the plane refuses to mark a release live
+# while any key of its manifest is absent (409), and step 3 sends what it names.
+#
+# It fails toward the full upload, never toward a partial site: a plane that does
+# not answer the listing means "send everything". SITE_FULL=1 forces that.
+#
+# Every core at once: MD5 for the diff, because it is what the store answers with,
+# and sha-256 for the record. Each batch writes files of its own, since hashers
+# sharing one pipe flush in blocks that can end mid-line and two of them
+# interleaving there would corrupt a line. Sorted after, so the record reads the
+# same whatever order they finished in; -k3 is the key, two spaces after the hash.
 mkdir -p "$dir/_site"
 grep -vxF "$mkey" "$work/manifest" > "$work/real"
-# Every core at once. Each batch writes a file of its own: hashers sharing one
-# pipe flush in blocks that can end mid-line, and two of them interleaving there
-# would corrupt a line. Sorted after, so the record reads the same whatever order
-# they finished in; -k3 is the key, since two spaces follow the hash.
 cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
 mkdir -p "$work/h"
 (cd "$dir" && tr '\n' '\0' < "$work/real" | H="$work/h" xargs -0 -n 256 -P "$cores" bash -c \
-  'if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi > "$(mktemp "$H/b.XXXXXX")"' _)
-cat "$work"/h/b.* | LC_ALL=C sort -t ' ' -k3 > "$work/hashes"
+  'b=$(mktemp "$H/b.XXXXXX")
+   if command -v md5sum >/dev/null 2>&1; then md5sum "$@"; else md5 -r "$@" | sed "s/ /  /"; fi > "$b.md5"
+   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi > "$b.sha"' _)
+cat "$work"/h/b.*.md5 | LC_ALL=C sort -t ' ' -k3 > "$work/hashes"
+cat "$work"/h/b.*.sha | LC_ALL=C sort -t ' ' -k3 > "$work/record"
 lap hash
-[ "$(grep -c . "$work/hashes")" = "$((count - 1))" ] || { echo "::error::hashed $(grep -c . "$work/hashes") of $((count - 1)) files"; exit 1; }
+for f in hashes record; do
+  [ "$(grep -c . "$work/$f")" = "$((count - 1))" ] || { echo "::error::hashed $(grep -c . "$work/$f") of $((count - 1)) files"; exit 1; }
+done
+
+# held: `<md5>  <key>` for every object the prefix holds now, or nothing (and
+# status non-zero) when the plane does not answer the listing.
+held() {
+  local code
+  code=$(curl -sS -m 120 -o "$work/objects.json" -w '%{http_code}' \
+           -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN" \
+           "$api/v1/projects/$slug/deployments/$dep/objects" 2>/dev/null || true)
+  [ "$code" = 200 ] || { echo "the plane answered HTTP ${code:-000} for the prefix's objects" >&2; return 1; }
+  jq -r '.objects[] | "\(.etag)  \(.key)"' "$work/objects.json" > "$work/held" 2>/dev/null \
+    || { echo "the plane's object listing is not one" >&2; return 1; }
+}
+
 cp "$work/real" "$work/upload"
-: > "$work/prev"
-if [ -z "${SITE_FULL:-}" ]; then
-  # SITE_URL is the host that serves this prefix to readers. The project's own
-  # liveUrl is the plane's preview host, which does not always route the prefix.
-  base="${SITE_URL:-}"
-  [ -n "$base" ] || base=$(curl -sS -m 20 -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN" "$api/v1/projects/$slug" 2>/dev/null \
-           | jq -r '.liveUrl // empty' 2>/dev/null || true)
-  if [ -n "$base" ]; then
-    base=${base%/}
-    pcode2=$(curl -sS -m 30 -H 'Cache-Control: no-cache' -o "$work/prev.raw" -w '%{http_code}' \
-               "$base/_site/manifest.txt?t=$(date +%s)" 2>/dev/null || true)
-    if [ "$pcode2" = 200 ] && [ -s "$work/prev.raw" ] \
-       && ! grep -qvE '^[0-9a-f]{64}  [^ ]' "$work/prev.raw"; then
-      cp "$work/prev.raw" "$work/prev"
-    fi
-  fi
-fi
-if [ -s "$work/prev" ]; then
-  awk 'NR==FNR{p[substr($0,67)]=substr($0,1,64); next}
-       {f=substr($0,67); if (p[f] != substr($0,1,64)) print f}' "$work/prev" "$work/hashes" > "$work/changed"
-  # Ask the origin for a sample of what it is about to be trusted to still hold.
-  sample=$(grep -vxFf "$work/changed" "$work/real" | grep '^_next/static/' | LC_ALL=C sort -R | head -20 || true)
-  # All at once: each is a round trip through the edge to the origin, and twenty
-  # of them one after another were seconds of every publish.
-  bad= i=0
-  for rel in $sample; do
-    i=$((i + 1))
-    ( c=$(curl -g -sS -m 20 -r 0-0 -o /dev/null -w '%{http_code}' "$base/$rel?t=$(date +%s)" 2>/dev/null || true)
-      printf '%s %s\n' "${c:-000}" "$rel" > "$work/probe.$i" ) &
-  done
-  wait
-  for f in "$work"/probe.*; do
-    [ -e "$f" ] || continue
-    read -r c rel < "$f"
-    case "$c" in 200|206) ;; *) bad="$rel ($c)"; break ;; esac
-  done
-  if [ -n "$bad" ]; then
-    echo "previous manifest is not trusted: $bad does not answer; sending everything"
-  else
-    cp "$work/changed" "$work/upload"
-    echo "incremental: $(grep -c . "$work/changed" || true) of $((count - 1)) files differ from the live release"
-  fi
+if [ -n "${SITE_FULL:-}" ]; then
+  echo "SITE_FULL: sending everything"
+elif held; then
+  awk 'NR==FNR{have[$0]=1; next} !($0 in have){print substr($0, 35)}' "$work/held" "$work/hashes" > "$work/upload"
+  echo "incremental: $(grep -c . "$work/upload" || true) of $((count - 1)) files are not in the store as built; $(grep -c . "$work/held" || true) objects held"
 else
-  echo "no previous manifest at the live host; sending everything"
+  echo "sending everything"
 fi
 lap diff
 # ---- 1c. what the plane can copy ----------------------------------------------
@@ -492,7 +483,7 @@ if [ -n "${SITE_COPY_FROM:-}" ] && [ "$(jq -r '.upload.copy // false' "$work"/sd
     echo "copy: $(grep -c . "$work/copy") objects from $peer_slug inside the store"
   fi
 fi
-cp "$work/hashes" "$dir/$mkey"
+cp "$work/record" "$dir/$mkey"
 
 # ---- 2. the bytes -----------------------------------------------------------
 # `file` goes LAST: S3 ignores every field after the file part, so a grant field
@@ -565,22 +556,20 @@ put_all() {
 #
 # It is also what lets a caller cancel a superseded run safely: the run dies in
 # phase one having only added unreferenced objects, and what is live is unchanged.
-grep -v '\.html$' "$work/upload" > "$work/manifest.assets" || true
-grep    '\.html$' "$work/upload" > "$work/manifest.docs"   || true
-n_assets=$(grep -c . "$work/manifest.assets" || true)
-n_docs=$(grep -c . "$work/manifest.docs" || true)
-echo "uploading $(grep -c . "$work/upload" || true) of $count files to s3://$(jq -r .bucket "$work"/sd-enq.json)/$prefix ($jobs parallel: $n_assets assets, then $n_docs documents)"
-if [ "$n_assets" -gt 0 ]; then
-  put_all "$work/manifest.assets"
-fi
-if [ "$n_docs" -gt 0 ]; then
-  put_all "$work/manifest.docs"
-fi
-
-# The manifest is what lets the next run skip these; it is only true once they
-# are all in the bucket, so it goes last.
-printf '%s\n' "$mkey" > "$work/manifest.last"
-put_all "$work/manifest.last"
+# send <list>: its assets, then its documents. A failure is returned, not died
+# on, so it reaches the caller's ERR trap (functions do not inherit it) and the
+# deployment is marked error rather than left queued.
+send() {
+  grep -v '\.html$' "$1" > "$work/send.assets" || true
+  grep    '\.html$' "$1" > "$work/send.docs"   || true
+  if [ -s "$work/send.assets" ]; then put_all "$work/send.assets" || return 1; fi
+  if [ -s "$work/send.docs" ]; then put_all "$work/send.docs" || return 1; fi
+}
+echo "uploading $(grep -c . "$work/upload" || true) of $count files to s3://$(jq -r .bucket "$work"/sd-enq.json)/$prefix ($jobs parallel: $(grep -vc '\.html$' "$work/upload" || true) assets, then $(grep -c '\.html$' "$work/upload" || true) documents)"
+send "$work/upload"
+# The record goes last: it is only true once everything it names is in the store.
+printf '%s\n' "$mkey" > "$work/record.last"
+put_all "$work/record.last"
 lap upload
 
 # ---- 3. flip it live --------------------------------------------------------
@@ -589,12 +578,32 @@ lap upload
 # Asked again on a 5xx: the edge answered 502 for a completion whose 7621-key
 # reconcile outlasted it, after every object was already in the bucket, and that
 # marked a deployment whose bytes were live as an error.
-for attempt in 1 2 3; do
-  code=$(curl -sS -m 300 -o "$work"/sd-resp.json -w '%{http_code}' \
-    -X POST "$api/v1/projects/$slug/deployments/$dep/complete" \
-    -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN" -H 'Content-Type: application/json' \
-    --data-binary @"$work"/sd-done.json || printf '000')
-  case "$code" in 5??|000) [ "$attempt" -lt 3 ] && sleep $((attempt * 5)) ;; *) break ;; esac
+#
+# 409 is the plane listing the prefix and finding a key of this release absent:
+# it leaves the deployment queued and marks nothing live. What the store does not
+# hold is sent, from this export, and the completion asked again. Twice at most:
+# a key that will not stay in the store is a fault in the store, not a race.
+complete() {
+  local attempt
+  for attempt in 1 2 3; do
+    code=$(curl -sS -m 300 -o "$work"/sd-resp.json -w '%{http_code}' \
+      -X POST "$api/v1/projects/$slug/deployments/$dep/complete" \
+      -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN" -H 'Content-Type: application/json' \
+      --data-binary @"$work"/sd-done.json || printf '000')
+    case "$code" in 5??|000) [ "$attempt" -lt 3 ] && sleep $((attempt * 5)) ;; *) break ;; esac
+  done
+  return 0
+}
+complete
+for round in 1 2; do
+  [ "$code" = 409 ] || break
+  echo "the plane holds the release incomplete: $(jq -r '.detail // .error // .message // empty' "$work"/sd-resp.json 2>/dev/null | head -c 400)"
+  held || break
+  awk 'NR==FNR{k[substr($0, index($0, "  ") + 2)]=1; next} !($0 in k)' "$work/held" "$work/manifest" > "$work/missing"
+  [ -s "$work/missing" ] || break
+  echo "sending the $(grep -c . "$work/missing") the store does not hold"
+  send "$work/missing"
+  complete
 done
 trap - ERR
 if [ "$code" != "200" ]; then
