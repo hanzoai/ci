@@ -120,7 +120,7 @@ pod; : > "$T/out"; run push main branch restore
 [ "$(hit)" = exact ] && [ "$(tree)" = "$want" ] && ok "a fresh pod restores the exact bytes and links that were saved" \
   || no "a fresh pod restores the exact bytes and links that were saved"
 [ -z "$(ls "$T/tmp")" ] && ok "restore leaves nothing behind in RUNNER_TEMP" || no "restore leaves nothing behind in RUNNER_TEMP"
-grep -qE '^cache: exact hit for .* MiB in [0-9]+s \(fetch [0-9.]+s, verify [0-9.]+s, unpack [0-9.]+s, place [0-9.]+s\)$' "$T/log" \
+grep -qE '^cache: exact hit for .* MiB in [0-9]+s \(fetch\+unpack [0-9.]+s, place [0-9.]+s\)$' "$T/log" \
   && ok "a restore says where its time went" || no "a restore says where its time went"
 
 pod; mkdir -p "$HOME/dl/cache"; echo mine > "$HOME/dl/cache/other.crate"; : > "$T/out"; run push main branch restore
