@@ -612,7 +612,13 @@ rm -f "$tmp/calls" "$tmp/uploads" "$tmp/c409" "$tmp/lists"
 out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
       SITE_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_HELD="$held_lost" \
       bash "$SD" a-slug "$inc" 2>&1); rc=$?
-t "build output first, then pages"             "$(grep -o 'key=acme/a-slug/[^|]*' "$tmp/uploads" | sed 's|key=acme/a-slug/||' | tr '\n' ' ')"  "_next/static/a.js about.html _site/manifest.txt "
+mkdir -p "$inc/_site"; echo '{"commit":"abc"}' > "$inc/_site/build.json"; echo pay > "$inc/pay.txt"
+rm -f "$tmp/calls" "$tmp/uploads" "$tmp/c409" "$tmp/lists"
+out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test \
+      SITE_JOBS=1 T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_HELD="$held_lost" \
+      bash "$SD" a-slug "$inc" 2>&1); rc=$?
+t "build output, files, pages, then the record" "$(grep -o 'key=acme/a-slug/[^|]*' "$tmp/uploads" | sed 's|key=acme/a-slug/||' | tr '\n' ' ')"  "_next/static/a.js pay.txt about.html _site/build.json _site/manifest.txt "
+rm -f "$inc/_site/build.json" "$inc/pay.txt"
 t "  ...proven in between"                     "$(printf '%s\n' "$out" | grep -c '^proven: all 1 build-output files of the release are in the store')"  "1"
 
 # --- copy from a sibling site ---------------------------------------------------
