@@ -491,6 +491,10 @@ test:
     # measured and DROPPED for redding that Clerk bundle. Offline and
     # deterministic: temp repos, no network.
     run: bash bin/vendormark_test.sh
+  - name: ignoretracked
+    # bin/ignoretracked is the gate the build lane runs against every checkout: it
+    # refuses a repo that ships bulk content its own .gitignore claims to be ignoring.
+    run: bash bin/ignoretracked_test.sh
   - name: gover
     # bin/gover is the gate the build lane runs against every Dockerfile before
     # it builds: it refuses a Go builder image older than the go.mod it
