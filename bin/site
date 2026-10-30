@@ -554,7 +554,10 @@ put_all() {
 # plane's listing must hold every build-output key of the RELEASE, sent now or
 # skipped as already there, with these bytes; until it does no page is sent, so
 # no reader is ever served a page whose scripts are missing. Then every other
-# file (route payloads, images, twins), and last the pages, which are the switch.
+# file (route payloads, images, twins), then the pages, which are the switch, and
+# last _site/, the release's record of itself: what names the release as live
+# (a build marker beside this script's own hash record) is only true once every
+# page it names is there, and a reader that waits for it waits for the pages.
 #
 # It is also what lets a caller cancel a superseded run safely: a run that dies
 # before the pages has only added objects no live page names.
@@ -565,12 +568,14 @@ put_all() {
 BUILT='(_next/static|assets)/'
 send() {
   grep -E  "^$BUILT" "$1" > "$work/send.built" || true
-  grep -vE "^$BUILT" "$1" | grep -v '\.html$' > "$work/send.files" || true
-  grep -vE "^$BUILT" "$1" | grep    '\.html$' > "$work/send.docs"  || true
+  grep -vE "^($BUILT|_site/)" "$1" | grep -v '\.html$' > "$work/send.files" || true
+  grep -vE "^($BUILT|_site/)" "$1" | grep    '\.html$' > "$work/send.docs"  || true
+  grep -E  "^_site/" "$1" > "$work/send.record" || true
   if [ -s "$work/send.built" ]; then put_all "$work/send.built" || return 1; fi
   proven || return 1
   if [ -s "$work/send.files" ]; then put_all "$work/send.files" || return 1; fi
   if [ -s "$work/send.docs" ]; then put_all "$work/send.docs" || return 1; fi
+  if [ -s "$work/send.record" ]; then put_all "$work/send.record" || return 1; fi
 }
 # proven: the store holds every build-output key of the release with this
 # export's bytes. What it lacks is sent once more and the listing read again; a
