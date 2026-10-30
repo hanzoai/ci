@@ -49,7 +49,7 @@
 # ENV: HANZO_DEPLOY_TOKEN (required)  the org-scoped `sk-` key; mint at POST /v1/keys
 #      HANZO_API           (https://api.hanzo.ai)
 #      GATEWAY_BODY_LIMIT  (16777216) the edge's own name for its own limit
-#      SITE_JOBS     (24)  parallel uploads
+#      SITE_JOBS     (24)  parallel uploads, dealt across four connections
 #      SITE_COMMIT / SITE_BRANCH  recorded on the deployment
 #      SITE_FULL=1         send every file, whatever the store already holds
 #      SITE_COPY_FROM      <slug>:<dir> of a site just published from the same build;
@@ -61,6 +61,9 @@ slug="${1:?usage: sitedeploy <slug> <dir>}"
 dir="${2:?usage: sitedeploy <slug> <dir>}"
 api="${HANZO_API:-https://api.hanzo.ai}"
 jobs="${SITE_JOBS:-24}"
+# Four lanes of jobs/4 each (see put_all), never fewer than one in flight a lane.
+lanes=4
+per=$(( jobs / lanes )); [ "$per" -ge 1 ] || per=1
 
 # `16 << 20`, quoted from cloud internal/edge/edge.go:38 so a reader can check it
 # against the source rather than trust it. That package is the one definition;
@@ -512,22 +515,34 @@ cp "$work/record" "$dir/$mkey"
 fields=$(jq -r '.upload.fields | to_entries[] | select(.key != "key") | "\(.key)=\(.value)"' "$work"/sd-enq.json)
 esc() { REPLY=${1//\\/\\\\}; REPLY=${REPLY//\"/\\\"}; }
 put_all() {
-  local list="$1" pass rel line sep
+  local list="$1" pass rel line sep lane
   cp "$list" "$work/todo"
   for pass in 1 2 3 4 5; do
     [ -s "$work/todo" ] || return 0
-    {
-      sep=
-      while IFS= read -r rel; do
-        printf '%surl = "%s"\n' "$sep" "$upload_url"; sep=$'next\n'
-        esc "key=$prefix/$rel"; printf 'form = "%s"\n' "$REPLY"
-        while IFS= read -r line; do esc "$line"; printf 'form = "%s"\n' "$REPLY"; done <<< "$fields"
-        ctype_of "$rel"; esc "Content-Type=$REPLY"; printf 'form = "%s"\n' "$REPLY"
-        esc "file=@$dir/$rel"; printf 'form = "%s"\n' "$REPLY"
-        esc "${rel//%/%%}"; printf 'write-out = "%%{http_code} %s\\n"\noutput = "/dev/null"\nmax-time = 120\n' "$REPLY"
-      done < "$work/todo"
-    } > "$work/curl.cfg"
-    curl -sS --parallel --parallel-max "$jobs" -K "$work/curl.cfg" > "$work/results" 2> "$work/curl.err" || true
+    rm -f "$work"/lane.*
+    # LANES, each its own curl and so its own connection. One curl multiplexes
+    # every transfer over one HTTP/2 connection, and that one connection held a
+    # publish to ~130 files a second whether 64 or 192 were in flight, where
+    # three publishers side by side moved 240 through the same store (hanzo-inc/app
+    # runs 41020446909, 41020831248, 41019020306). The files are dealt round-robin.
+    awk -v k="$lanes" -v w="$work" '{ print > (w "/lane." (NR % k) ".todo") }' "$work/todo"
+    for lane in "$work"/lane.*.todo; do
+      {
+        sep=
+        while IFS= read -r rel; do
+          printf '%surl = "%s"\n' "$sep" "$upload_url"; sep=$'next\n'
+          esc "key=$prefix/$rel"; printf 'form = "%s"\n' "$REPLY"
+          while IFS= read -r line; do esc "$line"; printf 'form = "%s"\n' "$REPLY"; done <<< "$fields"
+          ctype_of "$rel"; esc "Content-Type=$REPLY"; printf 'form = "%s"\n' "$REPLY"
+          esc "file=@$dir/$rel"; printf 'form = "%s"\n' "$REPLY"
+          esc "${rel//%/%%}"; printf 'write-out = "%%{http_code} %s\\n"\noutput = "/dev/null"\nmax-time = 120\n' "$REPLY"
+        done < "$lane"
+      } > "${lane%.todo}.cfg"
+      curl -sS --parallel --parallel-max "$per" -K "${lane%.todo}.cfg" > "${lane%.todo}.results" 2> "${lane%.todo}.err" &
+    done
+    wait
+    cat "$work"/lane.*.results > "$work/results" 2>/dev/null || : > "$work/results"
+    cat "$work"/lane.*.err > "$work/curl.err" 2>/dev/null || : > "$work/curl.err"
     # Not done: answered outside 2xx, or missing from the answers entirely.
     { awk '$1 !~ /^2/ { sub(/^[^ ]+ /, ""); print }' "$work/results"
       comm -23 <(LC_ALL=C sort "$work/todo") <(awk '{ sub(/^[^ ]+ /, ""); print }' "$work/results" | LC_ALL=C sort)
