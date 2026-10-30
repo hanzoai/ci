@@ -542,30 +542,55 @@ put_all() {
   return 1
 }
 
-# ASSETS BEFORE DOCUMENTS, because the bytes are live where they land. This
+# BUILD OUTPUT, PROVEN IN THE STORE, BEFORE ANYTHING THAT NAMES IT. This
 # publisher writes into the prefix the edge already serves: there is no release to
-# flip, so every object is public the instant S3 accepts it. A single flat pass
-# therefore has no ordering between a document and the hashed assets it names, and
-# a document is only servable once all of them are in the bucket.
+# flip, so every object is public the instant S3 accepts it, and a single flat
+# pass would have no ordering between a page and the hashed files it loads.
 #
-# Splitting on `.html` gives that ordering with no coordination and no new
-# machinery. An asset name carries a content hash, so writing one never replaces
-# an object a live document is still naming — phase one is purely additive, and
-# whatever is published stays servable throughout it. The document is the switch,
-# thrown once everything it can name is already there.
+# So three passes. First the build output: the prefixes the plane serves as
+# immutable (`_next/static/`, `assets/`), whose names carry a content hash, so
+# writing one never replaces an object a live page still loads; the pass is
+# purely additive and whatever is live stays servable throughout it. Then the
+# plane's listing must hold every build-output key of the RELEASE, sent now or
+# skipped as already there, with these bytes; until it does no page is sent, so
+# no reader is ever served a page whose scripts are missing. Then every other
+# file (route payloads, images, twins), and last the pages, which are the switch.
 #
-# It is also what lets a caller cancel a superseded run safely: the run dies in
-# phase one having only added unreferenced objects, and what is live is unchanged.
-# send <list>: its assets, then its documents. A failure is returned, not died
-# on, so it reaches the caller's ERR trap (functions do not inherit it) and the
-# deployment is marked error rather than left queued.
+# It is also what lets a caller cancel a superseded run safely: a run that dies
+# before the pages has only added objects no live page names.
+#
+# send <list>: its build output, then its other files, then its pages. A failure
+# is returned, not died on, so it reaches the caller's ERR trap (functions do not
+# inherit it) and the deployment is marked error rather than left queued.
+BUILT='(_next/static|assets)/'
 send() {
-  grep -v '\.html$' "$1" > "$work/send.assets" || true
-  grep    '\.html$' "$1" > "$work/send.docs"   || true
-  if [ -s "$work/send.assets" ]; then put_all "$work/send.assets" || return 1; fi
+  grep -E  "^$BUILT" "$1" > "$work/send.built" || true
+  grep -vE "^$BUILT" "$1" | grep -v '\.html$' > "$work/send.files" || true
+  grep -vE "^$BUILT" "$1" | grep    '\.html$' > "$work/send.docs"  || true
+  if [ -s "$work/send.built" ]; then put_all "$work/send.built" || return 1; fi
+  proven || return 1
+  if [ -s "$work/send.files" ]; then put_all "$work/send.files" || return 1; fi
   if [ -s "$work/send.docs" ]; then put_all "$work/send.docs" || return 1; fi
 }
-echo "uploading $(grep -c . "$work/upload" || true) of $count files to s3://$(jq -r .bucket "$work"/sd-enq.json)/$prefix ($jobs parallel: $(grep -vc '\.html$' "$work/upload" || true) assets, then $(grep -c '\.html$' "$work/upload" || true) documents)"
+# proven: the store holds every build-output key of the release with this
+# export's bytes. What it lacks is sent once more and the listing read again; a
+# plane that does not list cannot prove it, and the release goes on as before.
+proven() {
+  local pass
+  grep -E "  $BUILT" "$work/hashes" > "$work/built" || true
+  [ -s "$work/built" ] || return 0
+  for pass in 1 2; do
+    held || { echo "the build output is not proven in the store: the plane does not list it"; return 0; }
+    awk 'NR==FNR{have[$0]=1; next} !($0 in have){print substr($0, 35)}' "$work/held" "$work/built" > "$work/unproven"
+    [ -s "$work/unproven" ] || { echo "proven: all $(grep -c . "$work/built") build-output files of the release are in the store"; return 0; }
+    [ "$pass" = 2 ] && break
+    echo "the store lacks $(grep -c . "$work/unproven") build-output files after they were sent; sending them again"
+    put_all "$work/unproven" || return 1
+  done
+  while IFS= read -r rel; do echo "::error::not in the store after it was sent: $rel"; done < <(head -20 "$work/unproven")
+  return 1
+}
+echo "uploading $(grep -c . "$work/upload" || true) of $count files to s3://$(jq -r .bucket "$work"/sd-enq.json)/$prefix ($jobs parallel: $(grep -cE "^$BUILT" "$work/upload" || true) build output, then $(grep -vE "^$BUILT" "$work/upload" | grep -vc '\.html$' || true) files, then $(grep -vE "^$BUILT" "$work/upload" | grep -c '\.html$' || true) pages)"
 send "$work/upload"
 # The record goes last: it is only true once everything it names is in the store.
 printf '%s\n' "$mkey" > "$work/record.last"
