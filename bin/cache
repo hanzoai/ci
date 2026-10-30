@@ -136,53 +136,18 @@ put() {
   curl -fsS -m 600 -o /dev/null -T "$2" "$url"
 }
 
-# fetch <key>: the archive an index names, unpacked into $tmp/x as its parts land.
-#
-# The parts arrive eight at a time and are fed to zstd and tar in order, each the
-# moment it is whole, with the archive's hash taken on the way. Downloading all of
-# them, hashing them, then unpacking them one after another was 32-46 s of every
-# hanzo.ai deploy (fetch 10-24, verify 5, unpack 17); overlapped, the restore takes
-# about as long as the slower of the download and the unpack. Nothing moves into
-# place before the hash has matched the index: an archive that does not match is
-# unpacked into scratch and thrown away.
+# fetch <key>: download and verify the archive an index names; leaves the parts in $tmp.
 fetch() {
-  local idx="$prefix/$1.idx" hash n i f mine
+  local idx="$prefix/$1.idx" hash n i
   get "$idx" "$tmp/idx" || return 1
   read -r hash n < "$tmp/idx"
   case "$n" in ''|*[!0-9]*) return 1 ;; esac
-  rm -rf "$tmp/x" "$tmp"/part.* "$tmp/fetched" "$tmp/sum" "$tmp/bytes" "$tmp/h"
-  mkdir -p "$tmp/x"
-  # A part lands under its own name only once it is whole.
   # shellcheck disable=SC2016 # expanded by the inner bash, one part each
-  ( for i in $(seq 0 $((n - 1))); do printf '%03d\n' "$i"; done \
-      | xargs -P 8 -I{} bash -c 'get "$0.{}" "$1.{}.dl" && mv "$1.{}.dl" "$1.{}"' "$prefix/$1.tar.zst" "$tmp/part"
-    echo "$?" > "$tmp/fetched" ) &
-  local fetcher=$!
-  # feed: every part in order, each as it lands; fails when the download ends without one.
-  feed() {
-    local i f got=0
-    for i in $(seq 0 $((n - 1))); do
-      f=$(printf '%s/part.%03d' "$tmp" "$i")
-      while [ ! -f "$f" ]; do
-        [ -s "$tmp/fetched" ] && [ ! -f "$f" ] && return 1
-        sleep 0.05
-      done
-      got=$((got + $(wc -c < "$f")))
-      cat "$f" || return 1
-      rm -f "$f"
-    done
-    echo "$got" > "$tmp/bytes"
-  }
-  mkfifo "$tmp/h"
-  sha256sum < "$tmp/h" | cut -d' ' -f1 > "$tmp/sum" &
-  local summer=$!
-  feed | tee "$tmp/h" | zstd -dq -T0 | tar -x --no-same-owner -C "$tmp/x"
-  mine=$?
-  wait "$summer"; wait "$fetcher"
-  rm -f "$tmp/h" "$tmp"/part.*
-  lap fetch+unpack
-  if [ "$mine" != 0 ] || [ "$(cat "$tmp/fetched" 2>/dev/null)" != 0 ]; then rm -rf "$tmp/x"; return 1; fi
-  [ "$(cat "$tmp/sum")" = "$hash" ] || { say "archive $1 does not match its index"; rm -rf "$tmp/x"; return 1; }
+  for i in $(seq 0 $((n - 1))); do printf '%03d\n' "$i"; done \
+    | xargs -P 8 -I{} bash -c 'get "$0.{}" "$1.{}"' "$prefix/$1.tar.zst" "$tmp/part" || return 1
+  lap fetch
+  [ "$(cat "$tmp"/part.* | sha256sum | cut -d' ' -f1)" = "$hash" ] || { say "archive $1 does not match its index"; return 1; }
+  lap verify
 }
 
 # lap <phase>: the seconds since the last lap, kept for the line that reports the
@@ -223,13 +188,18 @@ if [ "$cmd" = restore ]; then
   hit=exact
   if ! fetch "$key"; then
     hit=partial
+    rm -f "$tmp"/part.*
     last=
     get "$prefix/latest" "$tmp/latest" && last=$(head -1 "$tmp/latest")
     if ! [[ $last =~ $seg && $last != "$key" ]] || ! fetch "$last"; then
       say "nothing saved for $prefix yet"; echo "hit=miss" >> "$out"; exit 0
     fi
   fi
-  bytes=$(cat "$tmp/bytes" 2>/dev/null || echo 0)
+  bytes=$(wc -c "$tmp"/part.* | tail -1 | awk '{print $1}')
+  mkdir -p "$tmp/x"
+  cat "$tmp"/part.* | zstd -dq -T0 | tar -x --no-same-owner -C "$tmp/x" || skip "the archive did not unpack"
+  rm -f "$tmp"/part.*
+  lap unpack
   for i in "${!labels[@]}"; do
     l=${labels[$i]}; d=${dirs[$i]}
     [ -d "$tmp/x/$l" ] || { say "the archive carries no $l, so $d starts cold"; continue; }
