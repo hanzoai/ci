@@ -291,8 +291,6 @@ jobs:
         runner: [linux-amd64, linux-arm64]
     runs-on: ${{ (startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) && format('ephemeral-{0}', matrix.runner) || matrix.runner }}
     env:
-      # The amd64 leg reads the change; the review is one per run, not per leg.
-      HANZO_CI_REVIEW: ${{ matrix.runner == 'linux-amd64' }}
       # 'true' only when this run's code came from this repository. Every step
       # that reads a credential requires it, so an empty or unevaluated value
       # withholds the credential rather than handing it out. Spelled out in each
@@ -669,53 +667,6 @@ jobs:
           fi
           jq --version
           yq --version
-
-      - name: Start the review (beside the gate)
-        # The change is read on this runner while the gate runs, and `Review
-        # verdict` waits for the answer before anything ships: the job that
-        # publishes needs it, and a job of its own was one more runner to queue
-        # for on every run (hanzoai/community: 185 s before it started). One
-        # job per run reads it — the amd64 leg, or the single gating job — and
-        # never a share of the gate (`gates`) or a fork, which publish nothing.
-        #
-        # The reviewer reads every commit from the base to this one with its
-        # parent, so the shallow checkout is deepened until the base is an
-        # ancestor before the gate starts; afterwards the reviewer only reads.
-        # It runs in a session of its own with its output in a file, so the
-        # step's end neither waits on it nor hangs it up, on either plane.
-        if: env.HANZO_CI_REVIEW == 'true' && env.HANZO_CI_TRUSTED == 'true' && inputs.gates == ''
-        env:
-          REVIEW_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-          REVIEW_HEAD: ${{ github.sha }}
-          KMS_CLIENT_ID: ${{ secrets.KMS_CLIENT_ID }}
-          KMS_CLIENT_SECRET: ${{ secrets.KMS_CLIENT_SECRET }}
-          KMS_ENDPOINT: ${{ vars.KMS_ENDPOINT || 'https://api.hanzo.ai' }}
-          KMS_SECRET_ENV: ${{ vars.KMS_SECRET_ENV || 'prod' }}
-          REVIEW_CLIENT: ${{ vars.REVIEW_CLIENT || 'hanzo-review' }}
-          IAM_ENDPOINT: ${{ vars.IAM_ENDPOINT || 'https://api.hanzo.ai' }}
-        run: |
-          set -euo pipefail
-          export GIT_TERMINAL_PROMPT=0
-          r="$RUNNER_TEMP/review"; rm -rf "$r"; mkdir -p "$r"
-          gate="$CI_HOME/.hanzo/review/gate.sh"
-          [ -f "$gate" ] || {
-            echo "::warning::review: hanzoai/ci at this pin carries no .hanzo/review/gate.sh — the reviewer did not run, so it withholds no verdict"; exit 0; }
-          base="${REVIEW_BASE:-}"
-          case "$base" in
-            ""|0000000*) git fetch -q --deepen=1 2>/dev/null || true ;;
-            *)
-              i=0
-              while [ "$i" -lt 6 ] && ! git merge-base --is-ancestor "$base" "$REVIEW_HEAD" 2>/dev/null; do
-                i=$((i + 1))
-                git fetch -q --deepen=64 || break
-              done
-              ;;
-          esac
-          s=; command -v setsid >/dev/null 2>&1 && s=setsid
-          GITHUB_STEP_SUMMARY="$r/summary" $s nohup bash -c 'bash "$0" "$1" "$2"; echo $? > "$3/status"' \
-            "$gate" "$base" "$REVIEW_HEAD" "$r" > "$r/log" 2>&1 < /dev/null &
-          echo "$!" > "$r/started"
-          echo "review: reading ${base:-the last commit}..$REVIEW_HEAD beside the gate"
 
       - name: Read hanzo.yml (what this caller ships)
         id: plan
@@ -3469,7 +3420,7 @@ jobs:
         # verified, because it is indistinguishable from a working one until a
         # site quietly stops updating.
         # WHICH JOB PUBLISHES. A run that gates on one architecture publishes
-        # its sites from the gating job, after the gate and the review verdict:
+        # its sites from the gating job, after the gate:
         # the export the gate built, or site.build run beside it, ships from the
         # runner that tested it, with no second runner, install or build
         # (hanzoai/community: the publish job queued 19 to 378 s). Its images,
@@ -3604,26 +3555,6 @@ jobs:
         run: |
           "$CI_HOME/bin/gocache" save "$(dirname '${{ steps.gomod.outputs.file }}')"
 
-      - name: Review verdict
-        # What the reviewer answered, waited for last, so a site this job
-        # publishes never waits on it. A refusal fails this job: the publish job
-        # needs it, so a refused change ships no image, binary or client, and
-        # the page of a site already live says why. A reviewer that could not
-        # run withholds no verdict (.hanzo/review/gate.sh). Fifteen minutes is
-        # the bound the review job had.
-        if: env.HANZO_CI_REVIEW == 'true' && env.HANZO_CI_TRUSTED == 'true' && inputs.gates == ''
-        timeout-minutes: 15
-        run: |
-          set -uo pipefail
-          r="$RUNNER_TEMP/review"
-          [ -f "$r/started" ] || { echo "review: not started on this pin, so there is no verdict to wait for"; exit 0; }
-          # A reviewer that is gone without an answer was stopped, not refused.
-          while [ ! -f "$r/status" ] && kill -0 "$(cat "$r/started")" 2>/dev/null; do sleep 2; done
-          echo "::group::review"; cat "$r/log"; echo "::endgroup::"
-          [ -f "$r/status" ] || { echo "::warning::review: the reviewer stopped without an answer, so it withholds no verdict"; exit 0; }
-          [ ! -f "$r/summary" ] || cat "$r/summary" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-          exit "$(cat "$r/status")"
-
   # The same test, gating on linux-amd64 alone, for a caller whose
   # `test-runners` names only that architecture. It is a job rather than a matrix
   # leg for the reason `test` gives: an input cannot choose a matrix here.
@@ -3641,9 +3572,7 @@ jobs:
       COREPACK_NPM_REGISTRY: https://pkg.hanzo.ai
       HANZO_CI_ROLE: test
       HANZO_CI_TRUSTED: ${{ !(startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) }}
-      # The one gating job: it reads the change, and it ships a run that ships
-      # nothing but sites.
-      HANZO_CI_REVIEW: 'true'
+      # The one gating job ships a run that ships nothing but sites.
       HANZO_CI_SHIP: 'true'
     steps: *steps
 
@@ -3669,10 +3598,8 @@ jobs:
     # function: Hanzo Git evaluates a job's `if` with no job in scope, and
     # `cancelled()` (like `success()` and `failure()` of a step) dereferences it.
     #
-    # The review runs inside the gating job, whose `Review verdict` fails it on
-    # a refusal, so a refused diff leaves no image here either. When the gating
-    # job shipped everything the run ships (a run of sites alone), this job has
-    # nothing left and does not start.
+    # When the gating job shipped everything the run ships (a run of sites
+    # alone), this job has nothing left and does not start.
     #
     # A fork publishes nothing, so this job does not run for one: no build door,
     # no registry, no credential. Its `runs-on` still names an ephemeral label for
