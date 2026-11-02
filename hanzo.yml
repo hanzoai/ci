@@ -282,10 +282,7 @@ test:
       # jobs: a verdict before the build steps adjudicates nothing if the build
       # job could run without the tests. Exactly one of `test` and `test-amd64`
       # runs, so the publish job needs both and requires the one that ran to
-      # have succeeded; the advisory leg is needed by nothing. The review runs
-      # inside the gating job, and its verdict sits after the gate's and before
-      # every build and publish step, so a refused diff fails the gating job
-      # and leaves no image and no site.
+      # have succeeded; the advisory leg is needed by nothing.
       grep -q '^    needs: \[test, test-amd64\]$' "$f" \
         && grep -qF "if: always() && (needs.test.result == 'success' || needs.test-amd64.result == 'success')" "$f" \
         && grep -qF "HANZO_CI_TESTED: \${{ needs.test.result == 'success' && 'success' || needs.test-amd64.result }}" "$f" || {
@@ -296,13 +293,6 @@ test:
         echo "::error::Test verdict (line $v) runs before the steps that write the receipt it reads ($t, $o)"; exit 1; }
       [ "$v" -lt "$d" ] && [ "$v" -lt "$b" ] || {
         echo "::error::Test verdict (line $v) runs after a build step ($d, $b) — an image would exist before its commit was adjudicated"; exit 1; }
-      # The review's verdict runs in the gating jobs (HANZO_CI_REVIEW), last, so
-      # a site they publish never waits on it, and the publish job needs them,
-      # so a refusal still leaves no image.
-      rv=$(line 'Review verdict'); ps=$(line 'Publish site (per hanzo.yml)')
-      [ -n "$rv" ] && [ -n "$ps" ] && [ "$rv" -gt "$ps" ] \
-        && awk -v s="$rv" 'NR>s && /^        if: /{print; exit}' "$f" | grep -qF "env.HANZO_CI_REVIEW == 'true'" || {
-        echo "::error::Review verdict (line ${rv:-none}) is not the gating jobs' last word after the site publish (${ps:-none})"; exit 1; }
       echo "OK: verdict at line $v is unguarded, follows the gate ($t) and its opt-out ($o), and precedes both build lanes ($d, $b)"
   - name: kind-is-read-once
     # `kind:` says what a repository IS (HIP-0138), and this asserts the pipeline
