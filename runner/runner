@@ -27,4 +27,18 @@ fi
 git-runner register --no-interactive --ephemeral \
   --instance "$GIT_RUNNER_URL" --token "$GIT_RUNNER_TOKEN" \
   --name "${RUNNER_NAME:-$(hostname)}" --labels "$RUNNER_LABELS"
-exec git-runner daemon --once
+# A job runs as the daemon's children. Ten minutes with none is a runner with
+# nothing left to do: the job it was launched for went to another runner, or its
+# task ended and the forge dropped the ephemeral registration, after which the
+# daemon asks for work every two seconds as "unregistered runner" until the
+# Job's deadline (one held a slot for 90 minutes on 2026-11-08). Exit instead.
+git-runner daemon --once &
+daemon=$!
+( idle=0
+  while kill -0 "$daemon" 2>/dev/null; do
+    sleep 30
+    if pgrep -P "$daemon" >/dev/null 2>&1; then idle=0; else idle=$((idle + 30)); fi
+    [ "$idle" -lt 600 ] || kill "$daemon" 2>/dev/null
+  done
+) &
+wait "$daemon"
