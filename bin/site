@@ -327,13 +327,15 @@ post() {
 # ---- 0b. ensure the project exists (self-provision) --------------------------
 # A brand-new slug has no project, and the enqueue below 404s on a missing one —
 # which is why every never-before-deployed site failed its first run. Create it
-# idempotently here instead: 200/201 the first time, 409 every time after, both
-# success. So a new site needs no out-of-band `POST /v1/projects`; committing the
+# idempotently here instead: 200/201 the first time, 409 every time after (read
+# below). So a new site needs no out-of-band `POST /v1/projects`; committing the
 # workflow is enough. The repo is linked so the deploy's lifecycle events name a
 # repo and reach the notify subscriptions keyed on it — the enqueue itself no
 # longer requires a link; SITE_REPO overrides the origin for a
-# checkout whose remote is not the canonical repo.
-repo="${SITE_REPO:-$(git remote get-url origin 2>/dev/null || true)}"
+# checkout whose remote is not the canonical repo. The URL is read as configured:
+# `git remote get-url` expands insteadOf, and the job's insteadOf writes a token
+# into every github.com URL.
+repo="${SITE_REPO:-$(git config --get remote.origin.url 2>/dev/null || true)}"
 pcode=$(post "$work"/sd-proj.json "$api/v1/projects" \
   "$(jq -nc --arg s "$slug" --arg u "$repo" --arg b "${SITE_BRANCH:-main}" \
         '{slug:$s, name:$s} + (if $u=="" then {} else {repo:{url:$u, branch:$b}} end)')")
