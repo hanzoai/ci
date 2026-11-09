@@ -39,7 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential pkg-config libssl-dev libclang-dev \
       openjdk-21-jdk-headless \
       python3 python3-pip python3-venv \
-      openssh-client rsync sudo tini procps zstd \
+      openssh-client rsync sudo tini procps zstd zsh \
  && rm -rf /var/lib/apt/lists/*
 
 # The OTHER architecture's C toolchain. gVisor builds the VDSO for both
