@@ -338,7 +338,17 @@ pcode=$(post "$work"/sd-proj.json "$api/v1/projects" \
   "$(jq -nc --arg s "$slug" --arg u "$repo" --arg b "${SITE_BRANCH:-main}" \
         '{slug:$s, name:$s} + (if $u=="" then {} else {repo:{url:$u, branch:$b}} end)')")
 case "$pcode" in
-  200|201|409) : ;;  # created now, or already there — either is the state we need
+  200|201) : ;;  # created now
+  # A 409 has two meanings: this org already holds the slug (the state we need),
+  # or another org holds the name, since <slug>.hanzo.app is one namespace across
+  # every org. Only a GET tells them apart; the second would otherwise surface
+  # one step later as the enqueue's "project not found".
+  409)
+    if [ "$(curl -sS -o /dev/null -w '%{http_code}' \
+             -H "Authorization: Bearer $HANZO_DEPLOY_TOKEN" \
+             "$api/v1/projects/$slug" || true)" != 200 ]; then
+      echo "::error::the name $slug is held by a project this key cannot reach: $(head -c 300 "$work"/sd-proj.json). Pick another site.slug in hanzo.yml, or have the holder delete theirs."; exit 1
+    fi ;;
   # Creating a project and publishing to one are separate rights, and a
   # credential can hold the second without the first. Refused means only that
   # this key may not open a project; whether the project is there is a

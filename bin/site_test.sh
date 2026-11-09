@@ -195,8 +195,8 @@ case "$url" in
   # rather than inferred. T_5XX is unset for every case above, which leaves this
   # a plain 200.
   */v1/projects)   n=$(cat "$T_DIR/n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$T_DIR/n"
-                   printf '{}' > "$out"
-                   if [ "$n" -le "${T_5XX:-0}" ]; then printf '503'; else printf '200'; fi ;;
+                   printf '%s' "${T_HELDBY:-"{}"}" > "$out"
+                   if [ "$n" -le "${T_5XX:-0}" ]; then printf '503'; else printf '%s' "${T_CREATE:-200}"; fi ;;
   # The deployment the run completed, as cloud records it: what the completion
   # sent, which is what cloud stores (apps/projects/deploy.go land). T_REC
   # replaces it to make the record disagree.
@@ -204,7 +204,8 @@ case "$url" in
                    if [ -n "${T_REC:-}" ]; then printf '%s' "$T_REC"
                    else jq -c '{id:"dep_x", status, files, bytes}' "$T_DIR/complete.body"; fi ;;
   # The project. T_CURRENT names the deployment it serves.
-  */v1/projects/a-slug) if [ -n "$wfmt" ]; then printf '200'
+  # T_OWN answers whether this key reaches the project: 404 when another org holds the name.
+  */v1/projects/a-slug) if [ -n "$wfmt" ]; then printf '%s' "${T_OWN:-200}"
                    else printf '{"liveUrl":"https://a-slug.hanzo.app","status":"live","currentDeploymentId":"%s"}' "${T_CURRENT:-dep_x}"; fi ;;
   https://s3.test/*) printf '%s\n' "$(IFS='|'; printf '%s' "${fields[*]}")" >> "$T_DIR/uploads" ;;
   # The published page, read back. bin/site downloads the live URL and compares
@@ -644,6 +645,20 @@ for grant in "$ENQC" "$ENQ"; do
     t "no copy grant: no copy in the body"    "$(jq -r 'has("copy")' "$tmp/complete.body")"  "false"
   fi
 done
+
+# --- a 409 on the create ----------------------------------------------------------
+# This org's own project: publish to it. Another org's name: stop there, saying so.
+rm -f "$tmp/calls" "$tmp/uploads" "$tmp/c409" "$tmp/lists" "$tmp/n"
+out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test SITE_JOBS=1 \
+      T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_CREATE=409 bash "$SD" a-slug "$site" 2>&1); rc=$?
+t "409 on a slug this org holds publishes"   "$rc"  "0"
+rm -f "$tmp/calls" "$tmp/uploads" "$tmp/c409" "$tmp/lists" "$tmp/n"
+out=$(PATH="$shim:$PATH" HANZO_API=https://api.test HANZO_DEPLOY_TOKEN=sk-test SITE_JOBS=1 \
+      T_DIR="$tmp" T_ENQ="$ENQ" T_DONE="$DONE" T_CREATE=409 T_OWN=404 \
+      T_HELDBY='{"detail":"a-slug.hanzo.app is taken"}' bash "$SD" a-slug "$site" 2>&1); rc=$?
+t "409 on a name another org holds fails"    "$([ "$rc" != 0 ] && echo failed)"  "failed"
+t "  ...naming the holder's answer"          "$(printf '%s\n' "$out" | grep -c 'held by a project this key cannot reach: {"detail":"a-slug.hanzo.app is taken"}')"  "1"
+t "  ...before any deployment opens"         "$(grep -c '/deployments$' "$tmp/calls")"  "0"
 
 [ $fail -eq 0 ] && echo "PASS" || echo "FAIL"
 exit $fail
