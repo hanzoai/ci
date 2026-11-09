@@ -653,7 +653,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           if ! command -v jq >/dev/null 2>&1; then
             case "$(uname -m)" in aarch64) jqarch=arm64;; *) jqarch=amd64;; esac
-            curl -fsSL "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-${jqarch}" \
+            curl -fsSL --retry 5 --retry-delay 3 "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-${jqarch}" \
               -o "$HOME/.local/bin/jq" && chmod +x "$HOME/.local/bin/jq" \
             || { sudo apt-get update -qq && sudo apt-get install -y -qq jq; }
           fi
@@ -662,7 +662,7 @@ jobs:
           # locked-down nodes (sudo blocked by no_new_privs, pip/PyPI unavailable).
           if ! command -v yq >/dev/null 2>&1; then
             case "$(uname -m)" in x86_64) yqarch=amd64;; aarch64) yqarch=arm64;; *) yqarch="$(uname -m)";; esac
-            curl -fsSL "https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_${yqarch}" \
+            curl -fsSL --retry 5 --retry-delay 3 "https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_${yqarch}" \
               -o "$HOME/.local/bin/yq" && chmod +x "$HOME/.local/bin/yq"
           fi
           jq --version
