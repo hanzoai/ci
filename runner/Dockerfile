@@ -16,6 +16,16 @@
 # runner and answers "effective uid is not 0, is /usr/bin/sudo on a file system
 # with the 'nosuid' option set" -- the message guesses the cause, and the guess
 # is wrong. Whatever a job needs has to be in this file.
+# git-runner, built from hanzoai/git-runner: it speaks the forge's own runner
+# protocol (POST /v1/runner/{register,declare,task,state,log}), the only one the
+# forge serves since 1.26.58. Gitea's act_runner speaks the one the forge dropped.
+FROM golang:1.27.1-bookworm AS git-runner
+ARG GIT_RUNNER_REV=bfad54cb925b646f0a51452a7f4b45c8165606e0
+RUN set -eux; \
+    git clone https://github.com/hanzoai/git-runner /src; \
+    cd /src; git checkout "$GIT_RUNNER_REV"; \
+    CGO_ENABLED=0 GOWORK=off go build -trimpath -ldflags "-s -w" -o /out/git-runner .
+
 FROM ubuntu:24.04
 
 # The build door pushes with its own credential, so ghcr links the package to
@@ -146,16 +156,9 @@ RUN install -m0755 -d /etc/apt/keyrings \
  && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli docker-buildx-plugin \
  && rm -rf /var/lib/apt/lists/*
 
-# git-runner: the agent that claims jobs from Hanzo Git. The binary is Gitea's
-# act_runner release, installed under the name this estate calls it.
-ARG RUNNER_VERSION=0.2.13
-RUN set -eux; \
-    arch="$(dpkg --print-architecture)"; \
-    case "$arch" in amd64) a=amd64 ;; arm64) a=arm64 ;; *) echo "unsupported $arch" >&2; exit 1 ;; esac; \
-    curl -fsSL -o /usr/local/bin/git-runner \
-      "https://gitea.com/gitea/act_runner/releases/download/v${RUNNER_VERSION}/act_runner-${RUNNER_VERSION}-linux-${a}"; \
-    chmod +x /usr/local/bin/git-runner; \
-    git-runner --version
+# git-runner: the agent that claims jobs from Hanzo Git, built in the stage above.
+COPY --from=git-runner /out/git-runner /usr/local/bin/git-runner
+RUN git-runner --version
 
 # The hanzo CLI, so a job can reach the cloud it builds for rather than
 # re-implementing a piece of it in shell.
