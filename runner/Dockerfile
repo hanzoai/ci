@@ -21,7 +21,14 @@
 # forge serves since 1.26.58. Gitea's act_runner speaks the one the forge dropped.
 FROM golang:1.27.1-bookworm AS git-runner
 ARG GIT_RUNNER_REV=bfad54cb925b646f0a51452a7f4b45c8165606e0
+# Two orgs it depends on (luxfi, zap-proto) are flagged on GitHub: their repos are
+# hidden from anonymous readers and proxy.golang.org lacks their newer tags, so
+# those modules come from the forge's public mirrors.
+ENV GOPRIVATE=github.com/luxfi/*,github.com/zap-proto/*
 RUN set -eux; \
+    for o in luxfi zap-proto; do \
+      git config --global url."https://git.hanzo.ai/$o/".insteadOf "https://github.com/$o/"; \
+    done; \
     git clone https://github.com/hanzoai/git-runner /src; \
     cd /src; git checkout "$GIT_RUNNER_REV"; \
     CGO_ENABLED=0 GOWORK=off go build -trimpath -ldflags "-s -w" -o /out/git-runner .
