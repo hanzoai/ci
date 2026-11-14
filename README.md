@@ -324,8 +324,9 @@ The third state is not a gap to fill later. A repo whose version is not `x.y.z`
 one would tag bytes under a number nobody chose.
 
 Credential: the push goes to the host the run belongs to, with that host's
-token. github.com takes **`GH_PAT`**, else the KMS **`GITHUB_TOKEN`**; the forge
-takes the org's IAM token. The per-job token is never used: on github.com its
+token. github.com takes the hanzo-platform App's **contents:write** token for
+this repository alone (`bin/apptoken`, minted for the push); the forge takes the
+org's IAM token. The per-job token is never used: on github.com its
 push starts no workflow, so the tag would publish nothing.
 
 ## `binaries:` — publish a plugin once, install it everywhere
@@ -513,7 +514,7 @@ A pull request whose head repository is not the caller's own (a fork, or a
 head that was deleted) runs its tests on `ephemeral-linux-<arch>`: a label only
 the platform's one-job sandboxed runners advertise, so no host runner and no
 `runner:` of your own ever receives it. It reads no credential (no KMS login, no
-`GH_PAT`, no Go cache), skips the advisory leg, and runs no publish job — no
+GitHub App token, no Go cache), skips the advisory leg, and runs no publish job — no
 build door, no registry. Pull requests from branches of the repository itself
 are unchanged. The org setting that holds a fork's run until a maintainer
 approves it is the other half; hanzo.yml `fork-is-sandboxed` pins this one.
@@ -587,6 +588,31 @@ sibling Go module) and the client lane's push past a protected branch. Everythin
 else on that host — the tools clone of public `hanzoai/ci` — rides the per-job
 token and needs nothing sealed. It is not interchangeable with `GIT_TOKEN`, which
 is github.com's.
+
+### GitHub: an hour-old token, from the App
+
+Git and the GitHub API are authenticated as the platform's GitHub App
+(`hanzo-platform`), never with a personal access token. `bin/apptoken` reads
+`platform/GITHUB_APP_ID` and `platform/GITHUB_APP_PRIVATE_KEY` (env `prod`) from
+KMS with the IAM token the run already holds, signs the App JWT, and mints an
+installation token for the permissions and repositories the caller names:
+
+| Need | Token | Where |
+|---|---|---|
+| Clone private repositories and fetch private Go modules (`gh_token` in buildx) | `GIT_TOKEN`: the repository owner's installation, `contents:read` | the step after the KMS login |
+| Private modules of another owner (the runner's Go gates) | that owner's installation, `contents:read` | the Go gate, one per owner `go.mod` names |
+| Push the client lane's commit and tag; write a release | `contents:write` on this repository alone | minted in the step that pushes |
+
+An installation belongs to one account, so a token for one owner reads nothing of
+another's. The identity needs a KMS grant for exactly those two keys, and the App
+must be installed on the owner (`GET /repos/<owner>/<repo>/installation`).
+
+**ghcr.io is the exception.** It authenticates a personal access token (classic)
+or the job's own `GITHUB_TOKEN` and no installation token (GitHub Docs, "Working
+with the Container registry"). So the one remaining GitHub secret in KMS is
+`GITHUB_TOKEN`, a classic PAT with `write:packages`, exported as `GHCR_TOKEN`; it
+signs in to a registry and does nothing else. The step after the login switches to
+the cluster's `buildx-ghcr-auth` credential when the run holds a kubeconfig.
 
 ## Reading a failed run
 
