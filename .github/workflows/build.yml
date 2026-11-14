@@ -1413,6 +1413,20 @@ jobs:
         if: hashFiles('Package.swift') != '' && runner.os == 'Linux'
         uses: swift-actions/setup-swift@v2
 
+      - name: Provision CMake and a C++ compiler (cmake gates)
+        # hanzo-cpp/sdk's gate is a cmake build. On a bare runner that is exit
+        # 127. Guarded to CMake callers; a no-op where the image carries them.
+        if: hashFiles('CMakeLists.txt') != ''
+        run: |
+          set -euo pipefail
+          command -v cmake >/dev/null 2>&1 && command -v ninja >/dev/null 2>&1 && command -v c++ >/dev/null 2>&1 && { echo "cmake, ninja and c++ already present"; exit 0; }
+          sudo apt-get update -qq || {
+            sudo find /etc/apt -name '*.list' -o -name '*.sources' | \
+              xargs -r sudo sed -i 's|https\?://archive.ubuntu.com/ubuntu|http://mirrors.digitalocean.com/ubuntu|g'
+            sudo apt-get update -qq
+          }
+          sudo apt-get install -y -qq cmake ninja-build g++
+
       - name: Provision libclang (crates that bind C headers)
         # rustup is not the whole Rust toolchain for a tree that binds C. bindgen
         # dlopens libclang at BUILD-SCRIPT time to parse the headers, so without
