@@ -1427,6 +1427,51 @@ jobs:
           "$RUNNER_TEMP/cmake/bin/pip" install -q cmake ninja
           echo "$RUNNER_TEMP/cmake/bin" >> "$GITHUB_PATH"
 
+      - name: Provision C++ dev libraries without root (cmake gates)
+        # hanzo-cpp/sdk's CMakeLists asks for cpprestsdk, Boost and OpenSSL.
+        # The runner has no root, so apt cannot install them; apt CAN download
+        # a .deb, and dpkg -x unpacks one into any directory. So each missing
+        # dev package and its missing dependencies are fetched into
+        # $RUNNER_TEMP and unpacked into a sysroot the build is pointed at.
+        # Anything the image already carries is skipped (dpkg -s), and a repo
+        # whose CMakeLists names none of these pays nothing.
+        if: hashFiles('CMakeLists.txt') != ''
+        run: |
+          set -euo pipefail
+          grep -qiE 'find_package\((cpprestsdk|Boost|OpenSSL)' CMakeLists.txt || { echo "CMakeLists names no cpprestsdk/Boost/OpenSSL"; exit 0; }
+          want=""
+          grep -qi 'find_package(cpprestsdk' CMakeLists.txt && want="$want libcpprest-dev"
+          grep -qi 'find_package(Boost'      CMakeLists.txt && want="$want libboost-dev"
+          grep -qi 'find_package(OpenSSL'    CMakeLists.txt && want="$want libssl-dev"
+          # The closure of what is wanted, minus what is installed.
+          all=$(apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts \
+                  --no-breaks --no-replaces --no-enhances $want 2>/dev/null | grep -E '^[a-z0-9]' | sort -u)
+          missing=""
+          for p in $all; do dpkg -s "$p" >/dev/null 2>&1 || missing="$missing $p"; done
+          [ -n "$missing" ] || { echo "every C++ dev package is already installed"; exit 0; }
+          echo "fetching:$missing"
+          debs="$RUNNER_TEMP/debs"; root="$RUNNER_TEMP/sysroot"
+          mkdir -p "$debs" "$root"
+          (cd "$debs" && apt-get download -q $missing)
+          for d in "$debs"/*.deb; do dpkg -x "$d" "$root"; done
+          triple=$(c++ -dumpmachine)
+          # A dev package's .so is a symlink to the runtime library, which the
+          # image already has and so was not fetched: point it at the real file.
+          find "$root" -xtype l | while read -r l; do
+            b=$(basename "$(readlink "$l")")
+            for dir in "/usr/lib/$triple" "/lib/$triple" /usr/lib /lib; do
+              [ -e "$dir/$b" ] && { ln -sf "$dir/$b" "$l"; break; }
+            done
+          done
+          lib="$root/usr/lib/$triple"
+          {
+            echo "CMAKE_PREFIX_PATH=$root/usr${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
+            echo "CPATH=$root/usr/include:$root/usr/include/$triple${CPATH:+:$CPATH}"
+            echo "LIBRARY_PATH=$lib:$root/usr/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
+            echo "LD_LIBRARY_PATH=$lib:$root/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            echo "PKG_CONFIG_PATH=$lib/pkgconfig:$root/usr/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          } >> "$GITHUB_ENV"
+
       - name: Provision libclang (crates that bind C headers)
         # rustup is not the whole Rust toolchain for a tree that binds C. bindgen
         # dlopens libclang at BUILD-SCRIPT time to parse the headers, so without
