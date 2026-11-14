@@ -1419,13 +1419,13 @@ jobs:
         if: hashFiles('CMakeLists.txt') != ''
         run: |
           set -euo pipefail
-          command -v cmake >/dev/null 2>&1 && command -v ninja >/dev/null 2>&1 && command -v c++ >/dev/null 2>&1 && { echo "cmake, ninja and c++ already present"; exit 0; }
-          sudo apt-get update -qq || {
-            sudo find /etc/apt -name '*.list' -o -name '*.sources' | \
-              xargs -r sudo sed -i 's|https\?://archive.ubuntu.com/ubuntu|http://mirrors.digitalocean.com/ubuntu|g'
-            sudo apt-get update -qq
-          }
-          sudo apt-get install -y -qq cmake ninja-build g++
+          command -v c++ >/dev/null 2>&1 || { echo "::error::no C++ compiler on this runner"; exit 1; }
+          command -v cmake >/dev/null 2>&1 && command -v ninja >/dev/null 2>&1 && { echo "cmake and ninja already present"; exit 0; }
+          # The forge runner has no root, and its python refuses a system-wide
+          # pip install, so cmake and ninja go into a venv of this job's own.
+          python3 -m venv "$RUNNER_TEMP/cmake"
+          "$RUNNER_TEMP/cmake/bin/pip" install -q cmake ninja
+          echo "$RUNNER_TEMP/cmake/bin" >> "$GITHUB_PATH"
 
       - name: Provision libclang (crates that bind C headers)
         # rustup is not the whole Rust toolchain for a tree that binds C. bindgen
