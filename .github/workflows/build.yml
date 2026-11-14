@@ -1443,16 +1443,25 @@ jobs:
           grep -qi 'find_package(cpprestsdk' CMakeLists.txt && want="$want libcpprest-dev"
           grep -qi 'find_package(Boost'      CMakeLists.txt && want="$want libboost-dev"
           grep -qi 'find_package(OpenSSL'    CMakeLists.txt && want="$want libssl-dev"
+          # apt without root: its own state and cache directories under
+          # $RUNNER_TEMP, the system's (readable) sources. `update` then needs
+          # no lock on /var/lib/apt, and the runner image's package lists, which
+          # may be empty, are not relied on.
+          apt="$RUNNER_TEMP/apt"; mkdir -p "$apt/lists/partial" "$apt/cache/archives/partial"
+          aptopt=(-o Dir::State::Lists="$apt/lists" -o Dir::Cache="$apt/cache" \
+                  -o Dir::State::status=/var/lib/dpkg/status -o Debug::NoLocking=1 -o APT::Sandbox::User=)
+          apt-get "${aptopt[@]}" update -qq
           # The closure of what is wanted, minus what is installed.
-          all=$(apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts \
-                  --no-breaks --no-replaces --no-enhances $want 2>/dev/null | grep -E '^[a-z0-9]' | sort -u)
+          all=$(apt-cache "${aptopt[@]}" depends --recurse --no-recommends --no-suggests --no-conflicts \
+                  --no-breaks --no-replaces --no-enhances $want | grep -E '^[a-z0-9]' | sort -u)
+          [ -n "$all" ] || { echo "::error::apt knows none of:$want"; exit 1; }
           missing=""
           for p in $all; do dpkg -s "$p" >/dev/null 2>&1 || missing="$missing $p"; done
           [ -n "$missing" ] || { echo "every C++ dev package is already installed"; exit 0; }
           echo "fetching:$missing"
           debs="$RUNNER_TEMP/debs"; root="$RUNNER_TEMP/sysroot"
           mkdir -p "$debs" "$root"
-          (cd "$debs" && apt-get download -q $missing)
+          (cd "$debs" && apt-get "${aptopt[@]}" download -q $missing)
           for d in "$debs"/*.deb; do dpkg -x "$d" "$root"; done
           triple=$(c++ -dumpmachine)
           # A dev package's .so is a symlink to the runtime library, which the
