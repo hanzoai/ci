@@ -345,7 +345,7 @@ func TestTheAPIIsNamespacedUnderV1CI(t *testing.T) {
 // the one place the value lives — the same constant the gate that mints
 // X-Org-Id reads, and the one every host that mounts this surface writes.
 func TestTheReservedOrgIsNotConfigurable(t *testing.T) {
-	t.Setenv("CI_GIT_TOKEN", "token")
+	mountAssertion(t)
 	t.Setenv("CI_ADMIN_ORG", "hanzo")
 
 	cfg, err := loadConfig()
