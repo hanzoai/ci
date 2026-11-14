@@ -1400,6 +1400,19 @@ jobs:
         if: hashFiles('Cargo.toml', '**/Cargo.toml') != ''
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Provision Dart SDK (dart test gates)
+        # hanzo-dart/sdk's gate is `dart analyze` and `dart test`. On a bare
+        # runner that is exit 127, the same hole the Go, Node and Rust steps
+        # close. Guarded to Dart callers; a no-op once an image bakes dart in.
+        if: hashFiles('pubspec.yaml') != ''
+        uses: dart-lang/setup-dart@v1
+
+      - name: Provision Swift toolchain (swift build gates)
+        # hanzoai/swift-sdk's gate is `swift build` and an example run. Guarded
+        # to SwiftPM callers; macOS runners already carry swift and skip it.
+        if: hashFiles('Package.swift') != '' && runner.os == 'Linux'
+        uses: swift-actions/setup-swift@v2
+
       - name: Provision libclang (crates that bind C headers)
         # rustup is not the whole Rust toolchain for a tree that binds C. bindgen
         # dlopens libclang at BUILD-SCRIPT time to parse the headers, so without
