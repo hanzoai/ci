@@ -255,8 +255,6 @@ on:
         required: false
       KMS_CLIENT_SECRET:
         required: false
-      GH_PAT:
-        required: false
       REGISTRY_USER:
         required: false
       REGISTRY_PASSWORD:
@@ -467,7 +465,7 @@ jobs:
           # Naming the list here also makes the release order self-announcing: a
           # pipeline that has grown a tool refuses at step one, and says which ref
           # it read and what was missing from it.
-          need="agent cache certclaims conflictmarkers gocache gover ignoretracked imgplat imgtags imgver jscache kms modsize narrative publishable rollback site sites smoke vendormark"
+          need="agent apptoken cache certclaims conflictmarkers gocache gover ignoretracked imgplat imgtags imgver jscache kms modsize narrative publishable rollback site sites smoke vendormark"
           miss='<no host answered>'
           # A sha cannot be a --branch, so it arrives by fetch rather than clone:
           # the caller's pin as well as this file's own commit. Both are wrapped
@@ -758,43 +756,6 @@ jobs:
           # kind END
           kind hanzo.yml
 
-      - name: Authenticated git for go modules (rate-limit + any private repo)
-        # luxfi/hanzoai/zooai Go modules are PUBLIC, so `go` resolves them through
-        # the default public proxy (proxy.golang.org) + checksum db (sum.golang.org)
-        # — canonical, IMMUTABLE hashes that a force-moved tag can no longer break.
-        # We deliberately do NOT set GOPRIVATE: that would route these public
-        # modules `direct` and bypass the sumdb, re-introducing the re-publish
-        # poisoning we just removed. This step only adds a GH_PAT git credential so
-        # the proxy's `direct` fallback (and any genuinely-private repo added later,
-        # via a narrow GOPRIVATE) authenticates instead of hitting the anon rate
-        # limit. No-op when GH_PAT is absent.
-        #
-        # Robustness (learned the hard way in hanzoai/iam): a plain
-        # `git config --global` is defeated on shared self-hosted runners by
-        # (a) a stale insteadOf/credential left in ~/.gitconfig by a prior run and
-        # (b) actions/checkout's persisted http.<github>.extraheader (the repo-
-        # scoped GITHUB_TOKEN) in the checked-out repo's local config. So use a
-        # FRESH per-job GIT_CONFIG_GLOBAL + GIT_CONFIG_NOSYSTEM=1 and verify from
-        # a NEUTRAL dir (matches where go clones modules — GOMODCACHE).
-        if: env.HANZO_CI_TRUSTED == 'true'
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
-        run: |
-          if [ -z "${GH_PAT:-}" ]; then
-            echo "GH_PAT not set — public proxy+sumdb handles everything"; exit 0
-          fi
-          CFG="$RUNNER_TEMP/gitconfig-private"; : > "$CFG"
-          GIT_CONFIG_GLOBAL="$CFG" git config --global \
-            url."https://x-access-token:${GH_PAT}@github.com/".insteadOf "https://github.com/"
-          {
-            echo "GIT_CONFIG_GLOBAL=$CFG"
-            echo "GIT_CONFIG_NOSYSTEM=1"
-          } >> "$GITHUB_ENV"
-          ( cd "$RUNNER_TEMP" && GIT_CONFIG_GLOBAL="$CFG" GIT_CONFIG_NOSYSTEM=1 \
-              git ls-remote https://github.com/hanzoai/authz >/dev/null 2>&1 ) \
-            && echo "git auth OK" \
-            || echo "::warning::GH_PAT set but repo probe failed"
-
       - name: Fetch deploy credentials from KMS
         id: kms
         # Mints this org's IAM identity (HANZO_API_TOKEN), which the Go cache and
@@ -823,10 +784,12 @@ jobs:
           # This step is BEST-EFFORT: the automatic workflow token already
           # authorizes GHCR push, so a repo with no cross-org private deps and no
           # deploy can build without KMS. KMS provides only:
-          #   GITHUB_TOKEN — a cross-org PAT for cloning OTHER orgs' private Go
-          #     modules (luxfi/dex, luxfi/precompile from a zooai build), which the
-          #     repo-scoped automatic token cannot read. Handed to buildx as the
-          #     `gh_token` BuildKit secret.
+          #   GITHUB_TOKEN — the ghcr.io credential: a classic PAT with write:packages,
+          #     exported as GHCR_TOKEN. ghcr.io takes a classic PAT or the job's own
+          #     GITHUB_TOKEN and no GitHub App installation token, so this is the
+          #     one GitHub secret left in KMS, and it signs in to a registry only.
+          #     Git and the GitHub API never see it: the next step mints those from
+          #     the hanzo-platform App.
           #   KUBECONFIG  — the cluster credential the deploy step applies with.
           ORG="$(yq -r '.kms.org // ""' hanzo.yml 2>/dev/null || true)"
           : "${ORG:=${KMS_ORG:-}}"
@@ -835,9 +798,9 @@ jobs:
           # relation is a small, stable first-party fact; keeping it here (ONE
           # place) is why every repo gets the canonical KMS deploy-cred path with
           # zero per-repo config — before this, ORG was always empty and this whole
-          # step short-circuited, so no build ever fetched its private-dep git
-          # credential from KMS (it silently fell back to GH_PAT and failed on
-          # private hanzoai/cloud). hanzo.yml `kms.org` and KMS_ORG still override.
+          # step short-circuited, so no build ever fetched its credentials from KMS
+          # (the private-dep git credential silently never arrived and the build
+          # failed on private hanzoai/cloud). hanzo.yml `kms.org` and KMS_ORG still override.
           if [ -z "$ORG" ]; then
             # A brand owns MANY GitHub orgs and exactly one KMS tenant. hanzo-inc,
             # hanzo-apps, hanzo-js, hanzo-go, hanzo-rs, hanzo-cpp, hanzogui and
@@ -986,12 +949,12 @@ jobs:
             fi
             printf '%s' "$v"
           }
-          # Cross-org private Go module read token → buildx `gh_token` secret.
-          # GIT_TOKEN is not a reserved name, so it's safe in GITHUB_ENV.
-          GIT_TOKEN=$(get GITHUB_TOKEN)
-          if [ -n "$GIT_TOKEN" ]; then echo "::add-mask::$GIT_TOKEN"; echo "GIT_TOKEN=$GIT_TOKEN" >> "$GITHUB_ENV"; fi
-          # TWO HOSTS, TWO CREDENTIALS, TWO NAMES. GIT_TOKEN above is github.com's
-          # and this one is git.hanzo.ai's; each answers 401 at the other address,
+          # The ghcr.io credential. It is NOT a git credential and is not named like
+          # one: GIT_TOKEN is minted from the GitHub App by the step after this.
+          GHCR_TOKEN=$(get GITHUB_TOKEN)
+          if [ -n "$GHCR_TOKEN" ]; then echo "::add-mask::$GHCR_TOKEN"; echo "GHCR_TOKEN=$GHCR_TOKEN" >> "$GITHUB_ENV"; fi
+          # TWO HOSTS, TWO CREDENTIALS, TWO NAMES. GIT_TOKEN (the next step's) is
+          # github.com's and this one is git.hanzo.ai's; each answers 401 at the other address,
           # so a single name covering both is a credential handed to a host that
           # cannot read it.
           #
@@ -1026,7 +989,7 @@ jobs:
           # "registry" is how a package read starts failing because somebody
           # rotated an image-push credential.
           #
-          # Fetched like GIT_TOKEN, and empty is harmless: nothing is exported when
+          # Fetched like GHCR_TOKEN, and empty is harmless: nothing is exported when
           # KMS holds no such key, the buildx flag is guarded on the variable being
           # set, and a Dockerfile that never mounts the secret cannot notice.
           PACKAGE_TOKEN=$(get PACKAGE_TOKEN)
@@ -1152,75 +1115,116 @@ jobs:
             { echo "$bs<<__KMS_BUILDARG_EOF__"; echo "$v"; echo "__KMS_BUILDARG_EOF__"; } >> "$GITHUB_ENV"
           done
 
-      - name: Log in to GHCR (GH_PAT, else the KMS GitHub token, else the automatic token)
-        if: env.HANZO_CI_ROLE == 'publish' && (inputs.mode != 'delegate' && steps.plan.outputs.images != '0')
+      - name: GitHub installation token (hanzo-platform App)
+        # THE GITHUB CREDENTIAL FOR GIT AND THE API IS AN HOUR OLD. It is minted here,
+        # as the platform's GitHub App, from the key KMS seals at platform/ (bin/apptoken,
+        # which names the grant it needs), read with the IAM token the step above
+        # already holds. No personal access token is read for git or for the API.
+        #
+        # GIT_TOKEN is the installation of this repository's OWNER, contents:read,
+        # every repository that installation reaches. That is what the buildx
+        # `gh_token` secret carries and what the runner's git spends. An installation
+        # belongs to one account, so another owner's private repositories are asked
+        # for separately, by the step that reads them (the Go gate below mints one
+        # per owner go.mod names). It reads and writes repositories and the API;
+        # ghcr.io takes no installation token at all, which is why GHCR_TOKEN
+        # exists and is a different name.
+        #
+        # WARN, NEVER FAIL. A repository with no private dependency builds without
+        # this token, and a missing KMS grant or an owner the App is not installed on
+        # must not turn all of those red. The step that needs the token and lacks it
+        # fails there, naming what is missing.
+        if: env.HANZO_CI_TRUSTED == 'true'
         env:
-          GH_PAT: ${{ secrets.GH_PAT }}
-        # GH_PAT is zeekay's PAT (org owner: write on every package, no
-        # per-package grants to lose). It can push or CREATE any <org> package
-        # regardless of which repo the package is linked to. The per-job GITHUB_TOKEN only writes a package linked to THIS
-        # repo, so it 403s on a package created/linked elsewhere (e.g.
-        # ghcr.io/hanzoai/cms). Fall back to the automatic token when GH_PAT is
-        # absent (public forks like zooai/node that create their own repo-linked
-        # package on first push).
-        # This step runs AFTER the KMS step so GIT_TOKEN (deploy/GITHUB_TOKEN in
-        # KMS) can stand in for GH_PAT on a forge that holds no GH_PAT; GHCR takes
-        # a PAT under any username. A repo without images: pushes nothing and
-        # needs no login, so it skips the step instead of failing on a missing
-        # password.
+          KMS_ENDPOINT: ${{ vars.KMS_ENDPOINT || 'https://api.hanzo.ai' }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -uo pipefail
+          if [ -z "${HANZO_API_TOKEN:-}" ]; then
+            echo "::notice::no IAM token from the KMS step — no GitHub installation token, public modules only"; exit 0
+          fi
+          err="$RUNNER_TEMP/apptoken.err"
+          if tok=$(bash "$CI_HOME/bin/apptoken" "$OWNER" '{"contents":"read"}' 2>"$err") && [ -n "$tok" ]; then
+            echo "::add-mask::$tok"
+            echo "GIT_TOKEN=$tok" >> "$GITHUB_ENV"
+            echo "GitHub installation token for $OWNER (contents:read, one hour)"
+          else
+            sed 's/^::error::/::warning::/' "$err" >&2
+            echo "::warning::no GitHub installation token for $OWNER — private repositories will not resolve"
+          fi
+
+      - name: Log in to GHCR (the KMS ghcr token, else the automatic token)
+        if: env.HANZO_CI_ROLE == 'publish' && (inputs.mode != 'delegate' && steps.plan.outputs.images != '0')
+        # ghcr.io AUTHENTICATES A PERSONAL ACCESS TOKEN (CLASSIC) OR THE JOB'S OWN
+        # GITHUB_TOKEN, AND NOTHING ELSE: GitHub Docs, "Working with the Container
+        # registry" — "GitHub Packages only supports authentication using a personal
+        # access token (classic)" — and a GitHub App installation token is not on the
+        # list. universe's ghcr-renew job mints one with packages:write every 40
+        # minutes and probes the registry with it: 403, every run. So this is the one
+        # place a GitHub credential that is not an hour old survives, and it is
+        # named for what it is.
+        #
+        # GHCR_TOKEN (KMS GITHUB_TOKEN, a classic PAT with write:packages) can push
+        # or CREATE any <org> package, however the package is linked. The per-job
+        # GITHUB_TOKEN only writes a package linked to THIS repo (or one this repo
+        # was given Actions access to), so it 403s on a package created elsewhere
+        # (ghcr.io/hanzoai/cms) and on a package whose repo changed orgs. It is the
+        # last rung: public forks like zooai/node that create their own repo-linked
+        # package on first push land there. Off GitHub the per-job token is Hanzo
+        # Git's and signs in to nothing here, so GHCR_TOKEN, or the cluster
+        # credential the step after this reads, is the only way in.
+        #
+        # This step runs AFTER the KMS step so GHCR_TOKEN has arrived. A repo without
+        # images: pushes nothing and needs no login, so it skips the step instead of
+        # failing on a missing password.
         run: |
           if [ "$(yq -r '.images // [] | length' hanzo.yml 2>/dev/null || echo 0)" = "0" ]; then
             echo "::notice::no images: in hanzo.yml — nothing pushes to GHCR, no login"; exit 0
           fi
-          if [ -n "${GH_PAT:-}" ]; then
-            echo "$GH_PAT" | docker login ghcr.io -u zeekay --password-stdin; exit $?
-          fi
-          if [ -n "${GIT_TOKEN:-}" ]; then
-            echo "$GIT_TOKEN" | docker login ghcr.io -u token --password-stdin; exit $?
+          if [ -n "${GHCR_TOKEN:-}" ]; then
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u token --password-stdin; exit $?
           fi
           if [ "${{ github.server_url }}" != "https://github.com" ]; then
-            echo "::error::no GitHub credential here: set GH_PAT on this org or seal GITHUB_TOKEN under the kms.path in hanzo.yml"; exit 1
+            echo "::error::no ghcr.io credential here: seal GITHUB_TOKEN (a classic PAT with write:packages) under the kms.path in hanzo.yml. GitHub's registry takes no GitHub App token, and this run's own token is Hanzo Git's."; exit 1
           fi
-            # SAY IT. This branch is the one that cost a day.
-            #
-            # The automatic token writes ONLY a package linked to this repo. That
-            # covers most of them, so the fallback works almost always and the
-            # almost is invisible: nothing here mentions which credential won,
-            # and the consequence surfaces twenty stages later as
-            #
-            #   denied: permission_denied: The token provided does not match expected scopes
-            #
-            # which reads as a broken token, a broken registry, or a broken repo
-            # — anything but "we quietly signed in as somebody else at step 3".
-            # An UNLINKED package hits it every time, and a package comes unlinked
-            # for a reason nobody remembers: its repo changed orgs. hanzoai/id
-            # moved to hanzo-inc, and from then on every one of its builds ran
-            # green through sixteen Docker stages and died at the push.
-            #
-            # A warning, not a refusal: public forks legitimately land here and
-            # create their own repo-linked package on first push. The fix is that
-            # the log now names the door it went through.
-            echo "::warning::GH_PAT is empty — pushing with the automatic token, which can write ONLY a package linked to this repo. An unlinked package will fail at push with 'does not match expected scopes'."
-            # AND THE WARNING HAS TO BE ONE. The line above says this branch is not
-            # a refusal, but the login below exits non-zero when the registry says
-            # `denied: denied`, so the job died here — three steps in, before a
-            # single test, in a repo that publishes no image at all. Measured on
-            # zap-proto/zip, whose hanzo.yml declares `binaries:` and no `images:`:
-            # its gate could not run for want of a credential it never spends.
-            #
-            # A login is not the gate; the PUSH is, and it still refuses loudly with
-            # the scopes message this comment already predicts. Keep the GH_PAT
-            # branch strict — if the org owner's own credential is rejected, that is
-            # a real fault and not a fork landing on the fallback.
-            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin \
-              || echo "::warning::the automatic token could not sign in to ghcr.io. A build that pushes an image will fail at the push; one that publishes no image is unaffected."
+          # SAY IT. This branch is the one that cost a day.
+          #
+          # The automatic token writes ONLY a package linked to this repo. That
+          # covers most of them, so the fallback works almost always and the
+          # almost is invisible: nothing here mentions which credential won,
+          # and the consequence surfaces twenty stages later as
+          #
+          #   denied: permission_denied: The token provided does not match expected scopes
+          #
+          # which reads as a broken token, a broken registry, or a broken repo
+          # — anything but "we quietly signed in as somebody else at step 3".
+          # An UNLINKED package hits it every time, and a package comes unlinked
+          # for a reason nobody remembers: its repo changed orgs. hanzoai/id
+          # moved to hanzo-inc, and from then on every one of its builds ran
+          # green through sixteen Docker stages and died at the push.
+          #
+          # A warning, not a refusal: public forks legitimately land here and
+          # create their own repo-linked package on first push. The fix is that
+          # the log now names the door it went through.
+          echo "::warning::GHCR_TOKEN is empty — pushing with the automatic token, which can write ONLY a package linked to this repo (or one this repo has Actions access to). An unlinked package will fail at push with 'does not match expected scopes'."
+          # AND THE WARNING HAS TO BE ONE. The line above says this branch is not
+          # a refusal, but the login below exits non-zero when the registry says
+          # `denied: denied`, so the job died here — three steps in, before a
+          # single test, in a repo that publishes no image at all. Measured on
+          # zap-proto/zip, whose hanzo.yml declares `binaries:` and no `images:`:
+          # its gate could not run for want of a credential it never spends.
+          #
+          # A login is not the gate; the PUSH is, and it still refuses loudly with
+          # the scopes message this comment already predicts.
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin \
+            || echo "::warning::the automatic token could not sign in to ghcr.io. A build that pushes an image will fail at the push; one that publishes no image is unaffected."
 
 
       - name: GHCR push credential (KMS write:packages token)
         if: env.HANZO_CI_ROLE == 'publish' && (inputs.mode != 'delegate' && steps.plan.outputs.images != '0')
         env:
           KUBECONFIG: ${{ steps.kms.outputs.kubeconfig }}
-        # The per-job GITHUB_TOKEN — and a package-less GH_PAT — can only push a
+        # The per-job GITHUB_TOKEN can only push a
         # package LINKED to this repo, so they 403 on a package created/linked
         # elsewhere (ghcr.io/hanzoai/cms). Upgrade the ghcr login to the org's
         # ghcr push token from the cluster (buildx-ghcr-auth, admin write:packages,
@@ -1689,12 +1693,18 @@ jobs:
       - name: Authenticate runner git for private Go modules (test gates)
         # The Test step runs `go vet`/`go test` ON the runner (not in buildx), so
         # `go` fetches private hanzoai/* modules (GOPRIVATE → direct) through the
-        # runner's git, which needs a credential. The IMAGE build authenticates
-        # via the KMS `gh_token` inside buildx (GIT_TOKEN); the earlier GH_PAT
-        # git-auth step is a no-op for repos that rely on that KMS token (GH_PAT
-        # unset) — so `go vet` dies with `could not read Username for github.com`.
-        # Reuse the SAME token here for the runner's git (GIT_TOKEN, set by the
-        # KMS step above; GH_PAT fallback). No-op when neither is present.
+        # runner's git, which needs a credential, or it dies with `could not read
+        # Username for github.com`. The IMAGE build authenticates via the
+        # `gh_token` secret inside buildx (GIT_TOKEN). This step puts the same kind
+        # of credential on the runner's git: an installation token of the
+        # hanzo-platform App per OWNER, contents:read, one hour. No-op when none
+        # could be minted.
+        #
+        # PER OWNER, because an installation belongs to one account: the token for
+        # this repository's owner (GIT_TOKEN, minted two steps up) reads nothing of
+        # another owner's, so each other owner go.mod names is minted for here. Each
+        # token is bound to its own owner's address in the config below and spent
+        # nowhere else.
         #
         # AND OUR OWN MODULES RESOLVE FROM GIT.HANZO.AI. A module path is a NAME,
         # not an address: `github.com/<owner>/x` is what the package is called, and
@@ -1733,7 +1743,7 @@ jobs:
         # Choosing a host is not this step's concern. Authenticating one is.
         if: steps.gomod.outputs.file != '' && env.HANZO_CI_TRUSTED == 'true'
         env:
-          GH_PAT: ${{ secrets.GH_PAT }}
+          KMS_ENDPOINT: ${{ vars.KMS_ENDPOINT || 'https://api.hanzo.ai' }}
           OWNER: ${{ github.repository_owner }}
           GOMOD: ${{ steps.gomod.outputs.file }}
         run: |
@@ -1750,15 +1760,29 @@ jobs:
             seen="$seen $o"
           done
 
-          TOKEN="${GIT_TOKEN:-${GH_PAT:-}}"
-          if [ -n "$TOKEN" ]; then
-            GIT_CONFIG_GLOBAL="$CFG" git config --global \
-              url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
-            echo "github.com modules authenticated"
+          # One rewrite per owner, written to the job's own git config by file and
+          # not by `git config`, which would put each token in argv. apptoken's
+          # stderr is held back so a refusal reads as the warning it is here, and
+          # the mask it would have written is written below, on the token itself.
+          err="$RUNNER_TEMP/apptoken-go.err"
+          for o in $seen; do
+            tok=""
+            if [ "$o" = "$OWNER" ]; then
+              tok=${GIT_TOKEN:-}
+            elif grep -q "github[.]com/${o}/" "$GOMOD" 2>/dev/null; then
+              if tok=$(bash "$CI_HOME/bin/apptoken" "$o" '{"contents":"read"}' 2>"$err") && [ -n "$tok" ]; then
+                echo "::add-mask::$tok"
+              else
+                tok=""; sed 's/^::error::/::warning::/' "$err" >&2
+              fi
+            fi
+            [ -n "$tok" ] || continue
+            printf '[url "https://x-access-token:%s@github.com/%s/"]\n\tinsteadOf = https://github.com/%s/\n' "$tok" "$o" "$o" >> "$CFG"
+            echo "github.com/$o modules authenticated"
             wrote=1
-          fi
+          done
 
-          [ "$wrote" = 1 ] || { echo "no git credential — public modules only"; exit 0; }
+          [ "$wrote" = 1 ] || { echo "no GitHub installation token — public modules only (the step that mints it says why)"; exit 0; }
           { echo "GIT_CONFIG_GLOBAL=$CFG"; echo "GIT_CONFIG_NOSYSTEM=1"; } >> "$GITHUB_ENV"
 
           # WHERE to get a module and whether to BELIEVE it are different questions,
@@ -2226,9 +2250,8 @@ jobs:
           # The version tag is WRITTEN by this job, onto the manifest the door
           # pushed, so this lane needs the registry credential the buildx lane's
           # login steps hold — and the registry read bin/imgver takes its
-          # published floor from. Same ladder, same precedence: the org PAT, the
-          # KMS GitHub token (arrives via GITHUB_ENV), the automatic token.
-          GH_PAT: ${{ secrets.GH_PAT }}
+          # published floor from. Same ladder, same precedence: the KMS ghcr token
+          # (GHCR_TOKEN, arrives via GITHUB_ENV), the automatic token.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WAIT: ${{ inputs.wait }}
         run: |
@@ -2499,16 +2522,16 @@ jobs:
               export PATH="$HOME/.local/bin:$PATH"
             }
             # Writing a tag is a push, so the credential is required rather than
-            # attempted anonymously: GHCR takes the org PAT, else the KMS GitHub
-            # token, else the automatic one; every other owned host takes the
+            # attempted anonymously: GHCR takes the KMS ghcr token, else the
+            # automatic one; every other owned host takes the
             # registry credential KMS exported. One login per host, because two
             # images in one hanzo.yml may publish to two of them.
             for host in $(cut -d/ -f1 "$TMP/alias.txt" | sort -u); do
               case "$host" in
-                ghcr.io) ru=token; rp="${GH_PAT:-${GIT_TOKEN:-${GITHUB_TOKEN:-}}}" ;;
+                ghcr.io) ru=token; rp="${GHCR_TOKEN:-${GITHUB_TOKEN:-}}" ;;
                 *)       ru="${REGISTRY_USER:-}"; rp="${REGISTRY_PASSWORD:-}" ;;
               esac
-              [ -n "$rp" ] || refuse "no credential for $host, so the version tag cannot be written and this build would publish nothing the fleet can pin. GHCR reads GH_PAT, the KMS GitHub token or the automatic token; any other host reads the KMS registry credential."
+              [ -n "$rp" ] || refuse "no credential for $host, so the version tag cannot be written and this build would publish nothing the fleet can pin. GHCR reads the KMS ghcr token (GITHUB_TOKEN under kms.path) or the automatic token; any other host reads the KMS registry credential."
               echo "$rp" | crane auth login "$host" -u "$ru" --password-stdin
             done
             while read -r src dst plat; do
@@ -2561,8 +2584,6 @@ jobs:
         # Nothing here needs the toolchains above it and Deploy still follows it,
         # so the ordering costs nothing and a red gate produces no image at all.
         if: env.HANZO_CI_ROLE == 'publish' && (inputs.mode != 'delegate')
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           set -euo pipefail
           # Test-only callers (hanzo.yml without `images:` — e.g. a repo whose
@@ -2571,15 +2592,12 @@ jobs:
           if [ "$(yq -r '.images // [] | length' hanzo.yml 2>/dev/null || echo 0)" = "0" ]; then
             echo "::notice::no images: in hanzo.yml — test-only caller, skipping build"; exit 0
           fi
-          # Build-time private cross-org Go module read (the buildx `gh_token`
-          # secret): prefer the KMS-fetched GIT_TOKEN, else fall back to the org
-          # GH_PAT — the SAME BuildKit gh_token cloud's release.yml uses (proven
-          # working). Keeps image builds green when the KMS deploy-cred fetch is
-          # unavailable (a repo with a private cross-org dep like hanzoai/cloud
-          # otherwise fails `go mod tidy` with git exit 128 in the buildx stage).
-          # No-op for public-only builds when both are empty. Exported so the
-          # `--secret id=gh_token,env=GIT_TOKEN` below reads it from the env.
-          export GIT_TOKEN="${GIT_TOKEN:-${GH_PAT:-}}"
+          # Build-time private Go module read (the buildx `gh_token` secret) is
+          # GIT_TOKEN, the installation token the mint step put in the environment:
+          # this repository's owner, contents:read. A private module of ANOTHER owner
+          # is not reachable by it, and the Dockerfile that needs one takes that
+          # owner's token itself. No-op for public-only builds when GIT_TOKEN is
+          # empty: the flag below is guarded on it.
           SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
           IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo 1 || echo 0)
           REL="${{ github.ref_name }}"   # the git tag, verbatim: v1.26.19
@@ -2754,7 +2772,7 @@ jobs:
             PROV="$PROV --label org.opencontainers.image.revision=$GITHUB_SHA"
             PROV="$PROV --label org.opencontainers.image.version=${ver:-$REL}"
             PROV="$PROV --label org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY"
-            # GIT_TOKEN (from KMS, via GITHUB_ENV) is passed as the `gh_token`
+            # GIT_TOKEN (minted from the GitHub App, via GITHUB_ENV) is passed as the `gh_token`
             # BuildKit secret so Dockerfiles can clone private Go modules; omitted
             # cleanly when absent (public-only builds unaffected).
             docker buildx build --platform "$plats" $BUILD_ARGS $PROV ${GIT_TOKEN:+--secret id=gh_token,env=GIT_TOKEN} ${PACKAGE_TOKEN:+--secret id=package_token,env=PACKAGE_TOKEN} --push $TAGS -f "$df" "$ctx"
@@ -2813,7 +2831,7 @@ jobs:
         # publish is.
         if: env.HANZO_CI_ROLE == 'publish' && (steps.client.outputs.ran == '1' && steps.client.outputs.changed == '1' && github.event_name != 'pull_request')
         env:
-          GH_PAT: ${{ secrets.GH_PAT }}
+          KMS_ENDPOINT: ${{ vars.KMS_ENDPOINT || 'https://api.hanzo.ai' }}
         run: |
           set -euo pipefail
           git config user.name "Zach Kelling"; git config user.email z@zeekay.io
@@ -2932,13 +2950,15 @@ jobs:
           # host refuses the other's: github.com answers the IAM token with
           # `invalid credentials`. Never the per-job token: on github.com its push
           # starts no workflow, so the tag would publish nothing, and on Hanzo Git
-          # it is `User -2`, refused on a protected main.
+          # it is `User -2`, refused on a protected main. On github.com it is
+          # GIT_PUSH_TOKEN, the hanzo-platform App's contents:write on this
+          # repository alone, minted just above for this push and for no other.
           credential() {
             case "$1" in
               https://github.com/*)
-                [ -n "${GH_PAT:-}${GIT_TOKEN:-}" ] || {
-                  echo "::error::the cut pushes to $1 and needs a GitHub token: set GH_PAT on this org or seal GITHUB_TOKEN under the kms.path in hanzo.yml" >&2; return 1; }
-                printf '%s' "${GH_PAT:-$GIT_TOKEN}" ;;
+                [ -n "${GIT_PUSH_TOKEN:-}" ] || {
+                  echo "::error::the cut pushes to $1 and needs the hanzo-platform App's write token; GIT_PUSH_TOKEN is empty, so the mint above was refused" >&2; return 1; }
+                printf '%s' "$GIT_PUSH_TOKEN" ;;
               *)
                 [ -n "${HANZO_API_TOKEN:-}" ] || {
                   echo "::error::the cut pushes to $1 and needs the IAM identity; HANZO_API_TOKEN is empty, so the KMS login above did not mint one" >&2; return 1; }
@@ -2946,6 +2966,11 @@ jobs:
             esac
           }
           # credential END
+          case "$REMOTE" in
+            https://github.com/*)
+              GIT_PUSH_TOKEN=$(bash "$CI_HOME/bin/apptoken" "${GITHUB_REPOSITORY%%/*}" '{"contents":"write"}' "${GITHUB_REPOSITORY#*/}") || exit 1
+              echo "::add-mask::$GIT_PUSH_TOKEN" ;;
+          esac
           TOKEN=$(credential "$REMOTE")
           # CLEAR WHAT CHECKOUT WROTE FIRST. `http.extraHeader` is MULTI-VALUED
           # and url-matching does not displace a less specific entry: git sends
@@ -3011,7 +3036,7 @@ jobs:
         # artifact, so the bits and the digest that authorizes them are the same
         # release, and a host reads url+sum from ONE place.
         env:
-          GH_PAT: ${{ secrets.GH_PAT }}
+          KMS_ENDPOINT: ${{ vars.KMS_ENDPOINT || 'https://api.hanzo.ai' }}
           GH_AUTOMATIC: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
@@ -3151,14 +3176,22 @@ jobs:
           fi
           # A credential is only good on the host that issued it, so the ladder is
           # picked by the API the runner named — the same reading that chose
-          # UPLOADS above. GIT_TOKEN comes from KMS and GH_PAT is the org's; both
-          # are github.com's and answer 401 anywhere else, and GIT_TOKEN is always
-          # set for a KMS org, so a fixed order hands a GitHub secret to whichever
-          # Hanzo Git is listening. The per-job token is minted by Hanzo Git running
+          # UPLOADS above. The App's token is github.com's and answers 401 anywhere
+          # else, so it is minted only when the API is GitHub's and a fixed order
+          # never hands a GitHub credential to whichever Hanzo Git is listening. It
+          # is contents:write on THIS repository alone, because a release written by
+          # an App starts the workflows that watch for it and one written by the
+          # per-job token does not. The per-job token is minted by Hanzo Git running
           # the job and can write a release on its own repo, which is the whole
-          # of what this step needs.
+          # of what this step needs there, and the answer when the mint is refused.
           case "$API" in
-            https://api.github.com) TOKEN="${GIT_TOKEN:-${GH_PAT:-$GH_AUTOMATIC}}" ;;
+            https://api.github.com)
+              if TOKEN=$(bash "$CI_HOME/bin/apptoken" "${REPO%%/*}" '{"contents":"write"}' "${REPO#*/}"); then
+                echo "::add-mask::$TOKEN"
+              else
+                TOKEN="$GH_AUTOMATIC"
+                echo "::warning::no hanzo-platform App token for $REPO — the release is written with the per-job token, which starts no workflow that watches for it"
+              fi ;;
             *)                      TOKEN="$GH_AUTOMATIC" ;;
           esac
           [ -n "$TOKEN" ] || { echo "::error::no credential valid at $API — a release cannot be written"; exit 1; }
