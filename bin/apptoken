@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# apptoken — mint one GitHub installation token as the platform's GitHub App
+# (hanzo-platform), and print it.
+#
+#   apptoken <owner> <permissions-json> [repo ...]
+#   apptoken hanzoai '{"contents":"read"}'              # every repository the installation reaches
+#   apptoken hanzoai '{"contents":"write"}' cloud       # one repository, and nothing else
+#
+# STDOUT IS THE TOKEN AND NOTHING ELSE; every message and workflow command goes to
+# stderr, so $(apptoken ...) captures the token and only the token. The token is
+# registered with ::add-mask:: before it is printed. GitHub expires it in an hour:
+# nothing here is stored, rotated or cached.
+#
+# THE KEY IS READ FROM KMS, by bin/kms, with the credential the run already holds
+# (HANZO_API_TOKEN, else the run's own ID token, else KMS_CLIENT_ID/SECRET):
+# platform/GITHUB_APP_ID and platform/GITHUB_APP_PRIVATE_KEY at KMS_SECRET_ENV
+# (default prod), org taken from the credential. The identity needs a KMS grant
+# for exactly those two keys (universe charts/app/values/hanzo/kms-grants.yaml).
+#
+# ONE INSTALLATION PER OWNER. An installation token belongs to one account, so a
+# token for hanzoai reads nothing of luxfi's: a build that reads private modules
+# from two owners asks twice. The owner is resolved to its installation here
+# (GET /repos/<owner>/<repo>/installation when a repository is named, else
+# GET /orgs/<owner>/installation), signed with the App JWT.
+#
+# THE PERMISSIONS ARE REQUIRED, never defaulted. A mint that names none is a
+# token carrying EVERY permission the App holds (workflows, runners, packages),
+# and GitHub answers it without complaint. So an empty object is refused here, before
+# any network call, and a token never carries more than the caller wrote down.
+#
+# GHCR TAKES NONE OF THESE. ghcr.io authenticates a personal access token (classic)
+# or the job's GITHUB_TOKEN and no installation token (GitHub Docs, "Working with
+# the Container registry"); universe's ghcr-renew job probes it every 40 minutes
+# and reads 403. A token from here reads and writes repositories, the API and git,
+# and never signs in to a registry.
+set -euo pipefail
+umask 077
+
+usage="usage: apptoken <owner> <permissions-json> [repo ...]"
+[ $# -ge 2 ] || { echo "::error::apptoken: $usage" >&2; exit 2; }
+owner=$1
+perms=$2
+shift 2
+repos=("$@")
+
+name='^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$'
+[[ $owner =~ $name ]] || { echo "::error::apptoken: '$owner' is not an account name" >&2; exit 2; }
+for r in ${repos[@]+"${repos[@]}"}; do
+  [[ $r =~ $name ]] || { echo "::error::apptoken: '$r' is not a repository name" >&2; exit 2; }
+done
+jq -e 'type == "object" and length > 0 and all(.[]; . == "read" or . == "write" or . == "admin")' <<<"$perms" >/dev/null 2>&1 || {
+  echo "::error::apptoken: permissions must be a non-empty JSON object of read|write|admin, got '$perms'" >&2; exit 2; }
+
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+env=${KMS_SECRET_ENV:-prod}
+
+dir=$(mktemp -d)
+trap 'rm -rf "$dir"' EXIT
+
+app_id=$(bash "$here/kms" platform/GITHUB_APP_ID "$env") || exit 1
+app_key=$(bash "$here/kms" platform/GITHUB_APP_PRIVATE_KEY "$env") || exit 1
+# The key is never echoed, and is not masked: a mask written for a value of many
+# lines puts every line after the first in the log as plain text.
+# A key sealed on one line carries its newlines as the two characters \n.
+case $app_key in *$'\n'*) ;; *) app_key=$(printf '%s' "$app_key" | sed 's/\\n/\n/g') ;; esac
+printf '%s\n' "$app_key" >"$dir/key"
+unset app_key
+
+# RS256 over {iat, exp, iss}: back-dated a minute for clock skew, nine minutes of
+# life, under GitHub's ten-minute ceiling (GitHub Docs, "Generating a JSON Web
+# Token (JWT) for a GitHub App").
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+now=$(date +%s)
+claims="$(printf '{"alg":"RS256","typ":"JWT"}' | b64url).$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' $((now - 60)) $((now + 540)) "$app_id" | b64url)"
+sig=$(printf '%s' "$claims" | openssl dgst -sha256 -sign "$dir/key" 2>/dev/null | b64url) || sig=""
+rm -f "$dir/key"
+[ -n "$sig" ] || { echo "::error::apptoken: platform/GITHUB_APP_PRIVATE_KEY did not sign — it is not an RSA private key" >&2; exit 1; }
+echo "::add-mask::$claims.$sig" >&2
+printf 'Authorization: Bearer %s\n' "$claims.$sig" >"$dir/app"
+unset claims sig
+
+# ask <url> [curl args...] — prints the HTTP status; the body is $dir/body. 000,
+# 429 and 5xx are no answer and are asked again, three tries in all. Any other
+# status is GitHub answering, and the caller stands on it.
+ask() {
+  local url=$1 code attempt
+  shift
+  for attempt in 1 2 3; do
+    : >"$dir/body"
+    code=$(curl -sS -m 30 -o "$dir/body" -w '%{http_code}' "$@" "$url" || true)
+    code=${code:-000}
+    case $code in
+      000|429|5*) ;;
+      *) break ;;
+    esac
+    if [ "$attempt" -lt 3 ]; then
+      echo "${url%%\?*} answered $code, which is no answer; asking again ($attempt of 3)" >&2
+      sleep $((attempt * 3))
+    fi
+  done
+  printf '%s' "$code"
+}
+# One line of GitHub's own words, for an error. Called only on replies that did
+# not yield a token.
+said() { head -c 200 "$dir/body" 2>/dev/null | tr '\r\n' '  '; }
+
+github=(-H @"$dir/app" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28')
+
+if [ "${#repos[@]}" -gt 0 ]; then
+  where="repos/$owner/${repos[0]}/installation"
+else
+  where="orgs/$owner/installation"
+fi
+code=$(ask "https://api.github.com/$where" "${github[@]}")
+installation=$(jq -r '.id // empty' <"$dir/body" 2>/dev/null || true)
+if [ -z "$installation" ]; then
+  case $code in
+    404) echo "::error::apptoken: the platform's GitHub App ($app_id) is not installed on $owner${repos[0]:+, or cannot see $owner/${repos[0]}}" >&2 ;;
+    *) echo "::error::apptoken: GitHub answered $code when the App ($app_id) asked for its installation on $owner — $(said)" >&2 ;;
+  esac
+  exit 1
+fi
+
+jq -nc --argjson perms "$perms" --args '{permissions: $perms} + (if ($ARGS.positional | length) > 0 then {repositories: $ARGS.positional} else {} end)' \
+  ${repos[@]+"${repos[@]}"} >"$dir/mint"
+code=$(ask "https://api.github.com/app/installations/$installation/access_tokens" \
+  -X POST "${github[@]}" -H 'Content-Type: application/json' --data-binary @"$dir/mint")
+token=$(jq -r '.token // empty' <"$dir/body" 2>/dev/null || true)
+if [ -z "$token" ]; then
+  echo "::error::apptoken: GitHub minted no token for $owner from installation $installation ($code) — $(said)" >&2
+  exit 1
+fi
+echo "::add-mask::$token" >&2
+printf '%s\n' "$token"

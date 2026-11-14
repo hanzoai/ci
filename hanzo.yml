@@ -373,10 +373,19 @@ test:
     run: bash bin/cut_test.sh
   - name: credential
     # The token the cut pushes with, chosen by host. Its suite lifts `credential`
-    # out of build.yml and runs that text: github.com gets a GitHub token that
-    # starts the tag's publish, the forge gets the org's IAM token, and neither
-    # host is handed the other's. Offline.
+    # out of build.yml and runs that text: github.com gets the hanzo-platform
+    # App's write token, which starts the tag's publish, the forge gets the org's
+    # IAM token, and neither host is handed the other's. Offline.
     run: bash bin/credential_test.sh
+  - name: apptoken
+    # bin/apptoken mints the one GitHub credential git and the API see: an
+    # installation token of the hanzo-platform App, an hour old, for the permissions
+    # and repositories the caller wrote down. Its suite signs a real JWT with a
+    # throwaway RSA key and verifies it with the public half, and holds the cases
+    # that matter: an empty permission object is refused before any request (GitHub
+    # would answer it with every permission the App holds), only the token reaches
+    # stdout, the key reaches no output, and each refusal names itself. Offline.
+    run: bash bin/apptoken_test.sh
   - name: get
     # How the tools arrive at the ref a caller pinned. Its suite lifts `get` out
     # of build.yml and runs that text against a local repository: a branch and a

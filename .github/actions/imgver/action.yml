@@ -8,7 +8,7 @@ description: The semver an image build publishes. We don't ship shas.
 #   - id: ver
 #     uses: hanzoai/ci/.github/actions/imgver@v1
 #     with: { repo: ghcr.io/hanzoai/<name> }
-#     env:  { GH_PAT: '${{ secrets.GH_PAT }}' }
+#     env:  { GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}' }
 #   ...
 #   tags: ghcr.io/hanzoai/<name>:${{ steps.ver.outputs.version }}
 #
