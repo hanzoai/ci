@@ -54,7 +54,7 @@ import (
 // handler is safe to serve immediately — both caches answer "no snapshot yet"
 // rather than blocking, so a mount never waits on an upstream fetch.
 func Serve(ctx context.Context, logger *slog.Logger, cfg config) http.Handler {
-	src := &gitSource{base: cfg.gitBase, token: cfg.gitToken, http: &http.Client{Timeout: 20 * time.Second}}
+	src := &gitSource{base: cfg.gitBase, who: cfg.who, http: &http.Client{Timeout: 20 * time.Second}}
 	cache := &runCache{}
 	board := &fleetCache{}
 
@@ -217,7 +217,7 @@ func routes(cfg config, cache *runCache, board *fleetCache) *http.ServeMux {
 type config struct {
 	listen     string
 	gitBase    string
-	gitToken   string
+	who        *identity
 	refresh    time.Duration
 	staleAfter time.Duration
 	scanRepos  int
@@ -236,7 +236,7 @@ func loadConfig() (config, error) {
 	c := config{
 		listen:    env("CI_LISTEN", ":8080"),
 		gitBase:   strings.TrimRight(env("CI_GIT_BASE", "https://git.hanzo.ai"), "/"),
-		gitToken:  os.Getenv("CI_GIT_TOKEN"),
+		who:       newIdentity(),
 		scanRepos: envInt("CI_SCAN_REPOS", 60),
 		runsPer:   envInt("CI_RUNS_PER_REPO", 8),
 		universe:  env("CI_UNIVERSE", "hanzo/universe"),
@@ -247,8 +247,8 @@ func loadConfig() (config, error) {
 	// definition of stale is "we have missed several refreshes", and deriving
 	// it means the two can never be configured into contradiction.
 	c.staleAfter = 4 * c.refresh
-	if c.gitToken == "" {
-		return c, errors.New("CI_GIT_TOKEN required (Hanzo Git API token)")
+	if err := c.who.mounted(); err != nil {
+		return c, err
 	}
 	return c, nil
 }
@@ -356,9 +356,9 @@ func (c *runCache) put(s snapshot) {
 // ───────────────────────────── source ─────────────────────────────
 
 type gitSource struct {
-	base  string
-	token string
-	http  *http.Client
+	base string
+	who  *identity
+	http *http.Client
 
 	// Answers that outlive a refresh. The declared fleet is re-read only when the
 	// universe head commit moves, and which repo publishes an image is settled
@@ -370,12 +370,24 @@ type gitSource struct {
 	located map[string]place
 }
 
+// authorize signs a request as this workload.
+func (g *gitSource) authorize(ctx context.Context, req *http.Request) error {
+	bearer, err := g.who.token(ctx)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	return nil
+}
+
 func (g *gitSource) getJSON(ctx context.Context, path string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, g.base+path, nil)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "token "+g.token)
+	if err := g.authorize(ctx, req); err != nil {
+		return err
+	}
 	req.Header.Set("Accept", "application/json")
 	resp, err := g.http.Do(req)
 	if err != nil {
@@ -394,7 +406,9 @@ func (g *gitSource) getText(ctx context.Context, path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Authorization", "token "+g.token)
+	if err := g.authorize(ctx, req); err != nil {
+		return "", err
+	}
 	resp, err := g.http.Do(req)
 	if err != nil {
 		return "", err
