@@ -16,7 +16,7 @@
 #   jobs:
 #     release:
 #       if: github.ref_type == 'tag'
-#       uses: hanzoai/ci/.github/workflows/plugin.yml@v2
+#       uses: hanzoai/ci/.github/workflows/plugin.yml@main   # a tag, once one carries this file
 #       secrets: inherit
 #
 # ONE BUILD MODE. CGO_ENABLED=0, because a published plugin runs on a box nobody
