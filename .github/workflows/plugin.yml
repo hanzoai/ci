@@ -1,0 +1,204 @@
+# The release of one plugin, from the repository that owns it.
+#
+# A plugin is an app that ships as its own binary. A host (hanzo-inc/cloud) runs it
+# by version and digest: internal/pin/plugins.lock names the release and the
+# sha256 of each platform's binary, and the host runs nothing that is not named
+# there. This workflow is how a tag becomes a stanza in that file:
+#
+#   v* tag -> build <name>-linux-{amd64,arm64} in the cluster (CGO_ENABLED=0)
+#          -> publish them and their binaries.json to the plugin store
+#          -> `pin bump` rewrites the plugin's stanza in the host's lock
+#          -> the bump is committed to the host's main, and its own gate and
+#             release decide what ships
+#
+# A plugin repo calls it and nothing else:
+#
+#   jobs:
+#     release:
+#       if: github.ref_type == 'tag'
+#       uses: hanzoai/ci/.github/workflows/plugin.yml@v2
+#       secrets: inherit
+#
+# ONE BUILD MODE. CGO_ENABLED=0, because a published plugin runs on a box nobody
+# here built and a cgo binary would demand a matching libsqlite3 on it. The image
+# a host ships with carries cgo builds of the same source; this is the lane for a
+# host that fetches.
+#
+# ONE PUBLISHER. POST /v1/build with a `binaries:` recipe launches the artifact Job
+# in the cluster; the only container that ever holds the object-store credential is
+# its publisher, so this job holds none and names no bucket. No laptop and no
+# GitHub builder is involved.
+#
+# ONE IDENTITY. A plugin repository is a protected name at the build door
+# (cloud apps/platform/protected.go) once the host's lock pins it, and the door
+# admits only the release identity: the IAM application admin-release, in the
+# reserved admin org. Its client secret is a forge secret, piped into the grant and
+# never an argument or a variable. An org admin's credential is refused.
+#
+# Secrets (all required):
+#   RELEASE_PUBLISH_CLIENT_ID / RELEASE_PUBLISH_CLIENT_SECRET  the admin-release client
+#   HOST_TOKEN   write access to the host's main on GitHub (the platform GitHub App's token)
+#   FORGE_TOKEN  the forge API token that asks git.hanzo.ai to sync the host's mirror,
+#                because the host's pipeline runs on the forge
+name: Plugin release
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: "The plugin's name, an app in the host's manifest. Defaults to the repository's name."
+        type: string
+        default: ''
+      main:
+        description: The Go main package that is the plugin, repo-relative.
+        type: string
+        default: '.'
+      host:
+        description: The repository whose plugins.lock this release pins into.
+        type: string
+        default: hanzo-inc/cloud
+      api:
+        description: The build door.
+        type: string
+        default: https://api.hanzo.ai
+    secrets:
+      RELEASE_PUBLISH_CLIENT_ID:
+        required: true
+      RELEASE_PUBLISH_CLIENT_SECRET:
+        required: true
+      HOST_TOKEN:
+        required: true
+      FORGE_TOKEN:
+        required: true
+jobs:
+  release:
+    runs-on: [linux-amd64]
+    timeout-minutes: 90
+    steps:
+      - name: Refuse anything but a semver tag
+        run: |
+          set -euo pipefail
+          for tool in curl jq git go base64; do command -v "$tool" >/dev/null || { echo "::error::$tool is not on this runner"; exit 1; }; done
+          [ "${{ github.ref_type }}" = tag ] || { echo "::error::a plugin is released by a tag"; exit 1; }
+          printf %s "${{ github.ref_name }}" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
+            || { echo "::error::${{ github.ref_name }} is not a vX.Y.Z tag; plugins.lock pins nothing else"; exit 1; }
+
+      - name: Build and publish in the cluster
+        id: publish
+        env:
+          RELEASE_CLIENT_ID: ${{ secrets.RELEASE_PUBLISH_CLIENT_ID }}
+          RELEASE_CLIENT_SECRET: ${{ secrets.RELEASE_PUBLISH_CLIENT_SECRET }}
+          API: ${{ inputs.api }}
+          NAME_IN: ${{ inputs.name }}
+          MAIN: ${{ inputs.main }}
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          SHA="${{ github.sha }}"
+          NAME="${NAME_IN:-${GITHUB_REPOSITORY##*/}}"
+          REPO="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY}.git"
+          TMP="${RUNNER_TEMP:-/tmp}"
+
+          # The release identity's token. The secret is piped into the grant, never
+          # an argument or a variable, so it is not in /proc/<pid>/cmdline on a shared
+          # runner. Asked again before it is refused: a 429 or 502 is a queue.
+          mint() {
+            printf %s "$RELEASE_CLIENT_SECRET" \
+              | jq -Rsj --arg id "$RELEASE_CLIENT_ID" '"user = \"\($id):\(rtrimstr("\n"))\"\n"' \
+              | curl -sS -m 30 --config - "${API}/v1/iam/oauth/token" -d grant_type=client_credentials \
+              | jq -r '.access_token // empty'
+          }
+          TOKEN=""
+          for attempt in 1 2 3; do
+            TOKEN=$(mint || true)
+            [ -n "$TOKEN" ] && break
+            echo "iam minted no token for the release client; asking again (${attempt} of 3)"
+            sleep $(( attempt * 3 ))
+          done
+          [ -n "$TOKEN" ] || { echo "::error::IAM at ${API} minted no token for ${RELEASE_CLIENT_ID}"; exit 1; }
+          echo "::add-mask::${TOKEN}"
+          auth() { printf 'Authorization: Bearer %s\n' "$TOKEN" | curl -sS -m 60 -H @- "$@"; }
+
+          # CGO_ENABLED=0 and -trimpath are the publisher's recipe interpreter, not
+          # settings here: the artifact is a function of the source.
+          body=$(jq -nc --arg repo "$REPO" --arg sha "$SHA" --arg tag "$TAG" --arg name "$NAME" --arg main "$MAIN" \
+            '{repo:$repo, sha:$sha, tag:$tag, binaries:[{name:$name, main:$main, platforms:["linux/amd64","linux/arm64"]}]}')
+
+          # A 429 is the per-org build cap: a queue, not a refusal. A 5xx is the
+          # door restarting.
+          deadline=$(( $(date +%s) + 1800 ))
+          while :; do
+            code=$(auth -o "$TMP/enq.json" -w '%{http_code}' -X POST "${API}/v1/build" \
+              -H 'Content-Type: application/json' -d "$body" || echo 000)
+            case "$code" in
+              429|000|502|503|504) [ "$(date +%s)" -lt "$deadline" ] || break; echo "build door answered ${code}; waiting"; sleep 20 ;;
+              *) break ;;
+            esac
+          done
+          job=$(jq -r '.buildJobId // empty' "$TMP/enq.json" 2>/dev/null || true)
+          [ -n "$job" ] || { echo "::error::/v1/build answered ${code}: $(head -c 400 "$TMP/enq.json")"; exit 1; }
+          echo "queued ${job}: ${GITHUB_REPOSITORY} ${TAG} (${NAME})"
+
+          status=""
+          for i in $(seq 1 240); do
+            status=$(auth "${API}/v1/build/${job}" | jq -r '.status // empty' || true)
+            case "$status" in
+              succeeded) break ;;
+              failed) echo "::error::${job} failed: $(auth "${API}/v1/build/${job}" | jq -r '.reason // "no reason given"' | head -c 2000)"; exit 1 ;;
+            esac
+            sleep 15
+          done
+          [ "$status" = succeeded ] || { echo "::error::${job} did not finish within an hour"; exit 1; }
+
+          # What the publisher wrote, from its own output: the last line of its log
+          # is the binaries.json it read back from the store and checked against the
+          # digests it computed. Nothing is recomputed here.
+          auth "${API}/v1/build/${job}/logs" | jq -r '.log' | grep -E '^\{"repo":' | tail -1 > "$TMP/binaries.json"
+          jq -e --arg tag "$TAG" '.tag == $tag and (.binaries | length) > 0' "$TMP/binaries.json" >/dev/null \
+            || { echo "::error::the publisher's log carried no binaries.json for ${TAG}"; exit 1; }
+          jq -c '.binaries[] | {name, os, arch, sha256}' "$TMP/binaries.json"
+          echo "index=$TMP/binaries.json" >> "$GITHUB_OUTPUT"
+
+      - name: Pin it in the host's lock
+        env:
+          HOST: ${{ inputs.host }}
+          HOST_TOKEN: ${{ secrets.HOST_TOKEN }}
+          FORGE_TOKEN: ${{ secrets.FORGE_TOKEN }}
+          INDEX: ${{ steps.publish.outputs.index }}
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          W="${RUNNER_TEMP:-/tmp}/host"
+          rm -rf "$W"
+          # The credential rides in git's environment, never in the URL or an
+          # argument: /proc/<pid>/cmdline is readable by every user on this runner.
+          B64=$(printf 'x-access-token:%s' "$HOST_TOKEN" | base64 | tr -d '\n')
+          gh() {
+            GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0= \
+            GIT_CONFIG_KEY_1=http.extraheader GIT_CONFIG_VALUE_1="Authorization: Basic ${B64}" git "$@"
+          }
+          gh clone --depth 50 "https://github.com/${HOST}.git" "$W"
+          cd "$W"
+          # pin is the host's own writer for its own lock: one parser, one format.
+          GOWORK=off go run ./cmd/pin bump "$INDEX"
+          git diff --quiet internal/pin/plugins.lock && { echo "plugins.lock already pins ${GITHUB_REPOSITORY} ${TAG}"; exit 0; }
+          git add internal/pin/plugins.lock
+          git -c user.name="Hanzo Release" -c user.email="release@hanzo.ai" commit -q \
+            -m "pin: ${GITHUB_REPOSITORY} ${TAG}" \
+            -m "Released from ${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY} at ${GITHUB_SHA}. The binaries and their sha256 were published by the build door and read back from the store." \
+            -m "Testing: go test ./internal/pin ./manifest runs in this repo's gate on the commit." \
+            -m "Risk: the host runs this release for ${GITHUB_REPOSITORY##*/} once it ships; every digest is verified before anything is run." \
+            -m "How to revert: git revert this commit."
+          # Main moves under a bump; rebase and ask again rather than force.
+          for attempt in 1 2 3 4 5; do
+            if gh push origin HEAD:main; then break; fi
+            [ "$attempt" -lt 5 ] || { echo "::error::could not push the lock to ${HOST} main"; exit 1; }
+            gh fetch -q origin main
+            git -c user.name="Hanzo Release" -c user.email="release@hanzo.ai" rebase origin/main
+            sleep $(( attempt * 2 ))
+          done
+          # The host's pipeline runs on the forge, which mirrors GitHub; ask it to
+          # sync now instead of waiting for its poll.
+          code=$(printf 'Authorization: Bearer %s\n' "$FORGE_TOKEN" \
+            | curl -sS -m 60 -o /dev/null -w '%{http_code}' -H @- -X POST "https://git.hanzo.ai/v1/repos/${HOST}/mirror-sync" || echo 000)
+          echo "forge mirror-sync answered ${code}"
+          [ "${code#2}" != "$code" ] || echo "::warning::the forge did not take the sync (${code}); its poll will"
