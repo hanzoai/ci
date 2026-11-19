@@ -224,7 +224,7 @@ RUN chown -R runner:runner /opt/actions-runner
 # enough: act fetches refs/*, so it then downloads every pull request's
 # objects, 10 to 40 s each. hanzo.yml's `runner-preseeds` holds this list to
 # build.yml's steps.
-ARG ACTIONS="actions/checkout@v4 actions/setup-go@v5 actions/setup-node@v4 oven-sh/setup-bun@v2 dtolnay/rust-toolchain@stable"
+ARG ACTIONS="actions/checkout@v4 actions/setup-go@v5 actions/setup-node@v4 dart-lang/setup-dart@v1 oven-sh/setup-bun@v2 dtolnay/rust-toolchain@stable swift-actions/setup-swift@v2"
 RUN set -eux; \
     for a in $ACTIONS; do \
       d="/home/runner/.cache/act/$(printf %s "$a" | sha256sum | cut -c1-64)"; \
