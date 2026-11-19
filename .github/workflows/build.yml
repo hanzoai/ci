@@ -3053,13 +3053,38 @@ jobs:
           # ordinary push, and `HEAD:` with nothing after the colon is not a
           # refspec, so the default is spelled out rather than assumed.
           BRANCH="${GITHUB_REF_NAME:-}"; [ -n "$BRANCH" ] || BRANCH=main
+          REFS=("HEAD:$BRANCH")
           if [ -n "$NEXT" ]; then
             git tag "v${NEXT}"
-            git push "$REMOTE" "HEAD:$BRANCH" "refs/tags/v${NEXT}"
+            REFS+=("refs/tags/v${NEXT}")
+          fi
+
+          PUSH_ERR=$(mktemp); trap 'rm -f "$PUSH_ERR"' EXIT
+          if ! git push "$REMOTE" "${REFS[@]}" 2>"$PUSH_ERR"; then
+            cat "$PUSH_ERR" >&2
+            # A pull mirror on Hanzo Git refuses all pushes with `mirror repository is
+            # read-only`. When that happens, push to its upstream github.com repo with
+            # the GitHub credential and trigger a Forge mirror-sync so Forge catches up.
+            if [[ "$REMOTE" != https://github.com/* ]] && grep -qi 'mirror repository is read-only' "$PUSH_ERR"; then
+              GH_REMOTE="https://github.com/${{ github.repository }}"
+              echo "::notice::$REMOTE is a read-only mirror; pushing projection to upstream $GH_REMOTE"
+              GH_TOKEN=$(credential "$GH_REMOTE")
+              git config --local --name-only --get-regexp '^http\..*extraheader$' 2>/dev/null \
+                | while read -r k; do git config --local --unset-all "$k"; done
+              git config --local http.extraheader "Authorization: Basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+              git push "$GH_REMOTE" "${REFS[@]}"
+              if [ -n "${HANZO_API_TOKEN:-}" ]; then
+                curl -sS -X POST -H "Authorization: token ${HANZO_API_TOKEN}" \
+                  "${GITHUB_SERVER_URL%/}/api/v1/repos/${{ github.repository }}/mirror-sync" >/dev/null 2>&1 || true
+              fi
+            else
+              exit 1
+            fi
+          fi
+          if [ -n "$NEXT" ]; then
             echo "cut v${NEXT} — the repo's tag lane publishes it"
             echo "### client v${NEXT} from ${SPEC_REPO}@${SPEC_REF}" >> "$GITHUB_STEP_SUMMARY"
           else
-            git push "$REMOTE" "HEAD:$BRANCH"
             echo "::warning::projection committed but NOT cut — hanzo.yml declares no client.version:, so this repo publishes when a human tags it"
             echo "### projection from ${SPEC_REPO}@${SPEC_REF} — not cut (no client.version:)" >> "$GITHUB_STEP_SUMMARY"
           fi
