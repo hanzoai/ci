@@ -371,6 +371,14 @@ test:
     # that text. The case it holds: a release that hands its number down gets it
     # in the file too, or the repo's publisher sees nothing new.
     run: bash bin/cut_test.sh
+  - name: onlypkg
+    # A tag naming one package publishes that package alone, so the client check
+    # does not decide it. Its suite lifts `onlypkg` out of build.yml and runs
+    # that text, then runs the whole client step over a drifted projection:
+    # `hanzo-tools-fs-v0.3.5` passes without the generator or the network, while
+    # a `v*` tag, the client's own `hanzoai-v*` tag and a branch push still
+    # refuse. Offline.
+    run: bash bin/onlypkg_test.sh
   - name: credential
     # The token the cut pushes with, chosen by host. Its suite lifts `credential`
     # out of build.yml and runs that text: github.com gets a GitHub token that
