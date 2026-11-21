@@ -1598,6 +1598,10 @@ jobs:
           SPEC_REF: ${{ inputs.spec-ref }}
           SPEC_VERSION_IN: ${{ inputs.spec-version }}
           SPEC_SHA256: ${{ inputs.spec-sha256 }}
+          # The same two values the PyPI lane reads the tag from, so the two
+          # steps cannot disagree about which tag this run is.
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           yq -e '.client' hanzo.yml >/dev/null 2>&1 || { echo "no client: lane"; echo "ran=0" >> "$GITHUB_OUTPUT"; exit 0; }
@@ -1640,6 +1644,64 @@ jobs:
             REF="$LOCKED"
           fi
           [ -n "$REF" ] || { echo "no payload and no .spec-lock — this tree names no document"; echo "ran=0" >> "$GITHUB_OUTPUT"; exit 0; }
+
+          # A TAG THAT NAMES ONE PACKAGE DOES NOT SHIP THE CLIENT, so the check
+          # of the client does not decide it. `hanzo-tools-fs-v0.3.5` publishes
+          # that one distribution, built from its own directory (the PyPI lane
+          # below selects it by the same reading of the tag). Refusing it because
+          # pkg/hanzoai/cloud trails production refused a release that does not
+          # contain pkg/hanzoai/cloud, and kept hanzo-tools-fs 0.3.5 off PyPI
+          # behind a projection it does not carry (hanzo-inc/cloud#758).
+          #
+          # NARROW ON PURPOSE. Only a tag, only one naming a project `pypi:`
+          # declares, and only when that project is not the client's. The
+          # client's project is the directory of the file `client.version:`
+          # names, or the repository root when it names none, so python-sdk's
+          # `hanzoai-v8.5.1` is still checked. A `v*` tag, a branch push, a
+          # dispatch (a move, not a check) and a tag that selects nothing all
+          # print nothing and keep the check. The `test:` gates run on the tag
+          # either way.
+          #
+          # bin/onlypkg_test.sh lifts this function out of this file and runs it,
+          # then runs this whole step over a drifted projection.
+          # onlypkg BEGIN
+          # onlypkg <ref type> <ref name>: print the pypi: directory a tag naming
+          # one package publishes, when that package is not the client's. Print
+          # nothing for every other run, which keeps the check.
+          onlypkg() {
+            local type=$1 tag=$2 want vf client d n out=""
+            [ "$type" = tag ] && [ -n "$tag" ] || return 0
+            # The PyPI lane's reading of a tag, character for character.
+            case "$tag" in v[0-9]*) return 0 ;; esac
+            want=$(printf '%s' "$tag" | sed -E 's/[-@]v?[0-9].*$//')
+            # A tag with no version on its end is not a release of anything.
+            [ -n "$want" ] && [ "$want" != "$tag" ] || return 0
+            vf=$(yq -r '.client.version // ""' hanzo.yml 2>/dev/null || true)
+            case "$vf" in *:*) client=$(dirname "${vf%%:*}") ;; *) client=. ;; esac
+            client=$(cd "$client" 2>/dev/null && pwd -P) || return 0
+            # Unquoted on purpose, as in the PyPI lane: the globs expand here.
+            for d in $(yq -r '.pypi // [] | .[]' hanzo.yml 2>/dev/null || true); do
+              [ -f "$d/pyproject.toml" ] || continue
+              n=$(yq -r '.project.name // ""' -p toml "$d/pyproject.toml" 2>/dev/null || true)
+              [ "$n" = "$want" ] || continue
+              # Any project the tag selects being the client's keeps the check.
+              [ "$(cd "$d" && pwd -P)" != "$client" ] || return 0
+              out="${out:+$out }$d"
+            done
+            [ -z "$out" ] || printf '%s\n' "$out"
+            return 0
+          }
+          # onlypkg END
+          if [ "$MODE" = check ]; then
+            ONLY=$(onlypkg "${REF_TYPE:-}" "${REF_NAME:-}")
+            if [ -n "$ONLY" ]; then
+              echo "::notice::tag ${REF_NAME} publishes ${ONLY} alone, which does not carry the generated client: client check skipped. A v* tag, a branch push and a dispatch still make it."
+              echo "### client check skipped: tag ${REF_NAME} publishes ${ONLY} only" >> "$GITHUB_STEP_SUMMARY"
+              echo "ran=0" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
           WANT=$(printf '%s' "$PAYLOAD" | jq -r '.spec_sha256 // ""')
           [ -n "$WANT" ] || WANT="${SPEC_SHA256:-}"
           VERSION=$(printf '%s' "$PAYLOAD" | jq -r '.version // ""')
@@ -3342,6 +3404,10 @@ jobs:
         #   name-v1.2.3   the one whose [project] name is `name`. The separator may
         #   name-1.2.3    be `-` or `@` and the `v` is optional, because all three
         #   name@v1.2.3   shapes are already in this fleet's tags.
+        #
+        # The second shape is also the only one the client step lets past a
+        # drifted client, and only when `name` is not the client's own project:
+        # `onlypkg` there reads the tag with the same expression as below.
         #
         # THE NAME IS READ FROM THE pyproject, not from the directory, because the
         # name is what an installer resolves. A directory that happens to match is
