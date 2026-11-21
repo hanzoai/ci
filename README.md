@@ -2,6 +2,8 @@
 
 # hanzoai/ci
 
+[![Open in Hanzo](https://hanzo.app/badges/open-in-hanzo.svg)](https://hanzo.app/dev/open?repo=github.com/hanzoai/ci&ref=main&action=open) [![Edit with Hanzo](https://hanzo.app/badges/edit-with-hanzo.svg)](https://hanzo.app/dev/open?repo=github.com/hanzoai/ci&ref=main&action=edit) [![Deploy with Hanzo](https://hanzo.app/badges/deploy-with-hanzo.svg)](https://hanzo.app/dev/open?repo=github.com/hanzoai/ci&ref=main&action=deploy)
+
 One reusable CI/CD workflow for every Hanzo / Lux / Zoo repo. Build + test +
 publish, driven entirely by the repo's root **`hanzo.yml`**. No per-repo build
 logic — repos import this and declare their specifics in `hanzo.yml`.
