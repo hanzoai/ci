@@ -1645,25 +1645,9 @@ jobs:
           fi
           [ -n "$REF" ] || { echo "no payload and no .spec-lock — this tree names no document"; echo "ran=0" >> "$GITHUB_OUTPUT"; exit 0; }
 
-          # A TAG THAT NAMES ONE PACKAGE DOES NOT SHIP THE CLIENT, so the check
-          # of the client does not decide it. `hanzo-tools-fs-v0.3.5` publishes
-          # that one distribution, built from its own directory (the PyPI lane
-          # below selects it by the same reading of the tag). Refusing it because
-          # pkg/hanzoai/cloud trails production refused a release that does not
-          # contain pkg/hanzoai/cloud, and kept hanzo-tools-fs 0.3.5 off PyPI
-          # behind a projection it does not carry (hanzo-inc/cloud#758).
-          #
-          # NARROW ON PURPOSE. Only a tag, only one naming a project `pypi:`
-          # declares, and only when that project is not the client's. The
-          # client's project is the directory of the file `client.version:`
-          # names, or the repository root when it names none, so python-sdk's
-          # `hanzoai-v8.5.1` is still checked. A `v*` tag, a branch push, a
-          # dispatch (a move, not a check) and a tag that selects nothing all
-          # print nothing and keep the check. The `test:` gates run on the tag
-          # either way.
-          #
-          # bin/onlypkg_test.sh lifts this function out of this file and runs it,
-          # then runs this whole step over a drifted projection.
+          # A tag naming one package publishes that package alone, so the client
+          # check does not apply to it unless that package is the client's.
+          # bin/onlypkg_test.sh lifts onlypkg out of this file and runs it.
           # onlypkg BEGIN
           # onlypkg <ref type> <ref name>: print the pypi: directory a tag naming
           # one package publishes, when that package is not the client's. Print
@@ -3404,10 +3388,6 @@ jobs:
         #   name-v1.2.3   the one whose [project] name is `name`. The separator may
         #   name-1.2.3    be `-` or `@` and the `v` is optional, because all three
         #   name@v1.2.3   shapes are already in this fleet's tags.
-        #
-        # The second shape is also the only one the client step lets past a
-        # drifted client, and only when `name` is not the client's own project:
-        # `onlypkg` there reads the tag with the same expression as below.
         #
         # THE NAME IS READ FROM THE pyproject, not from the directory, because the
         # name is what an installer resolves. A directory that happens to match is
