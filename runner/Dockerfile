@@ -20,7 +20,7 @@
 # protocol (POST /v1/runner/{register,declare,task,state,log}), the only one the
 # forge serves since 1.26.58. Gitea's act_runner speaks the one the forge dropped.
 FROM golang:1.27.1-bookworm AS git-runner
-ARG GIT_RUNNER_REV=bfad54cb925b646f0a51452a7f4b45c8165606e0
+ARG GIT_RUNNER_REV=b3b12e07d73160dd40e41ee0ea2b100f7ff70910
 # Two orgs it depends on (luxfi, zap-proto) are flagged on GitHub: their repos are
 # hidden from anonymous readers and proxy.golang.org lacks their newer tags, so
 # those modules come from the forge's public mirrors.
