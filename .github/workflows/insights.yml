@@ -1,0 +1,448 @@
+# Hanzo Insights — reusable code-security, git-history secret scanning, and CI
+# telemetry workflow, replacing third-party scanners (trufflehog, GitGuardian)
+# with the native Hanzo Security + Hanzo Insights stack.
+#
+# Caller (.github/workflows/insights.yml in any repo):
+#
+#   name: Hanzo Insights
+#   on:
+#     push:
+#     pull_request:
+#     workflow_dispatch:
+#   jobs:
+#     insights:
+#       uses: hanzoai/ci/.github/workflows/insights.yml@v2
+#       secrets: inherit
+#
+# Every input is `type: string` with a default so Hanzo Git never substitutes a
+# zero boolean/number, forks are routed to `ephemeral-linux-amd64` with secrets
+# gated behind `HANZO_CI_TRUSTED == 'true'`, and raw secret material is never
+# printed, logged, or stored — only rule id, path, line, commit SHA, masked
+# preview, liveness boolean, and SHA-256 fingerprint.
+name: Hanzo Insights
+
+on:
+  workflow_call:
+    inputs:
+      fail-on:
+        description: Minimum severity that fails the gate (critical|high|medium|low|none).
+        type: string
+        default: low
+      verify:
+        description: Perform bounded read-only credential liveness probes ('true'|'false').
+        type: string
+        default: 'false'
+      scan-history:
+        description: Scan git commit patches in the push/PR range in addition to working tree ('true'|'false').
+        type: string
+        default: 'true'
+      ignore-file:
+        description: Repo-relative SHA-256 fingerprint allowlist file.
+        type: string
+        default: .hanzo-security-ignore
+      project:
+        description: Sub-scope slug for Insights and Security events (defaults to repo name).
+        type: string
+        default: ''
+      api:
+        description: Hanzo Cloud API origin.
+        type: string
+        default: https://api.hanzo.ai
+      insights-host:
+        description: Hanzo Insights capture origin.
+        type: string
+        default: https://api.hanzo.ai
+    secrets:
+      HANZO_API_KEY:
+        required: false
+      HANZO_INSIGHTS_API_KEY:
+        required: false
+      KMS_CLIENT_ID:
+        required: false
+      KMS_CLIENT_SECRET:
+        required: false
+
+jobs:
+  insights:
+    runs-on: ${{ (startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) && 'ephemeral-linux-amd64' || 'linux-amd64' }}
+    timeout-minutes: 20
+    env:
+      HANZO_CI_TRUSTED: ${{ !(startsWith(github.event_name, 'pull_request') && github.event.pull_request.head.repo.full_name != github.repository) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan working tree and git commit history
+        id: scan
+        env:
+          FAIL_ON: ${{ inputs.fail-on }}
+          VERIFY_LIVE: ${{ inputs.verify }}
+          SCAN_HISTORY: ${{ inputs.scan-history }}
+          IGNORE_FILE: ${{ inputs.ignore-file }}
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          TMP="${RUNNER_TEMP:-/tmp}"
+          REPORT="$TMP/hanzo-insights-scan.json"
+          VERDICT="$TMP/hanzo-insights-verdict"
+          echo "1" > "$VERDICT"
+
+          python3 - "$REPORT" "$VERDICT" << 'PY'
+          import bisect, hashlib, json, math, os, re, subprocess, sys, time, urllib.error, urllib.request
+          from pathlib import Path
+
+          report_path, verdict_path = sys.argv[1], sys.argv[2]
+          t0 = time.monotonic()
+
+          SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+          SKIP_DIRS = {
+              ".git", "node_modules", "vendor", "dist", "build", "out",
+              ".vscode-test", "target", ".next", "__pycache__", ".venv", "venv",
+          }
+          MAX_FILE_BYTES = 2 * 1024 * 1024
+
+          RULES = [
+              ("private-key", "Private key block", "critical", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----"), 0, 0.0),
+              ("aws-access-key-id", "AWS access key ID", "critical", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), 0, 0.0),
+              ("aws-secret-access-key", "AWS secret access key", "critical", re.compile(r"(?i)aws_?secret_?access_?key[\"' ]*[:=][\"' ]*([A-Za-z0-9/+=]{40})"), 1, 0.0),
+              ("hanzo-api-key", "Hanzo API key", "critical", re.compile(r"\b(?:hk-[A-Za-z0-9_\-]{24,}|sk-hanzo-[A-Za-z0-9_\-]{24,})\b"), 0, 0.0),
+              ("anthropic-api-key", "Anthropic API key", "critical", re.compile(r"\bsk-ant-api03-[A-Za-z0-9_\-]{80,}\b"), 0, 0.0),
+              ("digitalocean-token", "DigitalOcean token", "critical", re.compile(r"\b(?:dop_v1_[a-f0-9]{64}|doo_v1_[a-f0-9]{64}|dor_v1_[a-f0-9]{64}|sk-do-[A-Za-z0-9_\-]{40,})\b"), 0, 0.0),
+              ("openai-api-key", "OpenAI API key", "critical", re.compile(r"\bsk-(?:proj-|svcacct-)[A-Za-z0-9_\-]{32,}\b|\bsk-[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}\b"), 0, 0.0),
+              ("stripe-secret-key", "Stripe secret key", "critical", re.compile(r"\b(?:sk|rk)_live_[0-9A-Za-z]{24,}\b"), 0, 0.0),
+              ("crates-io-token", "crates.io API token", "critical", re.compile(r"\bcio[A-Za-z0-9]{32}\b"), 0, 0.0),
+              ("pypi-token", "PyPI upload token", "critical", re.compile(r"\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_\-]{50,}\b"), 0, 0.0),
+              ("square-secret", "Square access secret", "critical", re.compile(r"\bsq0(?:csp|atp)-[0-9A-Za-z\-_]{22,}\b"), 0, 0.0),
+              ("age-secret-key", "Age encryption secret key", "critical", re.compile(r"\bAGE-SECRET-KEY-1[A-Z0-9]{58}\b"), 0, 0.0),
+              ("gcp-api-key", "Google API key", "high", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"), 0, 0.0),
+              ("github-token", "GitHub token", "high", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b"), 0, 0.0),
+              ("github-pat-fine", "GitHub fine-grained PAT", "high", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{82}\b"), 0, 0.0),
+              ("huggingface-token", "Hugging Face token", "high", re.compile(r"\bhf_[A-Za-z0-9]{34,}\b"), 0, 0.0),
+              ("slack-token", "Slack token", "high", re.compile(r"\bxox[baprs]-[0-9A-Za-z\-]{10,}\b"), 0, 0.0),
+              ("npm-token", "npm access token", "high", re.compile(r"\bnpm_[A-Za-z0-9]{36}\b"), 0, 0.0),
+              ("sendgrid-api-key", "SendGrid API key", "high", re.compile(r"\bSG\.[A-Za-z0-9_\-]{22}\.[A-Za-z0-9_\-]{43}\b"), 0, 0.0),
+              ("cloudflare-api-token", "Cloudflare API token", "high", re.compile(r"(?i)cloudflare[_a-z0-9]*token[\"' ]*[:=][\"' ]*([A-Za-z0-9_\-]{40})\b"), 1, 0.0),
+              ("basic-auth-url", "Basic-Auth credentials in URL", "high", re.compile(r"https?://[A-Za-z0-9._%\-]+:([A-Za-z0-9._~%\-!$&'()*+,;=]{12,})@[A-Za-z0-9.\-]+"), 1, 3.3),
+              ("slack-webhook", "Slack webhook URL", "medium", re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9_/]+"), 0, 0.0),
+              ("jwt", "JSON Web Token", "medium", re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b"), 0, 0.0),
+              ("generic-secret", "Generic assigned secret", "medium", re.compile(r"(?i)\b(?:password|passwd|secret|api_?key|access_?token|auth_?token|client_?secret)\b[\"' ]*[:=][\"' ]*[\"']([A-Za-z0-9/+_\-]{20,}={0,2})[\"']"), 1, 3.7),
+          ]
+
+          PLACEHOLDER_RE = re.compile(r"(?i)^(?:changeme|placeholder|example|dummy|redacted|your[_-]|xxx+|000+|test[_-]|fake[_-]|sample[_-])")
+
+          def shannon_entropy(s: str) -> float:
+              if not s:
+                  return 0.0
+              counts = {}
+              for ch in s:
+                  counts[ch] = counts.get(ch, 0) + 1
+              n = float(len(s))
+              return -sum((c / n) * math.log2(c / n) for c in counts.values())
+
+          def mask(secret: str) -> str:
+              n = len(secret)
+              if n <= 8:
+                  return "*" * n
+              return secret[:4] + ("*" * min(n - 8, 24)) + secret[-4:]
+
+          def fingerprint(secret: str) -> str:
+              return hashlib.sha256(secret.encode("utf-8", "surrogateescape")).hexdigest()
+
+          def load_ignore_fingerprints(path: str) -> set[str]:
+              out = set()
+              p = Path(path)
+              if not p.is_file():
+                  return out
+              for raw in p.read_text(encoding="utf-8", errors="replace").splitlines():
+                  tok = raw.split("#", 1)[0].strip().lower()
+                  if re.fullmatch(r"[0-9a-f]{64}", tok):
+                      out.add(tok)
+              return out
+
+          def verify_secret(rule_id: str, secret: str):
+              probes = {
+                  "github-token": ("https://api.github.com/user", {"Authorization": f"Bearer {secret}", "User-Agent": "hanzo-insights-security"}),
+                  "github-pat-fine": ("https://api.github.com/user", {"Authorization": f"Bearer {secret}", "User-Agent": "hanzo-insights-security"}),
+                  "huggingface-token": ("https://huggingface.co/api/whoami-v2", {"Authorization": f"Bearer {secret}"}),
+                  "hanzo-api-key": ("https://api.hanzo.ai/v1/iam/userinfo", {"Authorization": f"Bearer {secret}"}),
+              }
+              if rule_id == "digitalocean-token" and secret.startswith("dop_v1_"):
+                  probes["digitalocean-token"] = ("https://api.digitalocean.com/v2/account", {"Authorization": f"Bearer {secret}"})
+              spec = probes.get(rule_id)
+              if not spec:
+                  return None
+              req = urllib.request.Request(spec[0], headers=spec[1], method="GET")
+              try:
+                  with urllib.request.urlopen(req, timeout=5) as resp:
+                      return 200 <= resp.status < 300
+              except urllib.error.HTTPError as e:
+                  if e.code in (401, 403):
+                      return False
+                  return None
+              except Exception:
+                  return None
+
+          ignored_fps = load_ignore_fingerprints(os.environ.get("IGNORE_FILE", ".hanzo-security-ignore"))
+          do_verify = os.environ.get("VERIFY_LIVE", "false").lower() == "true"
+          verify_cache = {}
+          seen = set()
+          findings = []
+
+          def scan_content(content: str, path: str, line_map=None, commit: str = ""):
+              if not content:
+                  return
+              starts = None
+              lines_cache = None
+              for rule_id, rule_name, sev, regex, grp, min_ent in RULES:
+                  for m in regex.finditer(content):
+                      secret = m.group(grp) if grp else m.group(0)
+                      if not secret or PLACEHOLDER_RE.search(secret):
+                          continue
+                      if min_ent > 0.0 and shannon_entropy(secret) < min_ent:
+                          continue
+                      if starts is None:
+                          starts = [0]
+                          pos = content.find("\n")
+                          while pos != -1:
+                              starts.append(pos + 1)
+                              pos = content.find("\n", pos + 1)
+                          lines_cache = content.splitlines()
+                      idx0 = bisect.bisect_right(starts, m.start()) - 1
+                      if 0 <= idx0 < len(lines_cache) and "hanzo-security:ignore" in lines_cache[idx0]:
+                          continue
+                      line_no = line_map[idx0] if (line_map is not None and idx0 < len(line_map)) else (idx0 + 1)
+                      fp = fingerprint(secret)
+                      if fp in ignored_fps:
+                          continue
+                      dedup = (rule_id, path, line_no, fp, commit)
+                      if dedup in seen:
+                          continue
+                      seen.add(dedup)
+                      verified = None
+                      if do_verify:
+                          if fp not in verify_cache:
+                              verify_cache[fp] = verify_secret(rule_id, secret)
+                          verified = verify_cache[fp]
+                      rec = {
+                          "ruleId": rule_id,
+                          "ruleName": rule_name,
+                          "severity": sev,
+                          "path": path,
+                          "line": line_no,
+                          "preview": mask(secret),
+                          "fingerprint": fp,
+                      }
+                      if commit:
+                          rec["commit"] = commit
+                      if verified is not None:
+                          rec["verified"] = verified
+                      findings.append(rec)
+
+          SKIP_EXTS = {
+              ".spv", ".ptx", ".cubin", ".fatbin", ".hsaco", ".gguf", ".safetensors",
+              ".onnx", ".bin", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico",
+              ".woff", ".woff2", ".ttf", ".otf", ".pdf", ".zip", ".tar", ".gz", ".tgz",
+          }
+
+          # 1. Tracked-tree scan (git ls-files when in a git checkout, else os.walk)
+          files_scanned = 0
+          ls_proc = subprocess.run(["git", "ls-files", "-z"], capture_output=True)
+          if ls_proc.returncode == 0:
+              candidates = [p.decode("utf-8", errors="replace") for p in ls_proc.stdout.split(b"\x00") if p]
+          else:
+              candidates = []
+              for root, dirs, files in os.walk("."):
+                  dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith("target-")]
+                  for fn in files:
+                      candidates.append((Path(root) / fn).as_posix().lstrip("./"))
+
+          for rel in candidates:
+              p = Path(rel)
+              if p.suffix.lower() in SKIP_EXTS or any(part in SKIP_DIRS for part in p.parts):
+                  continue
+              try:
+                  st = p.stat()
+                  if not p.is_file() or st.st_size > MAX_FILE_BYTES:
+                      continue
+                  raw = p.read_bytes()
+              except OSError:
+                  continue
+              if b"\x00" in raw[:8192]:
+                  continue
+              files_scanned += 1
+              scan_content(raw.decode("utf-8", errors="replace"), rel)
+
+          # 2. Git commit-history patch scan (catches secrets added then deleted across commits)
+          commits_scanned = 0
+          if os.environ.get("SCAN_HISTORY", "true").lower() != "false":
+              ev = os.environ.get("EVENT_NAME", "")
+              before = os.environ.get("PUSH_BEFORE", "").strip()
+              after = os.environ.get("PUSH_AFTER", "HEAD").strip() or "HEAD"
+              pr_base = os.environ.get("PR_BASE", "").strip()
+              pr_head = os.environ.get("PR_HEAD", "").strip()
+              if ev.startswith("pull_request") and pr_base and pr_head:
+                  rev_spec = f"{pr_base}..{pr_head}"
+              elif before and before != "0" * 40:
+                  chk = subprocess.run(["git", "cat-file", "-e", f"{before}^{{commit}}"], capture_output=True)
+                  rev_spec = f"{before}..{after}" if chk.returncode == 0 else f"{after}~50..{after}"
+              else:
+                  cnt = subprocess.run(["git", "rev-list", "--count", after], capture_output=True, text=True)
+                  n_c = int(cnt.stdout.strip() or "0") if cnt.returncode == 0 else 0
+                  rev_spec = after if n_c <= 200 else f"{after}~200..{after}"
+
+              proc = subprocess.Popen(
+                  ["git", "log", "--format=COMMIT:%H", "-p", "--no-color", "--unified=0", rev_spec],
+                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors="replace",
+              )
+              cur_commit = ""
+              cur_file = ""
+              cur_line = 0
+              buf_lines = []
+              buf_lmap = []
+              def flush_hunk():
+                  if buf_lines and cur_file:
+                      scan_content("\n".join(buf_lines), cur_file, buf_lmap, cur_commit)
+                  buf_lines.clear()
+                  buf_lmap.clear()
+
+              hunk_re = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+              assert proc.stdout is not None
+              for raw_line in proc.stdout:
+                  line = raw_line.rstrip("\r\n")
+                  if line.startswith("COMMIT:"):
+                      flush_hunk()
+                      cur_commit = line[7:].strip()
+                      commits_scanned += 1
+                      cur_file = ""
+                  elif line.startswith("+++ b/"):
+                      flush_hunk()
+                      cur_file = line[6:]
+                      if Path(cur_file).suffix.lower() in SKIP_EXTS or any(part in SKIP_DIRS for part in Path(cur_file).parts):
+                          cur_file = ""
+                  elif line.startswith("@@ ") and cur_file:
+                      flush_hunk()
+                      hm = hunk_re.match(line)
+                      if hm:
+                          cur_line = int(hm.group(1))
+                  elif cur_file and line.startswith("+") and not line.startswith("+++"):
+                      buf_lines.append(line[1:])
+                      buf_lmap.append(cur_line)
+                      cur_line += 1
+              flush_hunk()
+              proc.wait()
+
+          findings.sort(key=lambda f: (-SEVERITY_RANK.get(f["severity"], 0), f["path"], f["line"], f["ruleId"]))
+          summary = {"total": len(findings), "critical": 0, "high": 0, "medium": 0, "low": 0, "verified": 0}
+          for f in findings:
+              summary[f["severity"]] = summary.get(f["severity"], 0) + 1
+              if f.get("verified") is True:
+                  summary["verified"] += 1
+
+          duration_ms = int((time.monotonic() - t0) * 1000)
+          floor = (os.environ.get("FAIL_ON", "low").strip().lower() or "low")
+          floor_rank = 0 if floor == "none" else SEVERITY_RANK.get(floor, 1)
+          blocking = [f for f in findings if SEVERITY_RANK.get(f["severity"], 0) >= floor_rank] if floor != "none" else []
+
+          report = {
+              "scanner": "hanzo-insights-security",
+              "rulesCount": len(RULES),
+              "filesScanned": files_scanned,
+              "commitsScanned": commits_scanned,
+              "durationMs": duration_ms,
+              "failOn": floor,
+              "passed": len(blocking) == 0,
+              "summary": summary,
+              "findings": findings[:200],
+          }
+          Path(report_path).write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+          for f in findings[:50]:
+              c_sfx = f", commit={f['commit'][:12]}" if f.get("commit") else ""
+              v_sfx = f", verified={f['verified']}" if "verified" in f else ""
+              print(
+                  f"::error file={f['path']},line={f['line']},title=Hanzo Security ({f['ruleId']})::"
+                  f"{f['severity']} secret detected (preview={f['preview']}, sha256={f['fingerprint'][:16]}...{c_sfx}{v_sfx})"
+              )
+
+          if blocking:
+              print(f"Hanzo Security: {len(blocking)} finding(s) at or above '{floor}' severity ({files_scanned} files, {commits_scanned} commits scanned in {duration_ms}ms)")
+              Path(verdict_path).write_text("1", encoding="utf-8")
+              sys.exit(0)
+
+          print(f"OK: Hanzo Security scanned {files_scanned} files and {commits_scanned} commits in {duration_ms}ms — 0 blocking secrets")
+          Path(verdict_path).write_text("0", encoding="utf-8")
+          PY
+
+      - name: Emit scan telemetry to Hanzo Insights
+        if: always() && env.HANZO_CI_TRUSTED == 'true'
+        env:
+          API_ORIGIN: ${{ inputs.api }}
+          INSIGHTS_ORIGIN: ${{ inputs.insights-host }}
+          PROJECT_SLUG: ${{ inputs.project }}
+          HANZO_API_KEY: ${{ secrets.HANZO_API_KEY }}
+          HANZO_INSIGHTS_API_KEY: ${{ secrets.HANZO_INSIGHTS_API_KEY }}
+          KMS_CLIENT_ID: ${{ secrets.KMS_CLIENT_ID }}
+          KMS_CLIENT_SECRET: ${{ secrets.KMS_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          TMP="${RUNNER_TEMP:-/tmp}"
+          REPORT="$TMP/hanzo-insights-scan.json"
+          [ -f "$REPORT" ] || exit 0
+
+          TOKEN="${HANZO_INSIGHTS_API_KEY:-${HANZO_API_KEY:-}}"
+          if [ -z "$TOKEN" ] && [ -n "${KMS_CLIENT_ID:-}" ] && [ -n "${KMS_CLIENT_SECRET:-}" ]; then
+            TOKEN=$(jq -Rsj --arg id "$KMS_CLIENT_ID" '{clientId: $id, clientSecret: rtrimstr("\n")}' <<< "$KMS_CLIENT_SECRET" \
+              | curl -sf -X POST "https://kms.hanzo.ai/v1/kms/auth/universal-auth/login" -H "Content-Type: application/json" --data-binary @- \
+              | jq -r '.accessToken // empty' 2>/dev/null || true)
+          fi
+          [ -n "$TOKEN" ] || { echo "Hanzo Insights: no API/KMS token in this environment; local scan report retained."; exit 0; }
+
+          PROJ="${PROJECT_SLUG:-${GITHUB_REPOSITORY##*/}}"
+          PAYLOAD=$(jq -c \
+            --arg repo "${GITHUB_REPOSITORY}" \
+            --arg sha "${GITHUB_SHA}" \
+            --arg ref "${GITHUB_REF_NAME:-}" \
+            --arg event_name "${GITHUB_EVENT_NAME:-}" \
+            --arg run_id "${GITHUB_RUN_ID:-}" \
+            --arg proj "$PROJ" \
+            '{
+              event: "ci.insights.security_scan",
+              distinctId: ("repo:" + $repo),
+              service: $proj,
+              properties: {
+                repository: $repo,
+                commit: $sha,
+                ref: $ref,
+                trigger: $event_name,
+                runId: $run_id,
+                scanner: .scanner,
+                rulesCount: .rulesCount,
+                filesScanned: .filesScanned,
+                commitsScanned: .commitsScanned,
+                durationMs: .durationMs,
+                passed: .passed,
+                summary: .summary,
+                findingFingerprints: [.findings[].fingerprint]
+              }
+            }' "$REPORT")
+
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${INSIGHTS_ORIGIN%/}/v1/capture" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            --data-binary "$PAYLOAD" || echo "000")
+          echo "Hanzo Insights capture status: HTTP $CODE"
+
+      - name: Security verdict
+        if: always()
+        run: |
+          set -euo pipefail
+          VERDICT="${RUNNER_TEMP:-/tmp}/hanzo-insights-verdict"
+          [ -f "$VERDICT" ] && [ "$(cat "$VERDICT")" = "0" ] || {
+            echo "::error::Hanzo Insights security gate failed (or did not complete)"; exit 1; }
+          echo "OK: Hanzo Insights security gate passed"
