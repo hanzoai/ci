@@ -29,6 +29,7 @@ echo one > "$src/f"; g add f; g commit -qm one; g tag v9.9.9
 old=$(g rev-parse HEAD)
 echo two > "$src/f"; g commit -qam two
 new=$(g rev-parse HEAD)
+git -C "$src" update-ref refs/pull/28/merge "$new"
 
 # check <name> <want> <JOB_SHA> <expected content of f | fails>
 check() {
@@ -48,6 +49,7 @@ check "a branch clones its tip"                      main      ""     two
 check "a tag clones the tagged commit"               v9.9.9    ""     one
 check "the caller's pinned sha fetches that commit"  "$old"    ""     one
 check "this file's own sha fetches that commit"      "$new"    "$new" two
+check "a pull request merge ref fetches that commit" refs/pull/28/merge "" two
 check "a sha the host does not carry fails"          "$(printf '%040d' 7)" "" fails
 check "a ref the host does not carry fails"          v0.0.0    ""     fails
 
