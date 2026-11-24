@@ -22,3 +22,51 @@ jobs:
       packages: write
       id-token: write
     secrets: inherit
+
+  # Advance the immutable patch tag (v2.1.N) and floating major tags (v2, v1)
+  # once every gate and image build on main is green — so callers pinned at
+  # @v1 or @v2 receive verified fixes without manual tag moves.
+  release-tags:
+    needs: [cicd]
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    runs-on: [linux-amd64]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Cut patch tag and advance floating v2 and v1 tags
+        run: |
+          set -euo pipefail
+          git config user.name "hanzo-ci"
+          git config user.email "ci@hanzo.ai"
+
+          sha="${{ github.sha }}"
+          existing=$(git tag --points-at "$sha" 'v2.1.*' | sort -V | tail -1 || true)
+          if [ -n "$existing" ]; then
+            ver="$existing"
+            echo "HEAD $sha already carries $ver"
+          else
+            latest=$(git tag -l 'v2.1.*' | grep -E '^v2\.1\.[0-9]+$' | sort -V | tail -1 || true)
+            patch=${latest##*.}
+            patch=${patch:-0}
+            ver="v2.1.$((patch + 1))"
+            git tag -a "$ver" "$sha" -m "Hanzo CI/CD $ver"
+            echo "cut $ver at $sha"
+          fi
+
+          git tag -f v2 "$sha"
+          git tag -f v1 "$sha"
+          git push origin "refs/tags/$ver" "+refs/tags/v2" "+refs/tags/v1"
+
+          {
+            echo "### Released CI tags"
+            echo ""
+            echo "| tag | commit |"
+            echo "|---|---|"
+            echo "| \`$ver\` | \`$sha\` |"
+            echo "| \`v2\` | \`$sha\` |"
+            echo "| \`v1\` | \`$sha\` |"
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"

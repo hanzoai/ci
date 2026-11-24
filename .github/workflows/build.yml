@@ -2644,73 +2644,81 @@ jobs:
             promised=$(jq -r '.tags // [] | .[]' "$TMP/delegate.out")
             while IFS= read -r ref; do
               [ -n "$ref" ] || continue
-              if [ "$WAIT" != true ] && grep -xF "${ref##*:}" >/dev/null <<< "$promised"; then continue; fi
-              echo "$image $ref $plat" >> "$TMP/alias.txt"
+              is_promised=0
+              grep -xF "${ref##*:}" >/dev/null <<< "$promised" && is_promised=1
+              if [ "$WAIT" != true ] && [ "$is_promised" = 1 ]; then continue; fi
+              echo "${id:--} $image $ref $plat $is_promised" >> "$TMP/alias.txt"
             done < <(printf '%s\n' "$refs" | tail -n +2)
-            echo "| \`$image\` | ${id:-?} | $(printf '%s' "$promised" | tr '\n' ' ') |" >> "$TMP/queued.md"
+            echo "| \`$image\` | \`${id:-?}\` | $(printf '%s' "$promised" | tr '\n' ' ') |" >> "$TMP/queued.md"
           done < "$TMP/delegate.json"
           { echo "### Queued at the build door"; echo
-            echo "Each build's progress: \`GET ${RUNNER_URL%/v1/build}/v1/platform/builds\` with this org's token, or the Builds page of the console."; echo
+            echo "Each build's progress & digest: \`GET ${RUNNER_URL}/<buildJobId>\` with this org's token, or the Builds page of the console."; echo
             echo "| image | build | tags the door writes |"; echo "|---|---|---|"; cat "$TMP/queued.md"; } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
           [ -s "$TMP/alias.txt" ] || { echo "queued; the door writes every tag, so this job is done (with: { wait: 'true' } holds it until the image lands)"; exit 0; }
 
-          # ---- The version tag, on the digest the door pushed ----------------
-          # THE COMPLETION SIGNAL IS THE sha- TAG RESOLVING AT THE REGISTRY. That
-          # is the fact rather than an account of one: the door answers 202 and
-          # says nothing further, its only progress surface is an org-wide list
-          # projection with no read for a single build, and the manifest existing
-          # is the precondition the alias needs anyway. So this waits for the
-          # image, not for a status.
-          #
-          # `crane tag` writes a name onto bytes that are already there — no
-          # pull, no push, no rebuild — so the version and the sha- tag name ONE
-          # digest by construction.
-          #
-          # A version that does not land FAILS THE RUN. sha- alone is the state
-          # this lane exists to leave behind, and a warning about it reads as
-          # success to everything downstream.
+          # ---- Wait for the door (fail fast + digest) & alias any unpromised tags ----
+          # Poll GET /v1/build/{id} first when a build id is known: a failed build
+          # surfaces its exact reason immediately instead of waiting out 40 minutes,
+          # and a succeeded build returns its pushed manifest digest directly — so
+          # private packages need no separate GHCR read:packages token to report pins.
+          # Unpromised tags (older doors) still verify platforms and alias via crane.
           if [ -s "$TMP/alias.txt" ]; then
-            command -v crane >/dev/null 2>&1 || {
-              mkdir -p "$HOME/.local/bin"
-              case "$(uname -m)" in aarch64) cranearch=arm64;; *) cranearch=x86_64;; esac
-              curl -fsSL "https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_Linux_${cranearch}.tar.gz" \
-                | tar -xz -C "$HOME/.local/bin" crane
-              export PATH="$HOME/.local/bin:$PATH"
-            }
-            # Writing a tag is a push, so the credential is required rather than
-            # attempted anonymously: GHCR takes the KMS ghcr token, else the
-            # automatic one; every other owned host takes the
-            # registry credential KMS exported. One login per host, because two
-            # images in one hanzo.yml may publish to two of them.
-            for host in $(cut -d/ -f1 "$TMP/alias.txt" | sort -u); do
-              case "$host" in
-                ghcr.io) ru=token; rp="${GHCR_TOKEN:-${GITHUB_TOKEN:-}}" ;;
-                *)       ru="${REGISTRY_USER:-}"; rp="${REGISTRY_PASSWORD:-}" ;;
-              esac
-              [ -n "$rp" ] || refuse "no credential for $host, so the version tag cannot be written and this build would publish nothing the fleet can pin. GHCR reads the KMS ghcr token (GITHUB_TOKEN under kms.path) or the automatic token; any other host reads the KMS registry credential."
-              echo "$rp" | crane auth login "$host" -u "$ru" --password-stdin
-            done
-            while read -r src dst plat; do
-              # 40 minutes at 10s. The door builds in-cluster from a cache this
-              # run has no view of, so the budget is a cold build's, and running
-              # out is a refusal: the image is not there to be pinned.
+            need_crane=0
+            : > "$TMP/pins.md"
+            while read -r id src dst plat is_promised; do
               dig=""
-              for i in $(seq 1 240); do
-                dig=$(crane digest "$src" 2>/dev/null || true)
-                [ -n "$dig" ] && break
-                sleep 10
-              done
-              [ -n "$dig" ] || refuse "$src never reached the registry — the delegated build did not push it within 40 minutes. Its logs are the build door's, not this run's."
-              # The door said 202 and nothing since, so what it built is read from the
-              # registry rather than taken from the answer. A tag is written onto these
-              # bytes next, and writing an arch-neutral name onto one architecture is the
-              # exact shape this catches — see bin/imgplat.
+              if [ -n "$id" ] && [ "$id" != "-" ]; then
+                for i in $(seq 1 240); do
+                  bjson=$(curl -sS -m 30 -H "Authorization: Bearer $HANZO_API_TOKEN" "${RUNNER_URL}/${id}" 2>/dev/null || true)
+                  bst=$(printf '%s' "$bjson" | jq -r '.status // empty' 2>/dev/null || true)
+                  case "$bst" in
+                    succeeded)
+                      dig=$(printf '%s' "$bjson" | jq -r '.digest // empty' 2>/dev/null || true)
+                      break
+                      ;;
+                    failed)
+                      why=$(printf '%s' "$bjson" | jq -r '.reason // "no reason recorded"' 2>/dev/null || echo "no reason recorded")
+                      refuse "delegated build $id ($src) failed: $why"
+                      ;;
+                  esac
+                  sleep 10
+                done
+              fi
+              if [ "$is_promised" = 1 ] && [[ "$dig" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                echo "built $dst @ $dig (from build door $id)"
+                echo "| \`$dst\` | \`$dig\` |" >> "$TMP/pins.md"
+                continue
+              fi
+              if [ "$need_crane" = 0 ]; then
+                command -v crane >/dev/null 2>&1 || {
+                  mkdir -p "$HOME/.local/bin"
+                  case "$(uname -m)" in aarch64) cranearch=arm64;; *) cranearch=x86_64;; esac
+                  curl -fsSL "https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_Linux_${cranearch}.tar.gz" \
+                    | tar -xz -C "$HOME/.local/bin" crane
+                  export PATH="$HOME/.local/bin:$PATH"
+                }
+                for host in $(awk '{print $2}' "$TMP/alias.txt" | cut -d/ -f1 | sort -u); do
+                  case "$host" in
+                    ghcr.io) ru=token; rp="${GHCR_TOKEN:-${GITHUB_TOKEN:-}}" ;;
+                    *)       ru="${REGISTRY_USER:-}"; rp="${REGISTRY_PASSWORD:-}" ;;
+                  esac
+                  [ -n "$rp" ] || refuse "no credential for $host, so the version tag cannot be written and this build would publish nothing the fleet can pin. GHCR reads the KMS ghcr token (GITHUB_TOKEN under kms.path) or the automatic token; any other host reads the KMS registry credential."
+                  echo "$rp" | crane auth login "$host" -u "$ru" --password-stdin
+                done
+                need_crane=1
+              fi
+              if [ -z "$dig" ]; then
+                for i in $(seq 1 240); do
+                  dig=$(crane digest "$src" 2>/dev/null || true)
+                  [ -n "$dig" ] && break
+                  sleep 10
+                done
+              fi
+              [ -n "$dig" ] || refuse "$src never reached the registry — the delegated build did not push it within 40 minutes. Its logs are at GET ${RUNNER_URL}/${id}/logs."
               "$CI_HOME/bin/imgplat" "$src" "$plat" >/dev/null
-              crane tag "$src" "${dst##*:}"
-              # Read the DESTINATION back. `crane tag` exiting 0 is the writer's
-              # account of a write; the digest the registry answers with is the
-              # fact, and the two disagree whenever the tag already names other
-              # bytes. Same shape as the buildx lane's re-read of its own push.
+              if [ "$is_promised" != 1 ]; then
+                crane tag "$src" "${dst##*:}"
+              fi
               got=""
               for i in 1 2 3 4 5 6; do
                 got=$(crane digest "$dst" 2>/dev/null || true)
