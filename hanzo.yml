@@ -593,6 +593,12 @@ test:
     # the publish job use, so the two can never disagree about what a ref
     # publishes, or about which of them publishes it.
     run: bash bin/sites_test.sh
+  - name: sourcemaps
+    # bin/sourcemaps hands a site's maps to cloud under its release and takes
+    # every one out of the export, uploaded or not. Pinned offline: the address
+    # each map goes to, the bearer it carries, that a refused upload warns and
+    # never fails the publish, and that no map is ever left behind.
+    run: bash bin/sourcemaps_test.sh
   - name: rollback
     # bin/rollback is how a red `verify:` suite puts a site back on the release
     # that served before: pinned against a stub plane, including that a newer
