@@ -58,4 +58,13 @@ run push main branch agent; [ "$(tr '\n' ' ' < "$T/out")" = "a=a.example.com " ]
 printf 'site:\n  slug: a\n  dir: out\n' > "$T/hanzo.yml"
 run push main branch agent; [ $? = 0 ] && [ ! -s "$T/out" ] && ok "a site without agent: ships as built" || no "a site without agent: ships as built"
 
+printf 'site:\n  slug: hanzo-app\n  dir: dist\n  sourcemaps: true\n' > "$T/hanzo.yml"
+run push main branch sourcemaps; [ "$(cat "$T/out")" = "hanzo-app=/" ] && ok "sourcemaps: true is served at the root" || no "sourcemaps: true is served at the root"
+printf 'sites:\n  - {slug: a, dir: out/a, sourcemaps: /post}\n  - {slug: b, dir: out/b}\n  - {slug: c, dir: out/c, sourcemaps: false}\n' > "$T/hanzo.yml"
+run push main branch sourcemaps; [ "$(tr '\n' ' ' < "$T/out")" = "a=/post " ] && ok "only the sites: entries that name sourcemaps: opt in, at their base" || no "only the sites: entries that name sourcemaps: opt in, at their base"
+printf 'site:\n  slug: a\n  dir: out\n  sourcemaps: post\n' > "$T/hanzo.yml"
+run push main branch sourcemaps; [ $? = 1 ] && grep -q 'sourcemaps: in hanzo.yml' "$T/out" && ok "a sourcemaps: base that is not a path is refused" || no "a sourcemaps: base that is not a path is refused"
+printf 'site:\n  slug: a\n  dir: out\n' > "$T/hanzo.yml"
+run push main branch sourcemaps; [ $? = 0 ] && [ ! -s "$T/out" ] && ok "a site without sourcemaps: ships as built" || no "a site without sourcemaps: ships as built"
+
 exit $fail

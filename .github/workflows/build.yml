@@ -675,6 +675,17 @@ jobs:
         run: |
           n=$(yq -r '.images // [] | length' hanzo.yml 2>/dev/null || echo 0)
           echo "images=$n" >> "$GITHUB_OUTPUT"
+          # A site that names `sourcemaps:` is built with its release stamped in,
+          # so the bundle reports errors under the same release its maps are
+          # uploaded under (bin/sourcemaps, in the site step). Written here, before
+          # the gate, because the gate may be what builds the export. A run whose
+          # sites name none gets nothing, and builds exactly as before.
+          if [ -n "$("$CI_HOME/bin/sites" sourcemaps 2>/dev/null || true)" ]; then
+            for v in HANZO_RELEASE VITE_HANZO_RELEASE NEXT_PUBLIC_HANZO_RELEASE PUBLIC_HANZO_RELEASE; do
+              echo "$v=${{ github.sha }}" >> "$GITHUB_ENV"
+            done
+            echo "::notice::sourcemaps: builds are stamped with release ${{ github.sha }}"
+          fi
 
       - name: Kind (per hanzo.yml)
         # WHAT THE REPOSITORY IS, as opposed to what its manifest contains.
@@ -3635,6 +3646,23 @@ jobs:
           # and before any site publishes. A site that names none ships as built.
           AGENT=$("$SITES" agent)
           [ -z "$AGENT" ] || "$CI_HOME/bin/agent" "$PAIRS" "$AGENT"
+          # Each site that names sourcemaps: in hanzo.yml hands its maps to cloud
+          # under this run's release and has every .map taken out of its export
+          # (bin/sourcemaps), before the smoke check reads the export and before
+          # anything publishes. The bearer is HANZO_API_TOKEN, the org identity the
+          # KMS step minted; no other credential is read. A site that names none
+          # ships as built. A tools checkout older than this step (one that answers
+          # `sourcemaps` with its usage, status 2) opts nothing in; a hanzo.yml that
+          # names a base that is not a path (status 1) stops the publish.
+          MAPS=$("$SITES" sourcemaps 2>/dev/null) || { rc=$?; [ "$rc" = 2 ] || { "$SITES" sourcemaps; exit "$rc"; }; MAPS=; }
+          if [ -n "$MAPS" ]; then
+            while IFS= read -r pair; do
+              [ -n "${pair//[[:space:]]/}" ] || continue
+              base=$(awk -F= -v s="${pair%%=*}" '$1==s{print $2; exit}' <<<"$MAPS")
+              [ -z "$base" ] || HANZO_API="$API" HANZO_RELEASE="${{ github.sha }}" \
+                "$CI_HOME/bin/sourcemaps" "${pair#*=}" "$base" </dev/null
+            done <<<"$PAIRS"
+          fi
           # Every export is there and serves its pages (bin/smoke, on disk).
           while IFS= read -r pair; do
             [ -d "${pair#*=}" ] || {

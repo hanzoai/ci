@@ -7,6 +7,7 @@
 #   sites alone        # exit 0 when hanzo.yml ships nothing the publish job ships but sites
 #   sites smoke <slug> # the routes bin/smoke checks in that site's export, one per line
 #   sites agent        # `slug=host [flags]` per site that names agent: (bin/agent)
+#   sites sourcemaps   # `slug=base` per site that names sourcemaps: (bin/sourcemaps)
 #
 # `site:` is one export, `sites:` is several: a white-labelled product builds once
 # and ships an export per brand, and a site keys on its HOST, so a brand per host
@@ -20,11 +21,16 @@
 # client, pypi or bucket, so once its gating job has published them the publish
 # job has nothing left to do.
 #
+# `sourcemaps:` opts a site in to private sourcemaps: `true` when it is served at
+# its host's root, or the path it is served under (`/post`). A site that names it
+# is built with its release stamped in and has its maps uploaded to cloud and
+# removed from the export (bin/sourcemaps); a site that does not ships as built.
+#
 # Exit 1, with an ::error::, when hanzo.yml declares both spellings or a pair
-# lacks its slug or its dir.
+# lacks its slug or its dir, or a sourcemaps: base is not a path.
 set -euo pipefail
 cmd=${1:-}
-case "$cmd" in pairs|build|alone|smoke|agent) ;; *) echo "usage: sites pairs|build|alone|smoke <slug>|agent" >&2; exit 2 ;; esac
+case "$cmd" in pairs|build|alone|smoke|agent|sourcemaps) ;; *) echo "usage: sites pairs|build|alone|smoke <slug>|agent|sourcemaps" >&2; exit 2 ;; esac
 f=${HANZO_YML:-hanzo.yml}
 [ -f "$f" ] || exit 0
 if [ "$cmd" = alone ]; then
@@ -47,6 +53,18 @@ fi
 if [ "$cmd" = agent ]; then
   if [ "$many" = '!!seq' ]; then yq -r '.sites[] | select((.agent // "") != "") | .slug + "=" + .agent' "$f"
   else yq -r 'select((.site.agent // "") != "") | .site.slug + "=" + .site.agent' "$f"; fi
+  exit 0
+fi
+if [ "$cmd" = sourcemaps ]; then
+  # true reads as the root; a string is the base it is served under. false, an
+  # absent key and anything else opt nothing in.
+  q='((select(.sourcemaps == true) | .slug + "=/"), (select(.sourcemaps | type == "!!str") | .slug + "=" + .sourcemaps))'
+  if [ "$many" = '!!seq' ]; then out=$(yq -r ".sites[] | $q" "$f"); else out=$(yq -r ".site | $q" "$f"); fi
+  bad=$(printf '%s\n' "$out" | awk -F= 'NF && $2 !~ /^\//' | head -1)
+  if [ -n "$bad" ]; then
+    echo "::error::sourcemaps: in hanzo.yml is true or the path a site is served under (/post); ${bad%%=*} names '${bad#*=}'" >&2; exit 1
+  fi
+  [ -z "$out" ] || printf '%s\n' "$out"
   exit 0
 fi
 if [ "$cmd" = build ]; then

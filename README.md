@@ -495,6 +495,40 @@ redirect table's sources), as ClaudeBot, Meta-ExternalAgent and Googlebot, six
 at a time, and prints each one that does not end 2xx with the file that linked
 it. Exit 1 when any failed.
 
+### `sourcemaps:` — readable browser errors, private source
+
+One line stamps the build with its release and keeps its sourcemaps off the
+edge:
+
+```yaml
+site:
+  slug: hanzo-app
+  dir: dist
+  sourcemaps: true                  # or the path it is served under: /post
+```
+
+A site that names it is built with its git sha in `HANZO_RELEASE`,
+`VITE_HANZO_RELEASE`, `NEXT_PUBLIC_HANZO_RELEASE` and `PUBLIC_HANZO_RELEASE`, so
+the bundle can stamp it on every error it reports (`@hanzo/event` reads
+`NEXT_PUBLIC_HANZO_RELEASE`; a Vite app passes `import.meta.env.VITE_HANZO_RELEASE`
+as its `release`). After the build and
+before the smoke check, [`bin/sourcemaps`](bin/sourcemaps) uploads every script's
+`.map` to cloud (`PUT /v1/event/sourcemaps`, keyed by that release and the path
+the script is served at), then removes every `.map` from the export and drops
+the `sourceMappingURL` comment that named it. Cloud maps that release's error
+frames back to the original file and line when it ingests them, before it
+groups them, so one fault keeps one issue across deploys; the maps are kept in
+the org's storage and never served.
+
+No secret is added. The upload uses the org identity the run already minted —
+on GitHub, the run's ID token exchanged for the org's CI application (the job
+grants `id-token: write`); on Hanzo Git, the org's client. An upload that fails
+is a warning and the publish goes on; the maps are removed either way. Build
+with external maps (Vite `build.sourcemap: 'hidden'` or `true`, Next
+`productionBrowserSourceMaps: true`): an inline map publishes the source with
+the script, and the step warns when it finds one. A site that names no
+`sourcemaps:` builds and ships exactly as before.
+
 ## Runners — our fleet or your own
 
 By default the build runs on the **Hanzo `git-runner` fleet** on git.hanzo.ai
