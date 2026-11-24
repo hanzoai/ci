@@ -48,7 +48,7 @@ if [ -z "$declared" ]; then
     if [ -f "$d/package.json" ]; then
       declared=$(jq -r '.version // ""' "$d/package.json" 2>/dev/null || true)
     elif [ -f "$d/Cargo.toml" ]; then
-      declared=$(sed -n '/^\[\(workspace\.\)\?package\]/,/^\[/p' "$d/Cargo.toml" \
+      declared=$(sed -nE '/^\[(workspace\.)?package\]/,/^\[/p' "$d/Cargo.toml" \
                  | sed -n 's/^version *= *"\([^"]*\)".*/\1/p' | head -1)
     elif [ -f "$d/VERSION" ]; then
       declared=$(tr -d ' \n' < "$d/VERSION")

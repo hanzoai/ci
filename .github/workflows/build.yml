@@ -402,8 +402,8 @@ jobs:
           wf="${wf#*/}"; wf="${wf#*/}"     # .github/workflows/cicd.yml
           pin=
           if [ -n "$wf" ] && [ -f "${GITHUB_WORKSPACE:-.}/$wf" ]; then
-            pin=$(sed -n 's#.*hanzoai/ci/\.[a-z]*/workflows/build\.yml@\([A-Za-z0-9._/-]\{1,\}\).*#\1#p' \
-                  "${GITHUB_WORKSPACE:-.}/$wf" | head -1)
+            pin=$(grep -v '^[[:space:]]*#' "${GITHUB_WORKSPACE:-.}/$wf" \
+                  | sed -n 's#.*hanzoai/ci/\.[a-z]*/workflows/build\.yml@\([A-Za-z0-9._/-]\{1,\}\).*#\1#p' | head -1)
           fi
           # Hanzo Git sets no GITHUB_WORKFLOW_REF, so the caller's file is unknown
           # there. The pin is then the one this repository's workflows all name,
@@ -411,6 +411,7 @@ jobs:
           # tools instead of whatever the moving `v1` names today.
           if [ -z "$pin" ]; then
             pins=$(cat "${GITHUB_WORKSPACE:-.}"/.hanzo/workflows/*.y*ml "${GITHUB_WORKSPACE:-.}"/.github/workflows/*.y*ml 2>/dev/null \
+                   | grep -v '^[[:space:]]*#' \
                    | sed -n 's#.*hanzoai/ci/\.[a-z]*/workflows/build\.yml@\([A-Za-z0-9._/-]\{1,\}\).*#\1#p' | sort -u || true)
             if [ "$(printf '%s\n' "$pins" | grep -c . || true)" = 1 ]; then
               pin=$pins; wf="${wf:-the workflows of this repository}"
@@ -466,8 +467,25 @@ jobs:
           # pipeline that has grown a tool refuses at step one, and says which ref
           # it read and what was missing from it.
           need="agent apptoken cache certclaims conflictmarkers gocache gover ignoretracked imgplat imgtags imgver jscache kms modsize narrative publishable rollback site sites smoke vendormark"
+          # When hanzoai/ci runs its own reusable via `./.github/workflows/build.yml`
+          # (no external pin), the checked-out workspace IS this workflow's commit —
+          # including any tool added in this PR before any tag or mirror carries it.
+          if [ -z "$pin" ] && [ "${GITHUB_REPOSITORY:-}" = "hanzoai/ci" ] && [ -d "${GITHUB_WORKSPACE:-.}/bin" ]; then
+            self_miss=
+            for b in $need; do [ -x "${GITHUB_WORKSPACE:-.}/bin/$b" ] || self_miss="${self_miss:+$self_miss }$b"; done
+            if [ -z "$self_miss" ]; then
+              rm -rf "$RUNNER_TEMP/ci"
+              mkdir -p "$RUNNER_TEMP/ci"
+              cp -a "${GITHUB_WORKSPACE:-.}/bin" "$RUNNER_TEMP/ci/bin"
+              [ -d "${GITHUB_WORKSPACE:-.}/agent" ] && cp -a "${GITHUB_WORKSPACE:-.}/agent" "$RUNNER_TEMP/ci/agent"
+              [ -d "${GITHUB_WORKSPACE:-.}/gocache" ] && cp -a "${GITHUB_WORKSPACE:-.}/gocache" "$RUNNER_TEMP/ci/gocache"
+              echo "using checked-out hanzoai/ci workspace tools directly"
+              echo "CI_HOME=$RUNNER_TEMP/ci" >> "$GITHUB_ENV"
+              exit 0
+            fi
+          fi
           miss='<no host answered>'
-          # A sha cannot be a --branch, so it arrives by fetch rather than clone:
+          # A sha or full ref (e.g. refs/pull/N/merge) cannot be a --branch, so it arrives by fetch rather than clone:
           # the caller's pin as well as this file's own commit. Both are wrapped
           # so a host that does not carry the ref is a return value here rather
           # than the end of the step under `set -e` — walking past one is the
@@ -489,7 +507,7 @@ jobs:
               cap=(timeout 20)
               ;;
             esac
-            if [[ $want =~ ^[0-9a-f]{40}$ ]]; then
+            if [[ $want =~ ^[0-9a-f]{40}$ || $want == refs/* ]]; then
               git init -q "$RUNNER_TEMP/ci" \
                 && ${cap[@]+"${cap[@]}"} git -C "$RUNNER_TEMP/ci" "${slow[@]}" ${a[@]+"${a[@]}"} fetch -q --depth 1 "$url" "$want" \
                 && git -C "$RUNNER_TEMP/ci" checkout -q FETCH_HEAD
