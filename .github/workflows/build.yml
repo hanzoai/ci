@@ -1911,17 +1911,40 @@ jobs:
           # probe below. A module the public proxy cannot serve has to be named
           # there or `go` verifies it against a sumdb that never heard of it.
           seen=""
-          for o in hanzoai hanzo-inc hanzo-ds hanzokv hanzos3 luxfi luxwallet zooai "$OWNER"; do
+          for o in hanzoai hanzo-inc hanzo-ds hanzokv hanzos3 luxfi luxwallet zap-proto zooai "$OWNER"; do
             case " $seen " in *" $o "*) continue ;; esac
             seen="$seen $o"
           done
 
+          # Clear actions/checkout's local extraheader before wiring per-owner
+          # git credentials: `http.extraHeader` is multi-valued and overrides
+          # URL credentials on matching hosts, causing single-repo GITHUB_TOKEN
+          # to be sent for cross-org Go modules.
+          git config --local --name-only --get-regexp '^http\..*extraheader$' 2>/dev/null \
+            | while read -r k; do git config --local --unset-all "$k"; done
+
           # One rewrite per owner, written to the job's own git config by file and
-          # not by `git config`, which would put each token in argv. apptoken's
-          # stderr is held back so a refusal reads as the warning it is here, and
-          # the mask it would have written is written below, on the token itself.
+          # not by `git config`, which would put each token in argv.
+          #
+          # GitHub-flagged orgs (`luxfi`, `luxwallet`, `zap-proto` — see
+          # runner/Dockerfile) return 404 / `Repository not found` on github.com
+          # even with an authorized GitHub App token, and proxy.golang.org lacks
+          # their newer tags (`luxfi/crypto@v1.20.2`, `luxfi/consensus@v1.36.92`,
+          # `luxfi/kms@v1.12.26`). Their canonical mirrors live on git.hanzo.ai
+          # and authenticate with this job's IAM token (HANZO_API_TOKEN), verified
+          # byte-for-byte against go.sum.
           err="$RUNNER_TEMP/apptoken-go.err"
           for o in $seen; do
+            case "$o" in
+              luxfi|luxwallet|zap-proto)
+                if grep -q "github[.]com/${o}/" "$GOMOD" 2>/dev/null && [ -n "${HANZO_API_TOKEN:-}" ]; then
+                  printf '[url "https://x-access-token:%s@git.hanzo.ai/%s/"]\n\tinsteadOf = https://github.com/%s/\n' "$HANZO_API_TOKEN" "$o" "$o" >> "$CFG"
+                  echo "github.com/$o modules routed via git.hanzo.ai/$o (IAM)"
+                  wrote=1
+                fi
+                continue
+                ;;
+            esac
             tok=""
             if [ "$o" = "$OWNER" ]; then
               tok=${GIT_TOKEN:-}
@@ -1932,10 +1955,15 @@ jobs:
                 tok=""; sed 's/^::error::/::warning::/' "$err" >&2
               fi
             fi
-            [ -n "$tok" ] || continue
-            printf '[url "https://x-access-token:%s@github.com/%s/"]\n\tinsteadOf = https://github.com/%s/\n' "$tok" "$o" "$o" >> "$CFG"
-            echo "github.com/$o modules authenticated"
-            wrote=1
+            if [ -n "$tok" ]; then
+              printf '[url "https://x-access-token:%s@github.com/%s/"]\n\tinsteadOf = https://github.com/%s/\n' "$tok" "$o" "$o" >> "$CFG"
+              echo "github.com/$o modules authenticated"
+              wrote=1
+            elif grep -q "github[.]com/${o}/" "$GOMOD" 2>/dev/null && [ -n "${HANZO_API_TOKEN:-}" ]; then
+              printf '[url "https://x-access-token:%s@git.hanzo.ai/%s/"]\n\tinsteadOf = https://github.com/%s/\n' "$HANZO_API_TOKEN" "$o" "$o" >> "$CFG"
+              echo "github.com/$o modules routed via git.hanzo.ai/$o (IAM fallback)"
+              wrote=1
+            fi
           done
 
           [ "$wrote" = 1 ] || { echo "no GitHub installation token — public modules only (the step that mints it says why)"; exit 0; }
@@ -1964,7 +1992,7 @@ jobs:
           if [ -n "${GOMOD:-}" ] && [ -f "$GOMOD" ] && [ -n "${seen:-}" ]; then
             priv=""
             for ns in $seen; do
-              for mv in $(grep -oE "github[.]com/${ns}/[a-z0-9._-]+ v[0-9][^ ]*" "$GOMOD" | tr ' ' '@' | sort -u); do
+              for mv in $(grep -oE "github[.]com/${ns}/[A-Za-z0-9._/-]+ v[0-9][^ ]*" "$GOMOD" | tr ' ' '@' | sort -u); do
                 m="${mv%@*}"; v="${mv##*@}"
                 code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://proxy.golang.org/${m}/@v/${v}.info" || echo 000)
                 [ "$code" = 200 ] || priv="${priv:+$priv,}${m}"
